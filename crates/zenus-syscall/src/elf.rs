@@ -51,11 +51,14 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
     let mut header_buf = [0u8; 64];
     node.fs.read(node.inode, 0, &mut header_buf)?;
 
+    if stat.size < core::mem::size_of::<Elf64Header>() as u64 { return None; }
     let header: &Elf64Header = unsafe { &*(header_buf.as_ptr() as *const Elf64Header) };
 
     if header.e_ident[..4] != ELF_MAGIC { return None; }
     if header.e_ident[4] != 2 { return None; }
     if header.e_machine != 0x3E { return None; }
+    let e_ehsize = header.e_ehsize as usize;
+    if e_ehsize != 0 && e_ehsize < core::mem::size_of::<Elf64Header>() { return None; }
 
     let phoff = header.e_phoff;
     let phentsize = header.e_phentsize as usize;
@@ -77,7 +80,9 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
     for phdr in phdrs {
         if phdr.p_type != PT_LOAD { continue; }
         let vaddr = phdr.p_vaddr & !0xFFF;
-        let end = (phdr.p_vaddr + phdr.p_memsz + 0xFFF) & !0xFFF;
+        if phdr.p_memsz > u64::MAX - phdr.p_vaddr { return None; }
+        let end = phdr.p_vaddr.checked_add(phdr.p_memsz).unwrap_or(u64::MAX);
+        let end = (end + 0xFFF) & !0xFFF;
         if end > max_addr { max_addr = end; }
 
         let file_off = phdr.p_offset;

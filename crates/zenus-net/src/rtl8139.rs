@@ -107,11 +107,17 @@ impl Rtl8139 {
         0
     }
 
-    fn new(io_base: u16, mac: [u8; 6], irq_line: u8) -> Self {
+    fn new(io_base: u16, mac: [u8; 6], irq_line: u8) -> Option<Self> {
         let virt = unsafe { RX_BUF.0.as_ptr() as u64 };
         let phys = Self::virt_to_phys(virt);
+        // RTL8139 is a 32-bit PCI device — can only DMA to <4GB
+        if phys == 0 || phys > 0xFFFF_FFFF {
+            let mut s = SerialPort::new(0x3F8);
+            s.write_str("[RTL8139] ERROR: RX buffer phys addr >4GB or invalid\n");
+            return None;
+        }
 
-        Rtl8139 {
+        Some(Rtl8139 {
             io_base,
             mac,
             ip: [10, 0, 2, 15],
@@ -122,7 +128,7 @@ impl Rtl8139 {
             tx_cur: 0,
             link_up: false,
             irq_line,
-        }
+        })
     }
 
     fn read_mac_from_nic(io_base: u16) -> [u8; 6] {
@@ -187,7 +193,10 @@ impl Rtl8139 {
                     }
                 }
 
-                let nic = Self::new(io_base, mac, irq_line);
+                let nic = match Self::new(io_base, mac, irq_line) {
+                    Some(n) => n,
+                    None => { return None; }
+                };
                 NIC_IO_BASE.store(io_base, core::sync::atomic::Ordering::Relaxed);
                 zenus_arch::interrupts::handler::set_nic_irq_handler(Self::handle_irq);
                 unsafe {
@@ -430,6 +439,11 @@ impl Rtl8139 {
         let isr = isr_port.read();
         if isr != 0 {
             isr_port.write(isr);
+            if (isr & ISR_ROK) != 0 {
+                if let Some(ref mut nic) = RTL_IFACE {
+                    nic.process_rx();
+                }
+            }
         }
     }
 }

@@ -217,15 +217,24 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64) 
         task.heap_brk = heap_brk;
 
         let mut tasks = TASKS.lock();
+        let mut placed = false;
         for i in 0..MAX_TASKS {
             if tasks.tasks[i].is_none() {
                 tasks.tasks[i] = Some(task);
+                placed = true;
+                let new_count = (i + 1) as u32;
+                if new_count > TASK_COUNT.load(Ordering::Relaxed) {
+                    TASK_COUNT.store(new_count, Ordering::Release);
+                }
                 break;
             }
         }
+        if !placed {
+            dealloc_stack(stack_base, stack_size);
+            return 0;
+        }
     }
 
-    TASK_COUNT.fetch_add(1, Ordering::SeqCst);
     CPU_TASK_COUNT[cpu as usize].fetch_add(1, Ordering::SeqCst);
     id
 }
@@ -270,6 +279,10 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
             if tasks.tasks[i].is_none() {
                 tasks.tasks[i] = Some(task);
                 placed = true;
+                let new_count = (i + 1) as u32;
+                if new_count > TASK_COUNT.load(Ordering::Relaxed) {
+                    TASK_COUNT.store(new_count, Ordering::Release);
+                }
                 break;
             }
         }
@@ -280,7 +293,6 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
     }
     wb!(b'I');
 
-    TASK_COUNT.fetch_add(1, Ordering::SeqCst);
     wb!(b'J');
     CPU_TASK_COUNT[cpu as usize].fetch_add(1, Ordering::SeqCst);
     wb!(b'K');
@@ -308,6 +320,10 @@ unsafe fn alloc_stack(size: usize) -> (u64, core::alloc::Layout) {
 
 pub fn yield_now() {
     let cpu = current_cpu();
+    if (cpu as usize) >= MAX_CPUS {
+        x86_64::instructions::hlt();
+        return;
+    }
     let count = TASK_COUNT.load(Ordering::Acquire);
     if count <= 1 {
         x86_64::instructions::hlt();
@@ -334,6 +350,18 @@ pub fn yield_now() {
         return;
     }
 
+    if let Some(ref next_task) = tasks.tasks[next as usize] {
+        if next_task.stack_alloc != 0 && next_task.stack_size > 0 {
+            let rsp = next_task.rsp;
+            let stack_bottom = next_task.stack_alloc;
+            let stack_top = stack_bottom + next_task.stack_size as u64;
+            if rsp < stack_bottom || rsp > stack_top {
+                drop(tasks);
+                return;
+            }
+        }
+    }
+
     tasks.tasks[current as usize].as_mut().unwrap().state = TaskState::Ready;
     tasks.tasks[next as usize].as_mut().unwrap().state = TaskState::Running;
     tasks.tasks[next as usize].as_mut().unwrap().ticks_left = TIME_SLICE;
@@ -354,7 +382,8 @@ pub fn check_yield() {
 }
 
 fn find_next_ready(tasks: &TaskArray, current: u32, cpu: u32) -> u32 {
-    let count = TASK_COUNT.load(Ordering::Acquire);
+    let count = (TASK_COUNT.load(Ordering::Acquire) as usize).min(MAX_TASKS) as u32;
+    if count == 0 { return 0; }
     for i in 1..count {
         let idx = (current + i) % count;
         if let Some(ref task) = tasks.tasks[idx as usize] {
@@ -477,6 +506,9 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     unsafe { apic_timer_eoi(); }
 
     let cpu = current_cpu();
+    if (cpu as usize) >= MAX_CPUS {
+        return 0;
+    }
     let count = TASK_COUNT.load(Ordering::Acquire);
     if count <= 1 {
         return 0;
@@ -513,6 +545,17 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 
     if tasks.tasks[next as usize].is_none() {
         return 0;
+    }
+
+    if let Some(ref next_task) = tasks.tasks[next as usize] {
+        if next_task.stack_alloc != 0 && next_task.stack_size > 0 {
+            let rsp = next_task.rsp;
+            let stack_bottom = next_task.stack_alloc;
+            let stack_top = stack_bottom + next_task.stack_size as u64;
+            if rsp < stack_bottom || rsp > stack_top {
+                return 0;
+            }
+        }
     }
 
     tasks.tasks[current as usize].as_mut().unwrap().state = TaskState::Ready;
@@ -552,6 +595,26 @@ pub fn ap_idle() -> ! {
 }
 
 fn task_exit() {
+    // Free stack before halting
+    let cpu = current_cpu();
+    let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    let mut tasks = unsafe { TASKS.lock() };
+    if let Some(ref mut task) = tasks.tasks[current as usize] {
+        if task.stack_alloc != 0 && task.stack_size > 0 {
+            unsafe {
+                let layout = core::alloc::Layout::from_size_align(
+                    task.stack_size as usize, 16,
+                ).unwrap();
+                alloc::alloc::dealloc(task.stack_alloc as *mut u8, layout);
+            }
+            task.stack_alloc = 0;
+            task.stack_size = 0;
+        }
+        task.state = TaskState::Terminated;
+        CPU_TASK_COUNT[task.cpu as usize].fetch_sub(1, Ordering::SeqCst);
+        tasks.tasks[current as usize] = None;
+    }
+    drop(tasks);
     loop { x86_64::instructions::hlt(); }
 }
 
@@ -572,18 +635,30 @@ pub fn kill_task(id: u64) -> bool {
     for i in 0..MAX_TASKS {
         if let Some(ref mut task) = tasks.tasks[i] {
             if task.id == id && task.is_active() {
-                if task.stack_alloc != 0 && task.stack_size > 0 {
-                    unsafe {
-                        let layout = core::alloc::Layout::from_size_align(
-                            task.stack_size as usize, 16,
-                        ).unwrap();
-                        alloc::alloc::dealloc(task.stack_alloc as *mut u8, layout);
+                // Don't free stack if task is Running on another CPU (UAF risk)
+                if task.state != TaskState::Running {
+                    if task.stack_alloc != 0 && task.stack_size > 0 {
+                        unsafe {
+                            let layout = core::alloc::Layout::from_size_align(
+                                task.stack_size as usize, 16,
+                            ).unwrap();
+                            alloc::alloc::dealloc(task.stack_alloc as *mut u8, layout);
+                        }
                     }
                 }
                 CPU_TASK_COUNT[task.cpu as usize].fetch_sub(1, Ordering::SeqCst);
                 task.stack_alloc = 0;
                 task.stack_size = 0;
                 task.state = TaskState::Terminated;
+                tasks.tasks[i] = None;
+                let mut new_count = 1u32;
+                for scan in (1..MAX_TASKS).rev() {
+                    if tasks.tasks[scan].is_some() {
+                        new_count = (scan + 1) as u32;
+                        break;
+                    }
+                }
+                TASK_COUNT.store(new_count, Ordering::Release);
                 return true;
             }
         }

@@ -81,7 +81,9 @@ pub fn journal_write(target_block: u64, data: &[u8]) -> bool {
     let copy_len = core::cmp::min(data.len(), 512);
     sector_buf[..copy_len].copy_from_slice(&data[..copy_len]);
 
+    let max_data_block = unsafe { JNL_START_BLOCK + 1 + MAX_ENTRIES as u64 - 1 };
     let data_block = unsafe { JNL_START_BLOCK + 1 + idx as u64 };
+    if data_block > max_data_block { return false; }
     if !bc_write(unsafe { JNL_DEV_ID }, data_block, &sector_buf) {
         return false;
     }
@@ -114,13 +116,16 @@ pub fn journal_commit() -> bool {
         None => return false,
     };
 
-    for i in 0..hdr.num_entries as usize {
+    let max_commit_entries = core::cmp::min(hdr.num_entries as usize, MAX_ENTRIES);
+    for i in 0..max_commit_entries {
         let target = hdr.targets[i] as u64;
         if target == 0 {
             continue;
         }
         let mut data = [0u8; 512];
+        let max_data_block = unsafe { JNL_START_BLOCK + 1 + MAX_ENTRIES as u64 - 1 };
         let data_block = unsafe { JNL_START_BLOCK + 1 + i as u64 };
+        if data_block > max_data_block { return false; }
         if !bc_read(unsafe { JNL_DEV_ID }, data_block, &mut data) {
             return false;
         }
@@ -139,7 +144,7 @@ pub fn journal_commit() -> bool {
         }
         None => return false,
     };
-    let _ = write_header(&hdr);
+    write_header(&hdr);
     bc_flush();
 
     unsafe { JNL_ACTIVE = false; }

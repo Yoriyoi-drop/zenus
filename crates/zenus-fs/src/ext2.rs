@@ -187,6 +187,7 @@ impl Ext2Fs {
     }
 
     fn read_inode_raw(&self, inode: u64) -> Option<RawInode> {
+        if inode == 0 || inode > self.inodes_count as u64 { return None; }
         let group = ((inode - 1) / self.inodes_per_group as u64) as u32;
         let local_idx = ((inode - 1) % self.inodes_per_group as u64) as u32;
         let bgd = self.read_bgdt(group)?;
@@ -371,6 +372,7 @@ impl Ext2Fs {
     }
 
     fn write_inode_raw(&self, inode: u64, raw: &RawInode) -> bool {
+        if inode == 0 || inode > self.inodes_count as u64 { return false; }
         let group = ((inode - 1) / self.inodes_per_group as u64) as u32;
         let local_idx = ((inode - 1) % self.inodes_per_group as u64) as u32;
         let bgd = match self.read_bgdt(group) {

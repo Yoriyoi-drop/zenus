@@ -5,7 +5,7 @@ use zenus_sync::spinlock::SpinLock;
 
 use crate::paging::PAGE_SIZE;
 
-const FREE_STACK_SIZE: usize = 256;
+const FREE_STACK_SIZE: usize = 4096;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -122,8 +122,13 @@ impl FrameAllocator {
         if self.free_count < FREE_STACK_SIZE {
             self.free_stack[self.free_count] = addr.as_u64();
             self.free_count += 1;
-            self.used_memory = self.used_memory.saturating_sub(PAGE_SIZE as u64);
+        } else {
+            // Free stack full — try to move next_free back to reuse this frame
+            if addr.as_u64() < self.next_free {
+                self.next_free = addr.as_u64();
+            }
         }
+        self.used_memory = self.used_memory.saturating_sub(PAGE_SIZE as u64);
     }
 
     pub fn used_memory(&self) -> u64 { self.used_memory }

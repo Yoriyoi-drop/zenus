@@ -97,9 +97,8 @@ impl FileSystem for DevFs {
             let idx = (inode - BLOCK_INODE_BASE) as usize;
             unsafe {
                 if let Some((_, ops)) = &BLOCK_DEVS[idx] {
-                    let sector = offset / 512;
-                    let aligned = sector * 512;
-                    (ops.read)(aligned, buf);
+                    let lba = offset / 512;
+                    (ops.read)(lba, buf);
                     return Some(buf.len() as u64);
                 }
             }
@@ -127,9 +126,8 @@ impl FileSystem for DevFs {
                 let idx = (inode - BLOCK_INODE_BASE) as usize;
                 unsafe {
                     if let Some((_, ops)) = &BLOCK_DEVS[idx] {
-                        let sector = offset / 512;
-                        let aligned = sector * 512;
-                        (ops.write)(aligned, buf);
+                        let lba = offset / 512;
+                        (ops.write)(lba, buf);
                         return Some(buf.len() as u64);
                     }
                 }

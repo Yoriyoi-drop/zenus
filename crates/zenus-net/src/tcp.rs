@@ -693,9 +693,10 @@ pub fn poll_retransmit(iface_idx: usize) {
                 let tx_data = &tcb.tx_data[..tcb.tx_data_len];
                 let payload = &tx_data[..core::cmp::min(tx_data.len(), 1460)];
                 let seg_len = 20 + payload.len();
+                let retransmit_seq = send_una.saturating_sub(tcb.tx_data_len as u32).saturating_add(payload.len() as u32);
                 let mut seg = build_segment(
                     src_port, dst_port,
-                    send_nxt - (tcb.tx_data_len as u32) + payload.len() as u32,
+                    retransmit_seq,
                     tcb.recv_nxt,
                     TCP_FLAG_ACK | TCP_FLAG_PSH,
                     tcb.recv_window,

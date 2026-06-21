@@ -30,8 +30,16 @@ extern "C" {
 
 pub fn init() {
     enable_sse();
+    enable_nxe();
     enable_syscall();
     gdt::init();
+}
+
+fn enable_nxe() {
+    let mut efer = Msr::new(0xC000_0080);
+    unsafe {
+        efer.write(efer.read() | (1 << 11)); // set EFER.NXE
+    }
 }
 
 pub(crate) fn enable_sse() {

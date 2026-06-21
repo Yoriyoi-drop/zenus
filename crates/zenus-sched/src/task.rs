@@ -60,7 +60,7 @@ impl Task {
             priority: 128,
             rsp: stack,
             kernel_stack: stack,
-            ticks_left: 0,
+            ticks_left: 50,
             stack_alloc: 0,
             stack_size: 0,
             cpu: 0,

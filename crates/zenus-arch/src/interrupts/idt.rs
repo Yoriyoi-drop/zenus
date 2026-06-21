@@ -237,14 +237,86 @@ extern "x86-interrupt" fn virtualization_handler(frame: InterruptStackFrame) {
     kpanic("Virtualization", frame);
 }
 
-fn kpanic(name: &str, frame: InterruptStackFrame) {
+fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
+    let rip = frame.instruction_pointer.as_u64();
+    let rsp = frame.stack_pointer.as_u64();
+    let cs_idx = frame.code_segment.index() as u64;
+    let rflags = frame.cpu_flags.bits();
+
+    let rax: u64; let rbx: u64; let rcx: u64; let rdx: u64;
+    let rsi: u64; let rdi: u64; let rbp: u64; let r8: u64;
+    let r9: u64; let r10: u64; let r11: u64; let r12: u64;
+    let r13: u64; let r14: u64; let r15: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rax", out(reg) rax);
+        core::arch::asm!("mov {}, rbx", out(reg) rbx);
+        core::arch::asm!("mov {}, rcx", out(reg) rcx);
+        core::arch::asm!("mov {}, rdx", out(reg) rdx);
+        core::arch::asm!("mov {}, rsi", out(reg) rsi);
+        core::arch::asm!("mov {}, rdi", out(reg) rdi);
+        core::arch::asm!("mov {}, rbp", out(reg) rbp);
+        core::arch::asm!("mov {}, r8", out(reg) r8);
+        core::arch::asm!("mov {}, r9", out(reg) r9);
+        core::arch::asm!("mov {}, r10", out(reg) r10);
+        core::arch::asm!("mov {}, r11", out(reg) r11);
+        core::arch::asm!("mov {}, r12", out(reg) r12);
+        core::arch::asm!("mov {}, r13", out(reg) r13);
+        core::arch::asm!("mov {}, r14", out(reg) r14);
+        core::arch::asm!("mov {}, r15", out(reg) r15);
+    }
+
     let mut s = SerialPort::new(0x3F8);
     s.write_str("!!! ");
     s.write_str(name);
     s.write_str(" !!!\n");
     s.write_str("RIP: ");
-    s.write_hex(frame.instruction_pointer.as_u64());
+    s.write_hex(rip);
     s.write_str(" CS: ");
-    s.write_hex(frame.code_segment.index() as u64);
+    s.write_hex(cs_idx);
+    s.write_str(" RFLAGS: ");
+    s.write_hex(rflags);
+    s.write_str(" RSP: ");
+    s.write_hex(rsp);
     s.write_str("\n");
+
+    s.write_str("[CODE]\n");
+    for i in 0..16u64 {
+        let addr = rip.wrapping_add(i);
+        let byte: u8 = unsafe { core::ptr::read_volatile(addr as *const u8) };
+        s.write_hex(byte as u64);
+        s.write_str(" ");
+    }
+    s.write_str("\n");
+
+    s.write_str(" RAX="); s.write_hex(rax);
+    s.write_str(" RBX="); s.write_hex(rbx);
+    s.write_str(" RCX="); s.write_hex(rcx);
+    s.write_str(" RDX="); s.write_hex(rdx);
+    s.write_str("\n RSI="); s.write_hex(rsi);
+    s.write_str(" RDI="); s.write_hex(rdi);
+    s.write_str(" RBP="); s.write_hex(rbp);
+    s.write_str(" R8=");  s.write_hex(r8);
+    s.write_str(" R9=");  s.write_hex(r9);
+    s.write_str("\n R10="); s.write_hex(r10);
+    s.write_str(" R11="); s.write_hex(r11);
+    s.write_str(" R12="); s.write_hex(r12);
+    s.write_str(" R13="); s.write_hex(r13);
+    s.write_str(" R14="); s.write_hex(r14);
+    s.write_str(" R15="); s.write_hex(r15);
+    s.write_str("\n");
+
+    s.write_str("[STACK]\n");
+    for i in 0..20u64 {
+        let p = rsp.wrapping_add(i * 8);
+        let val: u64 = unsafe { core::ptr::read_volatile(p as *const u64) };
+        s.write_hex(p);
+        s.write_str(": ");
+        s.write_hex(val);
+        if val < 0x1000 && val != 0 {
+            s.write_str(" <--- small");
+        }
+        s.write_str("\n");
+    }
+
+    loop { x86_64::instructions::hlt(); }
 }

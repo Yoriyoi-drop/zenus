@@ -7,7 +7,7 @@ use zenus_sync::irq_guard::IrqGuard;
 const HEAP_SIZE: usize = 1024 * 1024 * 4;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
-const HEADER_SIZE: usize = 16;
+const HEADER_SIZE: usize = core::mem::size_of::<BlockHeader>();
 const MIN_BLOCK: usize = 32;
 const MAGIC_FREE: u64 = 0x46524545_424C4F43;
 const MAGIC_USED: u64 = 0x55534544_424C4F43;
@@ -74,10 +74,8 @@ impl FreeListAllocator {
                 let needed = pad + size;
 
                 if needed <= block_size {
-                    // Store padding so dealloc can find the real header
-                    if pad > 0 {
-                        *(aligned_data as *mut u16) = pad as u16;
-                    }
+                    let pad_ptr = (aligned_data as *mut u16).sub(1);
+                    unsafe { *pad_ptr = pad as u16; }
 
                     let remaining = block_size - needed;
                     if remaining >= HEADER_SIZE + MIN_BLOCK {
@@ -126,7 +124,7 @@ impl FreeListAllocator {
 
         if ptr.is_null() { return; }
 
-        let pad = unsafe { *(ptr as *const u16) } as usize;
+        let pad = unsafe { *((ptr as *const u16).sub(1)) } as usize;
         let block = (ptr as usize - HEADER_SIZE - pad) as *mut BlockHeader;
 
         let block_size;

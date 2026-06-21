@@ -314,7 +314,9 @@ pub extern "C" fn entry() -> ! {
         }
 
         // 11b. Initialize journal on device 0 at blocks 3000-3015
-        let _ = zenus_fs::journal::journal_replay(0, 3000);
+        if !zenus_fs::journal::journal_replay(0, 3000) {
+            both!(serial, hhdm_offset, "[WARN] Journal replay failed\n");
+        }
         if zenus_fs::journal::journal_init(0, 3000, 16) {
             both!(serial, hhdm_offset, "[OK] Journal initialized (blocks 3000-3015)\n");
         } else {

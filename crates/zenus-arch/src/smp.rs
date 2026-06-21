@@ -135,6 +135,7 @@ pub fn cpu_count() -> u32 {
 pub fn current_cpu() -> u32 {
     let count = CPU_COUNT.load(Ordering::Relaxed) as usize;
     if count == 0 { return 0; }
+    if count > MAX_CPUS { return 0; }
     let apic_id = crate::interrupts::apic::current_apic_id();
     unsafe {
         for i in 0..count {
