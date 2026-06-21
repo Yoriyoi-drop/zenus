@@ -2,5 +2,5 @@
 
 extern crate alloc;
 
-pub mod syscall;
 pub mod elf;
+pub mod syscall;

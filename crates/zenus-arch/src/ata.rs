@@ -121,8 +121,8 @@ fn extract_model(data: &[u16; 256]) -> [u8; 40] {
     let mut model = [0u8; 40];
     for i in 0..20 {
         let w = data[27 + i];
-        model[i * 2] = (w >> 8) as u8;
-        model[i * 2 + 1] = (w & 0xFF) as u8;
+        model[i * 2] = (w & 0xFF) as u8;
+        model[i * 2 + 1] = (w >> 8) as u8;
     }
     model
 }
@@ -131,7 +131,7 @@ fn model_str(model: &[u8; 40]) -> &str {
     let end = model.iter().rposition(|&b| b != 0 && b != ' ' as u8)
         .map(|i| i + 1)
         .unwrap_or(0);
-    unsafe { core::str::from_utf8_unchecked(&model[..end]) }
+    core::str::from_utf8(&model[..end]).unwrap_or("<non-utf8>")
 }
 
 pub fn init() {

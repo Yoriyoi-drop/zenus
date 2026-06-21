@@ -7,20 +7,20 @@ fn ioapic_select(reg: u8) {
     let hhdm = limine::hhdm_offset();
     let base = (IOAPIC_PHYS_BASE + hhdm) as *mut u32;
     unsafe {
-        base.write_unaligned(reg as u32);
+        base.write_volatile(reg as u32);
     }
 }
 
 fn ioapic_read(reg: u8) -> u32 {
     ioapic_select(reg);
     let data_ptr = (IOAPIC_PHYS_BASE + limine::hhdm_offset() + 0x10) as *mut u32;
-    unsafe { data_ptr.read_unaligned() }
+    unsafe { data_ptr.read_volatile() }
 }
 
 fn ioapic_write(reg: u8, val: u32) {
     ioapic_select(reg);
     let data_ptr = (IOAPIC_PHYS_BASE + limine::hhdm_offset() + 0x10) as *mut u32;
-    unsafe { data_ptr.write_unaligned(val); }
+    unsafe { data_ptr.write_volatile(val); }
 }
 
 static IOAPIC_INITIALIZED: AtomicBool = AtomicBool::new(false);

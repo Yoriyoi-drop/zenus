@@ -154,7 +154,6 @@ impl Rtl8139 {
                 if dev.vendor_id == RTL_VENDOR && dev.device_id == RTL_DEVICE {
                     let io_base = (dev.bar0 & 0xFFFFFFF0) as u16;
                     let irq_line = dev.interrupt_line;
-                    let irq_pin = dev.interrupt_pin;
 
                     zenus_arch::pci::enable_bus_master(dev.bus, dev.device, dev.function);
 

@@ -7,6 +7,8 @@ const ARP_REPLY: u16 = 0x0002;
 
 const ARP_CACHE_SIZE: usize = 16;
 
+static mut ARP_GATEWAY: [u8; 4] = [10, 0, 2, 2];
+
 #[derive(Clone, Copy)]
 struct ArpEntry {
     ip: [u8; 4],
@@ -15,6 +17,10 @@ struct ArpEntry {
 }
 
 static mut ARP_CACHE: [ArpEntry; ARP_CACHE_SIZE] = [ArpEntry { ip: [0; 4], mac: [0; 6], valid: false }; ARP_CACHE_SIZE];
+
+pub fn set_gateway(gw: [u8; 4]) {
+    unsafe { ARP_GATEWAY = gw; }
+}
 
 fn arp_lookup(target_ip: [u8; 4]) -> Option<[u8; 6]> {
     unsafe {
@@ -45,7 +51,7 @@ fn arp_insert(ip: [u8; 4], mac: [u8; 6]) {
         }
         // All slots full: evict a non-gateway entry if possible
         for i in 1..ARP_CACHE_SIZE {
-            if ARP_CACHE[i].ip != [10, 0, 2, 2] {
+            if ARP_CACHE[i].ip != ARP_GATEWAY {
                 ARP_CACHE[i] = ArpEntry { ip, mac, valid: true };
                 return;
             }

@@ -98,7 +98,7 @@ fn build_dhcp_msg(op: u8, xid: u32, ciaddr: [u8; 4], mac: &[u8; 6], msg_type: u8
     buf
 }
 
-pub fn handle_receive(iface_idx: usize, _src_ip: [u8; 4], packet: &[u8]) -> bool {
+pub fn handle_receive(_iface_idx: usize, _src_ip: [u8; 4], packet: &[u8]) -> bool {
     if packet.len() < 8 {
         return false;
     }

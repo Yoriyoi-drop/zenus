@@ -339,8 +339,8 @@ pub extern "C" fn entry() -> ! {
         unsafe { core::arch::asm!("mov dx, 0x3f8; mov al, '!'; out dx, al"); }
         both!(serial, hhdm_offset, "[OK] Shell task spawned\n");
 
-        // 13a. Spawn user-mode demo task
-        // let _user_tid = user_demo::spawn_user_demo();
+        // 13a. Spawn user-mode demo task with proper isolation
+        let _user_tid = user_demo::spawn_user_demo();
 
         both!(serial, hhdm_offset, "========================================\n");
         both!(serial, hhdm_offset, "  Zenus OS siap! Server mode aktif.\n");

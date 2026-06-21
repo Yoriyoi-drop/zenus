@@ -10,14 +10,14 @@ fn lapic_base() -> *mut u32 {
 fn lapic_read(reg: u32) -> u32 {
     unsafe {
         let addr = (lapic_base() as usize).wrapping_add(reg as usize);
-        (addr as *const u32).read_unaligned()
+        (addr as *const u32).read_volatile()
     }
 }
 
 fn lapic_write(reg: u32, val: u32) {
     unsafe {
         let addr = (lapic_base() as usize).wrapping_add(reg as usize);
-        (addr as *mut u32).write_unaligned(val);
+        (addr as *mut u32).write_volatile(val);
     }
 }
 

@@ -109,6 +109,7 @@ pub fn build_segment(
     payload: &[u8],
 ) -> [u8; 1500] {
     let mut seg = [0u8; 1500];
+    let payload_len = core::cmp::min(payload.len(), 1480);
     seg[0..2].copy_from_slice(&src_port.to_be_bytes());
     seg[2..4].copy_from_slice(&dst_port.to_be_bytes());
     seg[4..8].copy_from_slice(&seq.to_be_bytes());
@@ -116,7 +117,7 @@ pub fn build_segment(
     seg[12] = 0x50;
     seg[13] = flags;
     seg[14..16].copy_from_slice(&window.to_be_bytes());
-    seg[20..20 + payload.len()].copy_from_slice(payload);
+    seg[20..20 + payload_len].copy_from_slice(&payload[..payload_len]);
     seg
 }
 

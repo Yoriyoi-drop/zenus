@@ -118,6 +118,33 @@ pub fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool
     }
 }
 
+pub fn virt_to_phys_raw(cr3_raw: u64, virt: u64) -> Option<u64> {
+    let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
+    let cr3_phys = cr3_raw & !0xFFF;
+    let levels = [(4usize, 39), (3, 30), (2, 21), (1, 12)];
+    unsafe {
+        let mut table_virt = (cr3_phys + hhdm) as *const u64;
+        for &(level, shift) in &levels {
+            let idx = (virt >> shift) & 0x1FF;
+            let entry = *table_virt.add(idx as usize);
+            if (entry & 1) == 0 {
+                return None;
+            }
+            if (entry & 0x80) != 0 && level > 1 {
+                let page_bits = entry & 0x000FFFFFFFFFFFFF;
+                let huge_mask = !((1u64 << shift) - 1);
+                return Some((page_bits & huge_mask) | (virt & !huge_mask));
+            }
+            let next = entry & 0x000FFFFFFFFFF000;
+            if level == 1 {
+                return Some(next | (virt & 0xFFF));
+            }
+            table_virt = (next + hhdm) as *const u64;
+        }
+    }
+    None
+}
+
 pub fn create_address_space() -> Option<u64> {
     let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
     let cr3_phys = LEVEL4_PHYS.load(Ordering::Relaxed);

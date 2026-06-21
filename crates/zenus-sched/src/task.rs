@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT_UID: AtomicU32 = AtomicU32::new(0);
 static NEXT_GID: AtomicU32 = AtomicU32::new(0);

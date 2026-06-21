@@ -75,7 +75,7 @@ impl FreeListAllocator {
 
                 if needed <= block_size {
                     let pad_ptr = (aligned_data as *mut u16).sub(1);
-                    unsafe { *pad_ptr = pad as u16; }
+                    *pad_ptr = pad as u16;
 
                     let remaining = block_size - needed;
                     if remaining >= HEADER_SIZE + MIN_BLOCK {
