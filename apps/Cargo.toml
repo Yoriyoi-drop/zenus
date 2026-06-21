@@ -1,0 +1,26 @@
+[package]
+name = "zenus"
+version = "0.1.0"
+edition.workspace = true
+
+[package.metadata]
+description = "Zenus OS kernel entry point"
+
+[dependencies]
+zenus-arch = { path = "../crates/zenus-arch" }
+zenus-mem = { path = "../crates/zenus-mem" }
+zenus-sched = { path = "../crates/zenus-sched" }
+zenus-console = { path = "../crates/zenus-console" }
+zenus-sync = { path = "../crates/zenus-sync" }
+zenus-fs = { path = "../crates/zenus-fs" }
+zenus-net = { path = "../crates/zenus-net" }
+zenus-syscall = { path = "../crates/zenus-syscall" }
+x86_64 = { workspace = true }
+
+[features]
+smp = []
+testing = ["zenus-fs/testing", "zenus-mem/testing"]
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"

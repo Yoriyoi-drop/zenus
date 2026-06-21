@@ -1,0 +1,12 @@
+/target/
+/build/
+/test_kernel/
+/iso_root/
+/iso_root_test/
+*.iso
+*.img
+*.vcd
+*.tar
+*.log
+target/
+build/

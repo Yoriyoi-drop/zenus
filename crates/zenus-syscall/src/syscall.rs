@@ -1,0 +1,298 @@
+use core::fmt::Write;
+use zenus_console::serial::SerialPort;
+use zenus_fs::vfs;
+use zenus_sched::scheduler;
+
+mod fd;
+use fd::*;
+
+const SYS_READ: u64 = 0;
+const SYS_WRITE: u64 = 1;
+const SYS_OPEN: u64 = 2;
+const SYS_CLOSE: u64 = 3;
+const SYS_STAT: u64 = 4;
+const SYS_READDIR: u64 = 5;
+const SYS_LSEEK: u64 = 8;
+const SYS_IOCTL: u64 = 16;
+const SYS_DUP: u64 = 32;
+const SYS_NANOSLEEP: u64 = 35;
+const SYS_GETPID: u64 = 39;
+const SYS_BRK: u64 = 45;
+const SYS_EXIT: u64 = 60;
+const SYS_UNAME: u64 = 63;
+const SYS_GETUID: u64 = 100;
+const SYS_GETEUID: u64 = 101;
+const SYS_GETGID: u64 = 102;
+const SYS_GETEGID: u64 = 103;
+const SYS_SETUID: u64 = 104;
+const SYS_SETGID: u64 = 105;
+
+type SyscallFn = fn(u64, u64, u64, u64, u64, u64) -> u64;
+
+static SYSCALL_TABLE: [Option<SyscallFn>; 128] = init_table();
+
+const fn init_table() -> [Option<SyscallFn>; 128] {
+    let mut t: [Option<SyscallFn>; 128] = [None; 128];
+    t[SYS_READ as usize] = Some(sys_read);
+    t[SYS_WRITE as usize] = Some(sys_write);
+    t[SYS_OPEN as usize] = Some(sys_open);
+    t[SYS_CLOSE as usize] = Some(sys_close);
+    t[SYS_STAT as usize] = Some(sys_stat);
+    t[SYS_READDIR as usize] = Some(sys_readdir);
+    t[SYS_LSEEK as usize] = Some(sys_lseek);
+    t[SYS_IOCTL as usize] = Some(sys_ioctl);
+    t[SYS_DUP as usize] = Some(sys_dup);
+    t[SYS_NANOSLEEP as usize] = Some(sys_nanosleep);
+    t[SYS_GETPID as usize] = Some(sys_getpid);
+    t[SYS_BRK as usize] = Some(sys_brk);
+    t[SYS_EXIT as usize] = Some(sys_exit);
+    t[SYS_UNAME as usize] = Some(sys_uname);
+    t[SYS_GETUID as usize] = Some(sys_getuid);
+    t[SYS_GETEUID as usize] = Some(sys_geteuid);
+    t[SYS_GETGID as usize] = Some(sys_getgid);
+    t[SYS_GETEGID as usize] = Some(sys_getegid);
+    t[SYS_SETUID as usize] = Some(sys_setuid);
+    t[SYS_SETGID as usize] = Some(sys_setgid);
+    t
+}
+
+fn current_task() -> u64 {
+    scheduler::current_task_id()
+}
+
+fn sys_read(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if buf == 0 { return -1i64 as u64; }
+    let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count as usize) };
+    match fd_read(fd, slice) {
+        Some(n) => n,
+        None => -1i64 as u64,
+    }
+}
+
+fn sys_write(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if buf == 0 { return -1i64 as u64; }
+    let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count as usize) };
+    match fd_write(fd, slice) {
+        Some(n) => n,
+        None => -1i64 as u64,
+    }
+}
+
+fn sys_open(path_ptr: u64, _flags: u64, _mode: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let path = unsafe { core::ffi::CStr::from_ptr(path_ptr as *const i8) };
+    let path_str = match path.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1i64 as u64,
+    };
+    match fd_open(current_task(), path_str) {
+        Some(fd) => fd,
+        None => -1i64 as u64,
+    }
+}
+
+fn sys_close(fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if fd <= 2 { return -1i64 as u64; }
+    if fd_close(fd) { 0 } else { -1i64 as u64 }
+}
+
+#[repr(C)]
+struct StatBuf {
+    st_size: u64,
+    st_mode: u64,
+    st_ino: u64,
+}
+
+fn sys_stat(path_ptr: u64, stat_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let path = unsafe { core::ffi::CStr::from_ptr(path_ptr as *const i8) };
+    let path_str = match path.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1i64 as u64,
+    };
+
+    match vfs::open(path_str) {
+        Some(node) => {
+            let stat = node.fs.stat(node.inode);
+            let stat_buf = stat_ptr as *mut StatBuf;
+            unsafe {
+                (*stat_buf).st_size = stat.size;
+                (*stat_buf).st_mode = match stat.file_type {
+                    vfs::FileType::File => 0x81A4,
+                    vfs::FileType::Directory => 0x41ED,
+                    vfs::FileType::CharDevice => 0x21A4,
+                    _ => 0,
+                };
+                (*stat_buf).st_ino = stat.inode;
+            }
+            0
+        }
+        None => -1i64 as u64,
+    }
+}
+
+fn sys_readdir(fd: u64, buf: u64, buf_size: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let entries = fd_readdir(fd);
+    if entries.is_empty() { return 0; }
+
+    let dst = buf as *mut u8;
+    let max = buf_size as usize;
+    let mut written = 0u64;
+
+    for entry in entries {
+        if written as usize + 2 > max { break; }
+        let name_bytes = entry.name.as_bytes();
+        let name_len = name_bytes.len();
+        if written as usize + 1 + name_len + 1 > max { break; }
+
+        unsafe {
+            dst.add(written as usize).write(entry.file_type as u8);
+            written += 1;
+            dst.add(written as usize).write(name_len as u8);
+            written += 1;
+            if name_len > 0 {
+                core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst.add(written as usize), name_len);
+                written += name_len as u64;
+            }
+        }
+    }
+    written
+}
+
+fn sys_lseek(fd: u64, offset: u64, whence: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    match fd_seek(fd, offset as i64, whence) {
+        Some(pos) => pos,
+        None => -1i64 as u64,
+    }
+}
+
+fn sys_ioctl(fd: u64, request: u64, arg: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    match fd_stat(fd) {
+        Some(_) => {
+            let mut s = SerialPort::new(0x3F8);
+            let _ = write!(s, "[ioctl] fd={} req=0x{:x} arg=0x{:x}\n", fd, request, arg);
+            0
+        }
+        None => -1i64 as u64,
+    }
+}
+
+fn sys_dup(old_fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if old_fd > 2 {
+        match fd_dup(current_task(), old_fd) {
+            Some(new_fd) => new_fd,
+            None => -1i64 as u64,
+        }
+    } else {
+        old_fd // stdio stays the same
+    }
+}
+
+fn sys_nanosleep(sec: u64, nsec: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let mut s = SerialPort::new(0x3F8);
+    let _ = write!(s, "[sys] nanosleep {}s {}ns\n", sec, nsec);
+    let total_us = sec.saturating_mul(1_000_000).saturating_add(nsec / 1000);
+    for _ in 0..total_us {
+        for _ in 0..100 {
+            unsafe { core::arch::asm!("pause", options(nostack, preserves_flags)); }
+        }
+    }
+    0
+}
+
+fn sys_getpid(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    current_task()
+}
+
+fn sys_brk(addr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let task = scheduler::current_task_id();
+    let heap_start = scheduler::get_task_heap_brk(task);
+    if addr == 0 {
+        return heap_start;
+    }
+    if addr < heap_start {
+        return -1i64 as u64;
+    }
+    // Update heap_brk for the task
+    scheduler::set_task_heap_brk(task, addr);
+    addr
+}
+
+fn sys_exit(_fd: u64, _buf: u64, _count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let tid = current_task();
+    if tid > 0 {
+        fd_close_all_for_task(tid);
+        scheduler::kill_task(tid);
+    }
+    let mut s = SerialPort::new(0x3F8);
+    let _ = write!(s, "[sys] task {} exit\n", tid);
+    loop { unsafe { core::arch::asm!("hlt", options(nostack, preserves_flags)); } }
+}
+
+#[repr(C)]
+struct UtsName {
+    sysname: [u8; 65],
+    nodename: [u8; 65],
+    release: [u8; 65],
+    version: [u8; 65],
+    machine: [u8; 65],
+}
+
+fn sys_uname(buf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if buf == 0 { return -1i64 as u64; }
+    let uts = buf as *mut UtsName;
+    unsafe {
+        copy_str_to_fixed(&mut (*uts).sysname, "Zenus");
+        copy_str_to_fixed(&mut (*uts).nodename, "zenus");
+        copy_str_to_fixed(&mut (*uts).release, "0.1.0");
+        copy_str_to_fixed(&mut (*uts).version, "#1 Tue Jun 9 2026");
+        copy_str_to_fixed(&mut (*uts).machine, "x86_64");
+    }
+    0
+}
+
+fn sys_getuid(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    zenus_sched::scheduler::current_uid() as u64
+}
+
+fn sys_geteuid(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    zenus_sched::scheduler::current_euid() as u64
+}
+
+fn sys_getgid(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    zenus_sched::scheduler::current_gid() as u64
+}
+
+fn sys_getegid(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    zenus_sched::scheduler::current_egid() as u64
+}
+
+fn sys_setuid(uid: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if zenus_sched::scheduler::set_current_uid(uid as u32) { 0 } else { -1i64 as u64 }
+}
+
+fn sys_setgid(gid: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if zenus_sched::scheduler::set_current_gid(gid as u32) { 0 } else { -1i64 as u64 }
+}
+
+fn copy_str_to_fixed(dst: &mut [u8], s: &str) {
+    let len = s.len().min(dst.len() - 1);
+    dst[..len].copy_from_slice(&s.as_bytes()[..len]);
+    dst[len] = 0;
+}
+
+#[no_mangle]
+pub extern "C" fn syscall_dispatch(
+    num: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+) -> u64 {
+    if num >= 128 { return -1i64 as u64; }
+    match SYSCALL_TABLE[num as usize] {
+        Some(f) => f(arg1, arg2, arg3, 0, 0, 0),
+        None => {
+            let mut s = SerialPort::new(0x3F8);
+            let _ = write!(s, "[sys] unknown syscall {}\n", num);
+            -1i64 as u64
+        }
+    }
+}

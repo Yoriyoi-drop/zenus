@@ -1,0 +1,13 @@
+[package]
+name = "zenus-fs"
+version = "0.1.0"
+edition.workspace = true
+
+[features]
+testing = []
+
+[dependencies]
+x86_64 = { workspace = true }
+zenus-console = { path = "../zenus-console" }
+zenus-mem = { path = "../zenus-mem" }
+zenus-sync = { path = "../zenus-sync" }

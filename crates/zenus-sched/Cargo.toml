@@ -1,0 +1,11 @@
+[package]
+name = "zenus-sched"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+x86_64 = { workspace = true }
+zenus-arch = { path = "../zenus-arch" }
+zenus-console = { path = "../zenus-console" }
+zenus-mem = { path = "../zenus-mem" }
+zenus-sync = { path = "../zenus-sync" }

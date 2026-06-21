@@ -1,0 +1,12 @@
+[package]
+name = "zenus-syscall"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+zenus-arch = { path = "../zenus-arch" }
+zenus-console = { path = "../zenus-console" }
+zenus-fs = { path = "../zenus-fs" }
+zenus-mem = { path = "../zenus-mem" }
+zenus-sched = { path = "../zenus-sched" }
+zenus-sync = { path = "../zenus-sync" }

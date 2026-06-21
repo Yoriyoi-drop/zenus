@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "apps",
+    "crates/zenus-arch",
+    "crates/zenus-mem",
+    "crates/zenus-sched",
+    "crates/zenus-console",
+    "crates/zenus-sync",
+    "crates/zenus-fs",
+    "crates/zenus-net",
+    "crates/zenus-syscall",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+x86_64 = "0.15"
