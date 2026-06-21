@@ -147,6 +147,9 @@ impl Ext2Fs {
         };
 
         let log_block_size = raw_sb.log_block_size;
+        if log_block_size > 6 {
+            return None;
+        }
         let block_size = (1024u64) << log_block_size;
         let blocks_per_group = raw_sb.blocks_per_group;
         let inodes_per_group = raw_sb.inodes_per_group;
@@ -233,13 +236,19 @@ impl Ext2Fs {
             return Some(raw.block[block_idx as usize]);
         }
 
-        if block_idx == 12 && raw.block[12] != 0 {
+        let indirect_idx = block_idx - 12;
+        let max_indirect = (self.block_size / 4) as u32;
+        if indirect_idx < max_indirect && raw.block[12] != 0 {
             let mut buf = [0u8; 512];
-            let sector = raw.block[12] as u64 * self.block_size / 512;
+            let byte_off = indirect_idx as u64 * 4;
+            let sector = raw.block[12] as u64 * self.block_size / 512 + byte_off / 512;
+            let off_in_sector = (byte_off % 512) as usize;
             if !bc_read(self.dev_id, sector, &mut buf) {
                 return None;
             }
-            return Some(unsafe { *(buf.as_ptr() as *const u32) });
+            let entry = unsafe { *(buf.as_ptr().add(off_in_sector) as *const u32) };
+            if entry == 0 { return None; }
+            return Some(entry);
         }
 
         None

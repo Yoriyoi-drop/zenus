@@ -45,8 +45,10 @@ pub fn is_initialized() -> bool {
 }
 
 pub fn route_irq(gsi: u8, vector: u8, apic_id: u8) -> bool {
-    // Mask the entry while programming
-    let rte_index = 0x10 + (gsi as u8 * 2);
+    let rte_index = match (0x10u16).checked_add((gsi as u16) * 2) {
+        Some(idx) if idx <= 0xFF => idx as u8,
+        _ => return false,
+    };
     // Low: vector | masked(1) during setup
     ioapic_write(rte_index, vector as u32 | (1 << 16));
     // High: destination APIC ID (physical mode)

@@ -187,7 +187,8 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64) 
 
     let aslr_user_rsp = if user_rsp == 0 {
         let slide = zenus_arch::random::get_random_page_aligned(0, 0x2000_0000u64);
-        0x7FFF_FFFF_F000u64 - slide
+        let rsp = 0x7FFF_FFFF_F000u64.saturating_sub(slide);
+        if rsp < 0x1000 { 0x7FFF_FFFF_F000u64 } else { rsp }
     } else {
         user_rsp
     };

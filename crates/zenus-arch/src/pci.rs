@@ -62,27 +62,17 @@ pub fn init() {
 }
 
 unsafe fn scan_all_buses() -> usize {
-    let mut count = 0;
-
     let header = pci_read_config(0, 0, 0, 0);
-    let multi = (header >> 23) & 1;
-    let _is_multi = multi == 1;
 
     if (header & 0x8000) == 0 {
         return 0;
     }
 
-    // Scan bus 0 for host bridge
-    for func in 0..8 {
-        let vid_did = pci_read_config(0, 0, func, 0);
-        if (vid_did & 0xFFFF) != 0xFFFF {
-            count += scan_bus(0, &mut count);
-        }
-    }
-    count
+    // Scan bus 0 once — PCI bridge recursive scanning not yet implemented
+    scan_bus(0)
 }
 
-unsafe fn scan_bus(bus: u8, _count: &mut usize) -> usize {
+unsafe fn scan_bus(bus: u8) -> usize {
     let mut devices = 0;
     for dev in 0..32 {
         let vid_did = pci_read_config(bus, dev, 0, 0);

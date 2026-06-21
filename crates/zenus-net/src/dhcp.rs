@@ -195,7 +195,7 @@ pub fn dhcp_start(iface_idx: usize) -> bool {
     };
 
     let mac = iface.mac;
-    let xid = u32::from_le_bytes([mac[0] as u32 as u8, mac[1] as u32 as u8, mac[2] as u32 as u8, mac[3] as u32 as u8]).wrapping_mul(0x01000001).wrapping_add(0xDEAD0001);
+    let xid = u32::from_le_bytes([mac[0], mac[1], mac[2], mac[3]]).wrapping_mul(0x01000001).wrapping_add(0xDEAD0001);
     unsafe { XID = xid; }
 
     let bcast_ip = [255u8; 4];

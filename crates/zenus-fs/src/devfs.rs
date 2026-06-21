@@ -98,8 +98,10 @@ impl FileSystem for DevFs {
             unsafe {
                 if let Some((_, ops)) = &BLOCK_DEVS[idx] {
                     let lba = offset / 512;
-                    (ops.read)(lba, buf);
-                    return Some(buf.len() as u64);
+                    if (ops.read)(lba, buf) {
+                        return Some(buf.len() as u64);
+                    }
+                    return None;
                 }
             }
         }

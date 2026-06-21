@@ -188,7 +188,7 @@ pub fn read_sectors(dev_idx: usize, lba: u64, count: u16, buf: &mut [u8]) -> boo
         None => return false,
     };
 
-    if (lba as u64 + count as u64) > dev.lba_sectors {
+    if count == 0 || lba > dev.lba_sectors || dev.lba_sectors - lba < count as u64 {
         return false;
     }
     if buf.len() < (count as usize) * SECTOR_SIZE {
@@ -235,7 +235,7 @@ pub fn write_sectors(dev_idx: usize, lba: u64, count: u16, buf: &[u8]) -> bool {
         None => return false,
     };
 
-    if (lba as u64 + count as u64) > dev.lba_sectors {
+    if count == 0 || lba > dev.lba_sectors || dev.lba_sectors - lba < count as u64 {
         return false;
     }
     if buf.len() < (count as usize) * SECTOR_SIZE {

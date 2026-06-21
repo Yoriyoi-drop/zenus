@@ -691,13 +691,11 @@ pub fn poll_retransmit(iface_idx: usize) {
                 seg[17] = (csum & 0xFF) as u8;
                 ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..20]);
             } else {
-                let tx_data = &tcb.tx_data[..tcb.tx_data_len];
-                let payload = &tx_data[..core::cmp::min(tx_data.len(), 1460)];
+                let payload = &tcb.tx_data[..core::cmp::min(tcb.tx_data_len, 1460)];
                 let seg_len = 20 + payload.len();
-                let retransmit_seq = send_una.saturating_sub(tcb.tx_data_len as u32).saturating_add(payload.len() as u32);
                 let mut seg = build_segment(
                     src_port, dst_port,
-                    retransmit_seq,
+                    send_una,
                     tcb.recv_nxt,
                     TCP_FLAG_ACK | TCP_FLAG_PSH,
                     tcb.recv_window,
@@ -730,7 +728,8 @@ pub fn send_data(conn: usize, data: &[u8]) -> bool {
             _ => return false,
         };
 
-        let copy_len = core::cmp::min(data.len(), tcb.tx_data.len() - tcb.tx_data_len);
+        let available = tcb.tx_data.len().saturating_sub(tcb.tx_data_len);
+        let copy_len = core::cmp::min(data.len(), available);
         if copy_len > 0 {
             tcb.tx_data[tcb.tx_data_len..tcb.tx_data_len + copy_len].copy_from_slice(&data[..copy_len]);
             tcb.tx_data_len += copy_len;

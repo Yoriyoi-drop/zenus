@@ -383,7 +383,8 @@ impl Shell {
         let snap = zenus_console::log::dmesg_snapshot();
         for i in 0..snap.count {
             let entry = &snap.entries[i];
-            let msg = core::str::from_utf8(&entry.msg[..entry.len as usize]).unwrap_or("");
+            let len = core::cmp::min(entry.len as usize, entry.msg.len());
+            let msg = core::str::from_utf8(&entry.msg[..len]).unwrap_or("");
             self.serial.write_str(entry.level.prefix());
             self.serial.write_str(" ");
             self.serial.write_str(msg);
