@@ -674,7 +674,7 @@ pub fn reap_terminated_stacks() {
     for i in 0..list.count {
         if let Some(ts) = list.stacks[i].take() {
             if let Ok(layout) = core::alloc::Layout::from_size_align(ts.size, 16) {
-                alloc::alloc::dealloc(ts.base as *mut u8, layout);
+                unsafe { alloc::alloc::dealloc(ts.base as *mut u8, layout); }
             }
         }
     }
@@ -697,12 +697,13 @@ pub fn task_exit() {
     if let (Some(sa), Some(ss), Some(tc)) = (stack_alloc, stack_size, task_cpu) {
         if sa != 0 && ss > 0 {
             let mut list = TERMINATED_STACKS.lock();
-            if list.count < 64 {
-                list.stacks[list.count] = Some(TerminatedStack {
+            let idx = list.count;
+            if idx < 64 {
+                list.stacks[idx] = Some(TerminatedStack {
                     base: sa,
                     size: ss as usize,
                 });
-                list.count += 1;
+                list.count = idx + 1;
             }
             drop(list);
         }

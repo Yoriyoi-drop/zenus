@@ -209,7 +209,7 @@ impl Ext2Fs {
 
         let inode_size = self.inode_size as usize;
         let needed_sectors = (offset_in_sector + inode_size + 511) / 512;
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; 2048];
         for i in 0..needed_sectors as u64 {
             if !bc_read(self.dev_id, sector + i, &mut buf[i as usize * 512..(i as usize + 1) * 512]) {
                 return None;
@@ -402,7 +402,7 @@ impl Ext2Fs {
         let offset_in_sector = (inode_offset % 512) as usize;
 
         let raw_size = core::mem::size_of::<RawInode>();
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; 2048];
         let inode_read_size = core::cmp::max(raw_size, self.inode_size as usize);
         let needed_sectors = (offset_in_sector + inode_read_size + 511) / 512;
         for i in 0..needed_sectors as u64 {
