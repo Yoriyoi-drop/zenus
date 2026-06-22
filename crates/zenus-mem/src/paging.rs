@@ -168,7 +168,11 @@ pub fn create_address_space() -> Option<u64> {
         }
     }
 
-    let flags = get_level4_addr_raw() & 0xFFF;
+    // Only preserve PCD (bit 4) and PWT (bit 3), which are cache-control bits.
+    // Explicitly zero out PCIDE (bit 11), ignored bits 5-10, and bits 0-2.
+    // This prevents caching attributes meant for kernel CR3 from leaking
+    // into user address-space page walks.
+    let flags = get_level4_addr_raw() & (0b11000u64);
     Some(new_frame.as_u64() | flags)
 }
 

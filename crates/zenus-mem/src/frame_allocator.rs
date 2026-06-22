@@ -229,14 +229,21 @@ pub fn global_init(memory_map: &[MemoryRegion]) {
             }
         }
     }
-    // Exclude kernel/module pages (kind=6) from the frame allocator.
-    // Limine may report them as separate KERNEL_AND_MODULES entries.
-    // Without this, the allocator could hand out frames that overlap
-    // kernel image pages — corrupting .got, .data, or BSS on write.
+    // Exclude ALL non-usable regions from the frame allocator.
+    // KERNEL_AND_MODULES (6), ACPI_RECLAIMABLE (7), ACPI_NVS (10),
+    // MMIO, reserved, bootloader regions, etc. must be excluded
+    // to prevent the allocator from handing out frames that overlap
+    // kernel image, ACPI tables, or hardware MMIO pages.
     for entry in memory_map {
-        if entry.kind == 6 && entry.length > 0 {
+        let kind = entry.kind;
+        if kind != 0 && entry.length > 0 {
             fa.reserve_region(entry.base, entry.length);
         }
+    }
+    // Update total_memory to only count truly usable frames
+    fa.total_memory = 0;
+    for i in 0..fa.region_count {
+        fa.total_memory += fa.regions[i].length;
     }
     fa.next_free = if fa.region_count > 0 {
         let base = fa.regions[0].base;

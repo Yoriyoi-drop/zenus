@@ -112,8 +112,8 @@ core::arch::global_asm!(
     // Frame type detection via CS.RPL
     // [rsp] = RIP, [rsp+8] = CS, [rsp+16] = RFLAGS
     // For user: [rsp+24] = user_RSP, [rsp+32] = SS
-    "  mov rcx, [rsp + 8]",
-    "  test cl, 3",
+    // NOTE: use memory TEST to avoid corrupting restored RCX
+    "  test byte ptr [rsp + 8], 3",
     "  jnz 3f",
     // Kernel task (3-item frame: RIP, CS, RFLAGS)
     "  pop rax",
@@ -210,6 +210,12 @@ fn set_current_cpu_id(cpu: u32, idx: u32) {
 }
 
 pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64, heap_base: u64) -> u64 {
+    // Validate entry point: must be a canonical user-space address.
+    // Entry values in the 1-16MB range likely indicate a physical address
+    // was accidentally passed as the virtual entry point.
+    if entry < 0x1000 || entry >= 0x0000_8000_0000_0000 {
+        return 0;
+    }
     let (stack_base, _stack_layout) = unsafe { alloc_stack(stack_size) };
     if stack_base == 0 {
         return 0;
@@ -424,10 +430,11 @@ pub fn yield_now() {
     let save_rsp: *mut u64 = unsafe {
         &raw mut tasks.tasks[current as usize].as_mut().unwrap_unchecked().rsp
     };
-    drop(tasks);
-
-    // Close IRQ window immediately after lock release
+    // Close IRQ window BEFORE releasing the lock, so no interrupt
+    // handler can observe the TASKS array in an inconsistent state
+    // or steal a context switch via try_lock().
     x86_64::instructions::interrupts::disable();
+    drop(tasks);
 
     // Restore next task's user_rsp into PerCpu
     if next_user_rsp != 0 {

@@ -65,6 +65,11 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
     if phentsize != core::mem::size_of::<Elf64Phdr>() { return None; }
     if phoff + phnum * phentsize > data.len() { return None; }
 
+    // Validate entry is a canonical user-space virtual address
+    if header.e_entry < 0x1000 || header.e_entry >= 0x0000_8000_0000_0000 {
+        return None;
+    }
+
     let phdrs = unsafe {
         core::slice::from_raw_parts(data.as_ptr().add(phoff) as *const Elf64Phdr, phnum)
     };
@@ -191,6 +196,10 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
 /// Load a flat binary (raw .bin) at a fixed virtual address.
 /// Used for simple user-mode programs that don't have ELF headers.
 pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> {
+    // Validate entry is a canonical user-space virtual address, not a physical address
+    if entry < 0x1000 || entry >= 0x0000_8000_0000_0000 {
+        return None;
+    }
     let mut dbg = zenus_console::serial::SerialPort::new(0x3F8);
     dbg.write_str("[FLAT] start\n");
 
@@ -325,6 +334,11 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
     if header.e_machine != 0x3E { return None; }
     let e_ehsize = header.e_ehsize as usize;
     if e_ehsize != 0 && e_ehsize < core::mem::size_of::<Elf64Header>() { return None; }
+
+    // Validate entry is a canonical user-space virtual address
+    if header.e_entry < 0x1000 || header.e_entry >= 0x0000_8000_0000_0000 {
+        return None;
+    }
 
     let phoff = header.e_phoff;
     let phentsize = header.e_phentsize as usize;

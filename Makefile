@@ -13,7 +13,7 @@ ISO := $(BUILD_DIR)/zenus.iso
 IMG := $(BUILD_DIR)/zenus.hdd
 LD := ld.lld
 
-.PHONY: all clean run run-qemu run-qemu-gdb iso img
+.PHONY: all clean run-qemu run-qemu-gdb run-bios run-uefi iso img test test-quiet
 
 all: $(KERNEL)
 
@@ -34,8 +34,8 @@ $(KERNEL): target/$(TARGET)/$(PROFILE_DIR)/libzenus.a apps/src/linker.ld
 		target/$(TARGET)/$(PROFILE_DIR)/libzenus.a \
 		--no-whole-archive
 
-# Build initrd
-$(INITRD): mkinitrd.sh
+# Build initrd (depends on user binary)
+$(INITRD): mkinitrd.sh apps/user.bin
 	bash mkinitrd.sh $(INITRD)
 
 # ISO image (BIOS + UEFI) — ISO depends on kernel + initrd
@@ -61,7 +61,7 @@ $(ISO): $(KERNEL) $(INITRD)
 iso: $(ISO)
 
 # HDD image (UEFI)
-img: $(KERNEL)
+img: $(KERNEL) $(INITRD)
 	dd if=/dev/zero bs=1M count=0 seek=64 of=$(IMG)
 	parted -s $(IMG) mklabel gpt
 	parted -s $(IMG) mkpart ESP fat32 2048s 100%
@@ -71,6 +71,7 @@ img: $(KERNEL)
 	mount $(LOOP)p1 /mnt
 	mkdir -p /mnt/EFI/BOOT /mnt/boot/limine
 	cp $(KERNEL) /mnt/boot/
+	cp $(INITRD) /mnt/boot/
 	cp limine.conf /mnt/boot/limine/
 	cp $(LIMINE_DIR)/BOOTX64.EFI /mnt/EFI/BOOT/
 	cp $(LIMINE_DIR)/limine-bios.sys /mnt/boot/limine/
@@ -78,12 +79,18 @@ img: $(KERNEL)
 	losetup -d $(LOOP)
 	$(LIMINE_DIR)/limine bios-install $(IMG)
 
-run-qemu: $(ISO)
-	qemu-system-x86_64 -serial stdio -m 4G -drive file=$(ISO),format=raw -no-reboot \
+run-bios: $(ISO)
+	qemu-system-x86_64 -serial stdio -m 2G -cdrom $(ISO) -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
+run-uefi: $(ISO)
+	qemu-system-x86_64 -serial stdio -m 2G -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -no-reboot \
+		-netdev user,id=net0 -device rtl8139,netdev=net0
+
+run-qemu: run-bios
+
 run-qemu-gdb: $(ISO)
-	qemu-system-x86_64 -serial stdio -m 2G -drive file=$(ISO),format=raw -s -S -no-reboot \
+	qemu-system-x86_64 -serial stdio -m 2G -cdrom $(ISO) -s -S -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 # Test build — enables testing feature for unit tests
@@ -125,4 +132,5 @@ test-quiet: test-iso
 
 clean:
 	rm -rf $(BUILD_DIR) $(ISO_DIR)
+	rm -f initrd.tar apps/user.bin
 	$(CARGO) clean
