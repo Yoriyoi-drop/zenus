@@ -346,7 +346,7 @@ pub fn yield_now() {
             let rsp = next_task.rsp;
             let stack_bottom = next_task.stack_alloc;
             let stack_top = stack_bottom + next_task.stack_size as u64;
-            if rsp < stack_bottom || rsp > stack_top {
+            if rsp < stack_bottom || rsp >= stack_top {
                 drop(tasks);
                 return;
             }
@@ -562,7 +562,7 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
             let rsp = next_task.rsp;
             let stack_bottom = next_task.stack_alloc;
             let stack_top = stack_bottom + next_task.stack_size as u64;
-            if rsp < stack_bottom || rsp > stack_top {
+            if rsp < stack_bottom || rsp >= stack_top {
                 return 0;
             }
         }
@@ -668,6 +668,14 @@ pub fn task_exit() {
         }
     }
     tasks.tasks[current as usize] = None;
+    let mut new_count = 1u32;
+    for scan in (1..MAX_TASKS).rev() {
+        if tasks.tasks[scan].is_some() {
+            new_count = (scan + 1) as u32;
+            break;
+        }
+    }
+    TASK_COUNT.store(new_count, Ordering::Release);
     drop(tasks);
     loop { x86_64::instructions::hlt(); }
 }
