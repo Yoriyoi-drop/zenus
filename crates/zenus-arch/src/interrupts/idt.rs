@@ -1,6 +1,7 @@
 use x86_64::structures::idt::{InterruptDescriptorTable, PageFaultErrorCode, InterruptStackFrame};
 use core::mem::MaybeUninit;
 use zenus_console::serial::SerialPort;
+use zenus_console::vga;
 
 use crate::gdt;
 
@@ -290,6 +291,12 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     s.write_str("!!! ");
     s.write_str(name);
     s.write_str(" !!!\n");
+    let hhdm = crate::limine::hhdm_offset();
+    if hhdm != 0 {
+        vga::write_str("!!! ", hhdm);
+        vga::write_str(name, hhdm);
+        vga::write_str(" !!!\n", hhdm);
+    }
     s.write_str("RIP: ");
     s.write_hex(rip);
     s.write_str(" CS: ");
@@ -301,11 +308,15 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     s.write_str("\n");
 
     s.write_str("[CODE]\n");
-    for i in 0..16u64 {
-        let addr = rip.wrapping_add(i);
-        let byte: u8 = unsafe { core::ptr::read_volatile(addr as *const u8) };
-        s.write_hex(byte as u64);
-        s.write_str(" ");
+    if rip >= 0xFFFF800000000000 {
+        for i in 0..16u64 {
+            let addr = rip.wrapping_add(i);
+            let byte: u8 = unsafe { core::ptr::read_volatile(addr as *const u8) };
+            s.write_hex(byte as u64);
+            s.write_str(" ");
+        }
+    } else {
+        s.write_str("(invalid rip)\n");
     }
     s.write_str("\n");
 
