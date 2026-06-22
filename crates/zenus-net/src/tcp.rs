@@ -1,5 +1,6 @@
 use crate::ipv4;
 use zenus_console::serial::SerialPort;
+use zenus_sync::spinlock::SpinLock;
 
 pub const TCP_CLOSED: u8 = 0;
 pub const TCP_LISTEN: u8 = 1;
@@ -45,6 +46,7 @@ struct Tcb {
     time_wait_ticks: u8,
 }
 
+static TCP_LOCK: SpinLock<()> = SpinLock::new(());
 static mut TCP_CONNS: [Option<Tcb>; MAX_CONNS] = [None; MAX_CONNS];
 static mut NEXT_CONN_ID: usize = 0;
 
@@ -135,6 +137,7 @@ fn rand_isn() -> u32 {
 }
 
 pub fn listen(port: u16) -> Option<usize> {
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         if conn_by_port(port).is_some() {
             return None;
@@ -165,6 +168,7 @@ pub fn listen(port: u16) -> Option<usize> {
 }
 
 pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16) -> Option<usize> {
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         let idx = find_slot()?;
         let local_ip = crate::nic::get_iface(iface_idx)
@@ -229,6 +233,7 @@ pub fn handle_receive(
     src_ip: [u8; 4], dst_ip: [u8; 4],
     segment: &[u8],
 ) -> bool {
+    let _tcp_guard = TCP_LOCK.lock();
     if segment.len() < 20 {
         return false;
     }
@@ -638,6 +643,7 @@ pub fn handle_receive(
 }
 
 pub fn poll_retransmit(iface_idx: usize) {
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         for i in 0..MAX_CONNS {
             let tcb = match &mut TCP_CONNS[i] {
@@ -737,6 +743,8 @@ pub fn poll_retransmit(iface_idx: usize) {
 }
 
 pub fn send_data(conn: usize, data: &[u8]) -> bool {
+    if conn >= MAX_CONNS { return false; }
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         let tcb = match &mut TCP_CONNS[conn] {
             Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
@@ -754,6 +762,8 @@ pub fn send_data(conn: usize, data: &[u8]) -> bool {
 }
 
 pub fn flush_tx(conn: usize, iface_idx: usize) -> bool {
+    if conn >= MAX_CONNS { return false; }
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         let tcb = match &mut TCP_CONNS[conn] {
             Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
@@ -792,6 +802,8 @@ pub fn flush_tx(conn: usize, iface_idx: usize) -> bool {
 }
 
 pub fn receive_data(conn: usize, buf: &mut [u8]) -> Option<usize> {
+    if conn >= MAX_CONNS { return None; }
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         let tcb = match &mut TCP_CONNS[conn] {
             Some(t) if t.rx_data_len > 0 => t,
@@ -809,6 +821,8 @@ pub fn receive_data(conn: usize, buf: &mut [u8]) -> Option<usize> {
 }
 
 pub fn close(conn: usize, iface_idx: usize) -> bool {
+    if conn >= MAX_CONNS { return false; }
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         let tcb = match &mut TCP_CONNS[conn] {
             Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
@@ -837,12 +851,16 @@ pub fn close(conn: usize, iface_idx: usize) -> bool {
 }
 
 pub fn close_conn(conn: usize) {
+    if conn >= MAX_CONNS { return; }
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         TCP_CONNS[conn] = None;
     }
 }
 
 pub fn is_connected(conn: usize) -> bool {
+    if conn >= MAX_CONNS { return false; }
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         match &TCP_CONNS[conn] {
             Some(t) => t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT,
@@ -852,6 +870,8 @@ pub fn is_connected(conn: usize) -> bool {
 }
 
 pub fn has_data(conn: usize) -> bool {
+    if conn >= MAX_CONNS { return false; }
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         match &TCP_CONNS[conn] {
             Some(t) => t.rx_data_len > 0,
@@ -861,6 +881,8 @@ pub fn has_data(conn: usize) -> bool {
 }
 
 pub fn get_conn_info(conn: usize) -> Option<(u8, [u8; 4], u16, [u8; 4], u16)> {
+    if conn >= MAX_CONNS { return None; }
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         match &TCP_CONNS[conn] {
             Some(t) => Some((t.state, t.remote_ip, t.remote_port, t.local_ip, t.local_port)),
@@ -870,6 +892,8 @@ pub fn get_conn_info(conn: usize) -> Option<(u8, [u8; 4], u16, [u8; 4], u16)> {
 }
 
 pub fn state_name(conn: usize) -> &'static str {
+    if conn >= MAX_CONNS { return "NONE"; }
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         match &TCP_CONNS[conn] {
             Some(t) => match t.state {
@@ -892,6 +916,7 @@ pub fn state_name(conn: usize) -> &'static str {
 }
 
 pub fn connection_count() -> usize {
+    let _tcp_guard = TCP_LOCK.lock();
     unsafe {
         let mut count = 0;
         for i in 0..MAX_CONNS {

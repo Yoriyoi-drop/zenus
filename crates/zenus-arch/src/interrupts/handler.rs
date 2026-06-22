@@ -39,12 +39,12 @@ pub extern "x86-interrupt" fn interrupt_spurious(_frame: InterruptStackFrame) {
 
 #[no_mangle]
 pub extern "x86-interrupt" fn interrupt_nic(_frame: InterruptStackFrame) {
-    crate::interrupts::apic::eoi();
     let ptr = NIC_IRQ_HANDLER.load(core::sync::atomic::Ordering::Relaxed);
     if ptr != 0 && ptr_in_text(ptr) {
         let handler: IrqHandlerFn = unsafe { core::mem::transmute(ptr) };
         handler();
     }
+    crate::interrupts::apic::eoi();
 }
 
 pub fn init() {

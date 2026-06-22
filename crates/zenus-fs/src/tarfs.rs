@@ -1,5 +1,6 @@
 use core::slice;
 use crate::vfs::{self, FileSystem, FileType, FileStat, DirEntry};
+use zenus_sync::spinlock::SpinLock;
 
 #[repr(C, packed)]
 struct UstarHeader {
@@ -181,6 +182,8 @@ impl FileSystem for TarFs {
     }
 
     fn read_dir(&self, inode: u64) -> &'static [DirEntry] {
+        static TARFS_DIR_LOCK: SpinLock<()> = SpinLock::new(());
+        let _rd_guard = TARFS_DIR_LOCK.lock();
         static mut DIR_BUF: [DirEntry; MAX_DIR_ENTRIES] = [DirEntry {
             name: "", file_type: FileType::None, inode: 0,
         }; MAX_DIR_ENTRIES];

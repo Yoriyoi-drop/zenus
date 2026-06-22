@@ -2,17 +2,16 @@ use zenus_console::serial::SerialPort;
 use zenus_mem::paging;
 use zenus_sched::scheduler;
 
-const USER_BINARY: &[u8] = include_bytes!("../user_demo.bin");
+const USER_BINARY: &[u8] = include_bytes!("../user.bin");
 
 fn log(msg: &str) {
     let mut s = SerialPort::new(0x3F8);
     s.write_str(msg);
 }
 
-pub fn spawn_user_demo() -> u64 {
-    log("[USER] Loading user demo with proper address space...\n");
+pub fn spawn_user() -> u64 {
+    log("[USER] Loading user task with proper address space...\n");
 
-    // Step 1: Create a separate address space for the user process
     let user_cr3 = match paging::create_address_space() {
         Some(cr3) => cr3,
         None => {
@@ -25,7 +24,6 @@ pub fn spawn_user_demo() -> u64 {
     s.write_hex(user_cr3);
     s.write_str("\n");
 
-    // Step 2: Load ELF binary into the new address space
     let loaded = match zenus_syscall::elf::load_elf_raw(USER_BINARY, user_cr3) {
         Some(elf) => elf,
         None => {
@@ -40,12 +38,10 @@ pub fn spawn_user_demo() -> u64 {
     s.write_hex(loaded.stack_top);
     s.write_str("\n");
 
-    // Step 3: Verify the entry point is mapped
     if paging::virt_to_phys_raw(user_cr3, loaded.entry).is_none() {
         log("[USER] WARNING: Entry not mapped\n");
     }
 
-    // Step 4: Spawn user task with the new CR3
     let task_id = scheduler::create_user_task(
         loaded.entry,
         65536,

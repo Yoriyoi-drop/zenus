@@ -35,13 +35,7 @@ impl<T> SpinLock<T> {
             .is_err()
         {
             while self.locked.load(Ordering::Relaxed) {
-                if irq_was_enabled {
-                    interrupts::enable();
-                    core::hint::spin_loop();
-                    interrupts::disable();
-                } else {
-                    core::hint::spin_loop();
-                }
+                core::hint::spin_loop();
             }
         }
         SpinLockGuard { lock: self, irq_was_enabled }

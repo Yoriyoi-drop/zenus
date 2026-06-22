@@ -14,17 +14,19 @@ pub fn reboot_via_keyboard() -> ! {
     if fadt_addr != 0 {
         unsafe {
             let header_len = *(fadt_addr as *const u8).add(8) as usize;
-            let flags = *(fadt_addr as *const u32).add(112/4);
-            if header_len >= 129 && (flags & (1 << 10)) != 0 {
-                let addr_space_id = *(fadt_addr as *const u8).add(116);
-                let reg_width = *(fadt_addr as *const u8).add(117);
-                let reg_addr = *(fadt_addr as *const u64).add(120/8);
-                let reset_val = *(fadt_addr as *const u8).add(128);
-                if addr_space_id == 1 && reg_width == 8 && reg_addr != 0 {
-                    s.write_str("[ACPI] Rebooting via ACPI reset register...\n");
-                    let mut p = Port::<u8>::new(reg_addr as u16);
-                    p.write(reset_val);
-                    for _ in 0..10000000 { core::hint::spin_loop(); }
+            if header_len >= 129 {
+                let flags = *(fadt_addr as *const u32).add(112/4);
+                if (flags & (1 << 10)) != 0 {
+                    let addr_space_id = *(fadt_addr as *const u8).add(116);
+                    let reg_width = *(fadt_addr as *const u8).add(117);
+                    let reg_addr = *(fadt_addr as *const u64).add(120/8);
+                    let reset_val = *(fadt_addr as *const u8).add(128);
+                    if addr_space_id == 1 && reg_width == 8 && reg_addr != 0 {
+                        s.write_str("[ACPI] Rebooting via ACPI reset register...\n");
+                        let mut p = Port::<u8>::new(reg_addr as u16);
+                        p.write(reset_val);
+                        for _ in 0..10000000 { core::hint::spin_loop(); }
+                    }
                 }
             }
         }
@@ -72,6 +74,11 @@ pub fn shutdown_via_acpi() -> ! {
         loop { x86_64::instructions::hlt(); }
     }
     unsafe {
+        let header_len = *(fadt_addr as *const u8).add(8) as usize;
+        if header_len < 68 {
+            s.write_str("[ACPI] FADT too short for PM1a_CNT_BLK\n");
+            loop { x86_64::instructions::hlt(); }
+        }
         let pm1a_cnt_blk = *(fadt_addr as *const u32).add(64/4) as u16;
 
         if pm1a_cnt_blk == 0 {

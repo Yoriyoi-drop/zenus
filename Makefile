@@ -17,12 +17,12 @@ LD := ld.lld
 
 all: $(KERNEL)
 
-# Build user-space demo binary
-apps/user_demo.bin: apps/src/user_demo.s
+# Build user-space binary
+apps/user.bin: apps/src/user.s
 	nasm -f bin -o $@ $<
 
 # Build kernel staticlib (depends on user binary)
-target/$(TARGET)/$(PROFILE_DIR)/libzenus.a: apps/src/lib.rs apps/user_demo.bin $(shell find crates -name '*.rs')
+target/$(TARGET)/$(PROFILE_DIR)/libzenus.a: apps/src/lib.rs apps/user.bin $(shell find crates -name '*.rs')
 	RUSTFLAGS="-C target-cpu=x86-64" \
 	$(CARGO) build --package zenus --target $(TARGET) $(CARGO_FLAGS)
 

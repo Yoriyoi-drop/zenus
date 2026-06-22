@@ -46,6 +46,14 @@ extern "C" {
 core::arch::global_asm!(
     ".intel_syntax noprefix",
     ".globl context_switch_yield",
+    // Entry: rdi = &save_rsp (destination), rsi = new_rsp (target stack)
+    // Saves 15 GP registers + 3-item interrupt frame (RFLAGS, CS, RIP)
+    // Stack layout at switch point (top→bottom):
+    //   rdi (saved return addr) [rax restored after pop]
+    //   RFLAGS, CS, RIP      ← 3-item frame (Ring 0→Ring 0)
+    //   R15..RAX             ← 15 GP registers
+    // Total frame: 18 × 8 = 144 bytes
+    // Return: OR RFLAGS.IF at offset +136, write RSP to [rdi], load new RSP from rsi
     "context_switch_yield:",
     "  cli",
     "  pop rax",
@@ -97,6 +105,13 @@ core::arch::global_asm!(
 core::arch::global_asm!(
     ".intel_syntax noprefix",
     ".globl apic_timer_isr_stub",
+    // APIC timer ISR entry (interrupt gate, IF=0 on entry)
+    // Saves 15 GP registers, calls schedule_tick(RSP)
+    // On return:
+    //   rax=0 → restore all regs, check RSP[8].RPL for Ring 0 vs Ring 3
+    //   rax≠0 → load new RSP from rax, then restore
+    // Ring 3 return: fix SS at RSP+32, use iretq (5-item frame)
+    // Ring 0 return: pop RAX, add rsp 8, popfq, jmp rax (3-item frame)
     "apic_timer_isr_stub:",
     "  push rax",
     "  push rcx",
@@ -363,19 +378,33 @@ pub fn yield_now() {
         }
     }
 
-    tasks.tasks[current as usize].as_mut().unwrap().state = TaskState::Ready;
-    tasks.tasks[next as usize].as_mut().unwrap().state = TaskState::Running;
-    tasks.tasks[next as usize].as_mut().unwrap().ticks_left = TIME_SLICE;
+    if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
+        current_task.state = TaskState::Ready;
+    } else {
+        drop(tasks);
+        return;
+    }
+    let (next_rsp, do_switch) = match tasks.tasks[next as usize].as_mut() {
+        Some(next_task) => {
+            next_task.state = TaskState::Running;
+            next_task.ticks_left = TIME_SLICE;
+            (next_task.rsp, true)
+        }
+        None => (0, false),
+    };
+    if !do_switch {
+        drop(tasks);
+        return;
+    }
 
     CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
 
     let save_rsp: *mut u64 = unsafe {
         &raw mut tasks.tasks[current as usize].as_mut().unwrap_unchecked().rsp
     };
-    let new_rsp = tasks.tasks[next as usize].as_ref().unwrap().rsp;
     drop(tasks);
 
-    unsafe { context_switch_yield(save_rsp, new_rsp); }
+    unsafe { context_switch_yield(save_rsp, next_rsp); }
 }
 
 pub fn check_yield() {
@@ -536,8 +565,13 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         return 0;
     }
 
-    tasks.tasks[current as usize].as_mut().unwrap().rsp = current_rsp;
-    tasks.tasks[current as usize].as_mut().unwrap().cr3 = zenus_mem::paging::get_level4_addr().as_u64();
+    let current_cr3_raw = zenus_mem::paging::get_level4_addr().as_u64();
+    if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
+        current_task.rsp = current_rsp;
+        current_task.cr3 = current_cr3_raw;
+    } else {
+        return 0;
+    }
 
     let next = find_next_ready(&tasks, current, cpu);
     if next == current {
@@ -559,23 +593,29 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         }
     }
 
-    tasks.tasks[current as usize].as_mut().unwrap().state = TaskState::Ready;
-    tasks.tasks[next as usize].as_mut().unwrap().state = TaskState::Running;
-    tasks.tasks[next as usize].as_mut().unwrap().ticks_left = TIME_SLICE;
-
-    let current_cr3_raw = zenus_mem::paging::get_level4_addr().as_u64();
-    tasks.tasks[current as usize].as_mut().unwrap().cr3 = current_cr3_raw;
-
-    let next_cr3 = tasks.tasks[next as usize].as_ref().unwrap().cr3;
-    if next_cr3 != 0 && next_cr3 != current_cr3_raw {
-        zenus_mem::paging::set_cr3(next_cr3);
+    if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
+        current_task.state = TaskState::Ready;
+        current_task.cr3 = current_cr3_raw;
+    } else {
+        return 0;
     }
 
-    CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
+    let new_rsp = match tasks.tasks[next as usize].as_mut() {
+        Some(nt) => {
+            nt.state = TaskState::Running;
+            nt.ticks_left = TIME_SLICE;
 
-    let new_rsp = tasks.tasks[next as usize].as_ref().unwrap().rsp;
+            let next_cr3 = nt.cr3;
+            if next_cr3 != 0 && next_cr3 != current_cr3_raw {
+                zenus_mem::paging::set_cr3(next_cr3);
+            }
+
+            CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
+            nt.rsp
+        }
+        None => return 0,
+    };
     drop(tasks);
-
     new_rsp
 }
 

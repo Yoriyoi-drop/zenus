@@ -1,6 +1,6 @@
-use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::instructions::port::Port;
 use zenus_console::serial::SerialPort;
+use zenus_sync::spinlock::SpinLock;
 use crate::ethernet;
 use crate::arp;
 use crate::icmp;
@@ -49,7 +49,7 @@ const TX_DESC_COUNT: usize = 4;
 const RX_BUF_PAGES: usize = 8;
 const RX_BUF_BYTES: usize = RX_BUF_PAGES * 0x1000;
 
-static RTL_IRQ_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static RTL_LOCK: SpinLock<()> = SpinLock::new(());
 static mut RTL_IFACE: Option<Rtl8139> = None;
 static NIC_IO_BASE: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
@@ -431,16 +431,15 @@ impl Rtl8139 {
         Some(core::cmp::min(copy_len, buf.len()))
     }
 
-    pub fn get_instance() -> Option<&'static mut Self> {
-        unsafe { RTL_IFACE.as_mut() }
+    pub fn with_nic<R>(f: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        let _guard = RTL_LOCK.lock();
+        unsafe { RTL_IFACE.as_mut().map(f) }
     }
 
     pub fn handle_irq() {
-    if RTL_IRQ_IN_PROGRESS.swap(true, Ordering::AcqRel) {
-        return;
-    }
+    let _rtl_guard = RTL_LOCK.lock();
     let io_base = NIC_IO_BASE.load(core::sync::atomic::Ordering::Relaxed);
-    if io_base == 0 { RTL_IRQ_IN_PROGRESS.store(false, Ordering::Release); return; }
+    if io_base == 0 { return; }
     unsafe {
         let mut isr_port = x86_64::instructions::port::Port::<u16>::new(io_base + RTL_ISR);
         let isr = isr_port.read();
@@ -453,13 +452,10 @@ impl Rtl8139 {
             }
         }
     }
-    RTL_IRQ_IN_PROGRESS.store(false, Ordering::Release);
 }
 
 pub fn poll(&mut self) {
-        if RTL_IRQ_IN_PROGRESS.swap(true, Ordering::AcqRel) {
-            return;
-        }
+        let _rtl_guard = RTL_LOCK.lock();
         let isr = self.read16(RTL_ISR);
         if isr != 0 {
             self.write16(RTL_ISR, isr);
@@ -467,7 +463,6 @@ pub fn poll(&mut self) {
                 self.process_rx();
             }
         }
-        RTL_IRQ_IN_PROGRESS.store(false, Ordering::Release);
     }
 
     fn process_rx(&mut self) {

@@ -31,7 +31,7 @@ use zenus_fs::vfs::FileSystem as _;
 use zenus_mem::paging;
 
 mod shell;
-mod user_demo;
+mod user;
 use zenus_mem::frame_allocator;
 use zenus_mem::frame_allocator::MemoryRegion;
 use zenus_sched::scheduler;
@@ -340,7 +340,7 @@ pub extern "C" fn entry() -> ! {
         both!(serial, hhdm_offset, "[OK] Shell task spawned\n");
 
         // 13a. Spawn user-mode demo task with proper isolation
-        let _user_tid = user_demo::spawn_user_demo();
+        let _user_tid = user::spawn_user();
 
         both!(serial, hhdm_offset, "========================================\n");
         both!(serial, hhdm_offset, "  Zenus OS siap! Server mode aktif.\n");

@@ -1,5 +1,6 @@
 use crate::vfs::{FileSystem, FileType, FileStat, DirEntry};
 use crate::block_cache::bc_read;
+use zenus_sync::spinlock::SpinLock;
 
 pub(crate) const EXT2_MAGIC: u16 = 0xEF53;
 const ROOT_INODE: u64 = 2;
@@ -525,6 +526,8 @@ impl FileSystem for Ext2Fs {
     }
 
     fn read_dir(&self, inode: u64) -> &'static [DirEntry] {
+        static READ_DIR_LOCK: SpinLock<()> = SpinLock::new(());
+        let _rd_guard = READ_DIR_LOCK.lock();
         static mut ENTRIES: [DirEntry; 64] = [DirEntry {
             name: "", file_type: FileType::None, inode: 0,
         }; 64];

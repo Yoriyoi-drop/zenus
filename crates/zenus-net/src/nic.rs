@@ -78,9 +78,7 @@ pub fn init() {
 }
 
 pub fn net_poll() {
-    if let Some(ref mut rtl) = Rtl8139::get_instance() {
-        rtl.poll();
-    }
+    Rtl8139::with_nic(|rtl| rtl.poll());
 }
 
 pub fn iface_count() -> usize {
@@ -101,7 +99,7 @@ pub fn send_frame(iface_idx: usize, frame: &[u8]) -> bool {
     if iface_idx == 0 {
         return false;
     }
-    if let Some(ref mut rtl) = Rtl8139::get_instance() {
+    Rtl8139::with_nic(|rtl| {
         if frame.len() < 60 {
             let mut buf = [0u8; 60];
             buf[..frame.len()].copy_from_slice(frame);
@@ -109,9 +107,7 @@ pub fn send_frame(iface_idx: usize, frame: &[u8]) -> bool {
         } else {
             rtl.send_raw(frame)
         }
-    } else {
-        false
-    }
+    }).unwrap_or(false)
 }
 
 pub fn send_packet(iface_idx: usize, data: &[u8]) -> bool {
@@ -207,19 +203,15 @@ pub fn set_iface_ip(iface_idx: usize, ip: [u8; 4], subnet: [u8; 4], gateway: [u8
         }
     }
     if iface_idx == 1 {
-        if let Some(ref mut rtl) = Rtl8139::get_instance() {
+        Rtl8139::with_nic(|rtl| {
             rtl.set_ip(ip);
             rtl.set_subnet(subnet);
             rtl.set_gateway(gateway);
-        }
+        });
     }
     true
 }
 
 pub fn receive_packet(_iface: usize, buf: &mut [u8]) -> Option<usize> {
-    if let Some(ref mut rtl) = Rtl8139::get_instance() {
-        rtl.receive_copy(buf)
-    } else {
-        None
-    }
+    Rtl8139::with_nic(|rtl| rtl.receive_copy(buf)).flatten()
 }

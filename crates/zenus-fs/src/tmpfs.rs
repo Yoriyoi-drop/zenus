@@ -1,5 +1,6 @@
 use core::mem::MaybeUninit;
 use crate::vfs::{self, FileSystem, FileType, FileStat, DirEntry};
+use zenus_sync::spinlock::SpinLock;
 
 const MAX_NODES: usize = 128;
 const MAX_NAME: usize = 64;
@@ -159,6 +160,8 @@ impl FileSystem for TmpFs {
     }
 
     fn read_dir(&self, inode: u64) -> &'static [DirEntry] {
+        static TMPFS_DIR_LOCK: SpinLock<()> = SpinLock::new(());
+        let _rd_guard = TMPFS_DIR_LOCK.lock();
         static mut ENTRIES: [DirEntry; MAX_DIR_ENTRIES] = [DirEntry {
             name: "", file_type: FileType::None, inode: 0,
         }; MAX_DIR_ENTRIES];

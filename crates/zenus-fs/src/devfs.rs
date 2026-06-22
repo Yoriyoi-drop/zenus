@@ -1,4 +1,5 @@
 use crate::vfs::{FileSystem, FileType, FileStat, DirEntry};
+use zenus_sync::spinlock::SpinLock;
 
 const MAX_BLOCK_DEVS: usize = 8;
 
@@ -147,7 +148,8 @@ impl FileSystem for DevFs {
         if inode != 0 {
             return &[];
         }
-
+        static DEVFS_DIR_LOCK: SpinLock<()> = SpinLock::new(());
+        let _rd_guard = DEVFS_DIR_LOCK.lock();
         unsafe {
             let total = STATIC_ENTRIES.len() + BLOCK_DEV_COUNT;
             if total <= 4 {

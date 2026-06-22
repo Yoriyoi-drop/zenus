@@ -1,4 +1,5 @@
 use zenus_console::serial::SerialPort;
+use zenus_sync::spinlock::SpinLock;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileType {
@@ -191,17 +192,15 @@ pub fn read_dir(path: &str) -> &'static [DirEntry] {
 }
 
 fn read_dir_root() -> &'static [DirEntry] {
-    // Max entries: devfs entries + mount points
+    static ROOT_DIR_LOCK: SpinLock<()> = SpinLock::new(());
+    let _rd_guard = ROOT_DIR_LOCK.lock();
     const MAX: usize = 16;
     static mut BUF: [DirEntry; MAX] = [DirEntry {
         name: "", file_type: FileType::None, inode: 0,
     }; MAX];
     static mut COUNT: usize = 0;
-    static mut LOCKED: bool = false;
 
     unsafe {
-        if LOCKED { return &[]; }
-        LOCKED = true;
         COUNT = 0;
 
         // Add devfs entries from root fs
@@ -239,7 +238,6 @@ fn read_dir_root() -> &'static [DirEntry] {
             }
         }
 
-        LOCKED = false;
         &BUF[..COUNT]
     }
 }

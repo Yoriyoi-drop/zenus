@@ -123,6 +123,9 @@ impl FrameAllocator {
         if self.free_count < FREE_STACK_SIZE {
             self.free_stack[self.free_count] = addr.as_u64();
             self.free_count += 1;
+        } else {
+            let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+            s.write_str("[WARN] Frame free stack overflow! Frame lost.\n");
         }
         self.used_memory = self.used_memory.saturating_sub(PAGE_SIZE as u64);
     }

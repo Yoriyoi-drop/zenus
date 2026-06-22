@@ -2,6 +2,7 @@ use zenus_mem::paging;
 use zenus_fs::vfs;
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
+const MAX_ELF_PAGES: usize = 65536;
 
 #[repr(C, packed)]
 struct Elf64Header {
@@ -71,14 +72,14 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
     for phdr in phdrs {
         if phdr.p_type != PT_LOAD { continue; }
         let vaddr = phdr.p_vaddr & !0xFFF;
-        if phdr.p_memsz > u64::MAX - phdr.p_vaddr { return None; }
-        let end = phdr.p_vaddr.checked_add(phdr.p_memsz).unwrap_or(u64::MAX);
+        let end = phdr.p_vaddr.checked_add(phdr.p_memsz)?;
         let end = (end + 0xFFF) & !0xFFF;
         if end > max_addr { max_addr = end; }
 
         let file_off = phdr.p_offset as usize;
         let file_sz = phdr.p_filesz as usize;
         let pages = ((end - vaddr) / paging::PAGE_SIZE as u64) as usize;
+        if pages > MAX_ELF_PAGES { return None; }
 
         for i in 0..pages {
             let page_virt = vaddr + (i as u64) * paging::PAGE_SIZE as u64;
@@ -196,14 +197,14 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
     for phdr in phdrs {
         if phdr.p_type != PT_LOAD { continue; }
         let vaddr = phdr.p_vaddr & !0xFFF;
-        if phdr.p_memsz > u64::MAX - phdr.p_vaddr { return None; }
-        let end = phdr.p_vaddr.checked_add(phdr.p_memsz).unwrap_or(u64::MAX);
+        let end = phdr.p_vaddr.checked_add(phdr.p_memsz)?;
         let end = (end + 0xFFF) & !0xFFF;
         if end > max_addr { max_addr = end; }
 
         let file_off = phdr.p_offset;
         let file_sz = phdr.p_filesz;
         let pages = ((end - vaddr) / paging::PAGE_SIZE as u64) as usize;
+        if pages > MAX_ELF_PAGES { return None; }
 
         for i in 0..pages {
             let page_virt = vaddr + (i as u64) * paging::PAGE_SIZE as u64;
