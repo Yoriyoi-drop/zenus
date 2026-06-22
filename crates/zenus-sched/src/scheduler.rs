@@ -48,20 +48,20 @@ core::arch::global_asm!(
     // Entry: rdi = &save_rsp (destination), rsi = new_rsp (target stack)
     // Saves 15 GP registers + 3-item interrupt frame (RFLAGS, CS, RIP)
     // Stack layout at switch point (top→bottom):
-    //   rdi (saved return addr) [rax restored after pop]
     //   RFLAGS, CS, RIP      ← 3-item frame (Ring 0→Ring 0)
-    //   R15..RAX             ← 15 GP registers
+    //   R15..RAX             ← 15 GP registers (ALL preserved)
     // Total frame: 18 × 8 = 144 bytes
+    //
+    // Fix: push all 15 GP registers FIRST (preserving RAX),
+    // then write the 3-item frame above them using RAX as temp
+    // (RAX is already saved at [rsp+112], so using it as temp is safe).
     //
     // Restore: pops 15 GP regs, then checks CS.RPL:
     //   RPL=0 → kernel frame (3 items): pop rax(add rsp,8) popfq jmp rax
     //   RPL=3 → user frame (5 items): fix SS, iretq
     "context_switch_yield:",
     "  cli",
-    "  pop rax",
-    "  pushfq",
-    "  push 0x08",
-    "  push rax",
+    // Save all 15 GP registers first (preserves original RAX, RCX, etc.)
     "  push rax",
     "  push rcx",
     "  push rdx",
@@ -77,11 +77,23 @@ core::arch::global_asm!(
     "  push r13",
     "  push r14",
     "  push r15",
+    // Stack: [R15..RAX][return_addr][saved_rdi, saved_rsi...]
+    // return_addr is at [rsp + 120] (15 items × 8)
+    // Read return_addr into rax (RAX is safe — saved at [rsp+112])
+    "  mov rax, [rsp + 120]",
+    // Write 3-item interrupt frame ABOVE the 15 regs,
+    // overwriting return_addr and two caller-slots (no longer needed)
+    // Layout: [rsp+120]=RIP, [rsp+128]=CS, [rsp+136]=RFLAGS
+    "  mov [rsp + 120], rax",
+    "  mov qword ptr [rsp + 128], 0x08",
+    "  pushfq",
+    "  pop rax",
+    "  mov [rsp + 136], rax",
     "  or qword ptr [rsp + 136], 0x200",
-    "  mov rax, rsp",
-    "  add rax, 144",
+    // Save RSP (points to R15) into *save_rsp, then load new RSP
     "  mov [rdi], rsp",
     "  mov rsp, rsi",
+    // Restore: 15 GP registers
     "  pop r15",
     "  pop r14",
     "  pop r13",
@@ -98,7 +110,8 @@ core::arch::global_asm!(
     "  pop rcx",
     "  pop rax",
     // Frame type detection via CS.RPL
-    // [rsp] = RIP, [rsp+8] = CS, [rsp+16] = RFLAGS [rsp+24] = ??? (5th item if user)
+    // [rsp] = RIP, [rsp+8] = CS, [rsp+16] = RFLAGS
+    // For user: [rsp+24] = user_RSP, [rsp+32] = SS
     "  mov rcx, [rsp + 8]",
     "  test cl, 3",
     "  jnz 3f",
@@ -270,8 +283,7 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
 
     unsafe {
         let mut sp = stack_top as *mut u64;
-        sp = sp.sub(1); sp.write(0x10u64);
-        sp = sp.sub(1); sp.write(0u64);
+        // 3-item kernel frame: RFLAGS, CS, RIP
         sp = sp.sub(1); sp.write(0x202u64);
         sp = sp.sub(1); sp.write(0x08u64);
         sp = sp.sub(1); sp.write(entry as u64);
@@ -370,19 +382,22 @@ pub fn yield_now() {
         }
     }
 
+    let current_cr3_raw = zenus_mem::paging::get_level4_addr().as_u64();
+
     if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
         current_task.state = TaskState::Ready;
+        current_task.cr3 = current_cr3_raw;
     } else {
         drop(tasks);
         return;
     }
-    let (next_rsp, do_switch) = match tasks.tasks[next as usize].as_mut() {
+    let (next_rsp, next_cr3, do_switch) = match tasks.tasks[next as usize].as_mut() {
         Some(next_task) => {
             next_task.state = TaskState::Running;
             next_task.ticks_left = TIME_SLICE;
-            (next_task.rsp, true)
+            (next_task.rsp, next_task.cr3, true)
         }
-        None => (0, false),
+        None => (0, 0, false),
     };
     if !do_switch {
         drop(tasks);
@@ -397,6 +412,10 @@ pub fn yield_now() {
         &raw mut tasks.tasks[current as usize].as_mut().unwrap_unchecked().rsp
     };
     drop(tasks);
+
+    if next_cr3 != 0 && next_cr3 != current_cr3_raw {
+        zenus_mem::paging::set_cr3(next_cr3);
+    }
 
     if next_kernel_rsp != 0 {
         zenus_arch::cpu::set_percpu_kernel_rsp(cpu, next_kernel_rsp);

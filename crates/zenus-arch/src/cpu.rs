@@ -40,6 +40,7 @@ core::arch::global_asm!(
     ".intel_syntax noprefix",
     ".globl syscall_entry",
     "syscall_entry:",
+    "  cli",
     "  swapgs",
     "  mov gs:[0], rsp",
     "  mov rsp, gs:[8]",

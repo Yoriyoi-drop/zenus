@@ -1,0 +1,754 @@
+================================================================================
+                     AUDIT FONDASI KERNEL ZENUS OS v0.1.0
+                  "Stable Server Kernel" - Prototype/Pre-Alpha
+================================================================================
+Tanggal Audit : 22 Juni 2026
+Target        : x86_64, Rust nightly-2026-05-01, Limine Bootloader
+Lisensi       : MIT
+Repo          : /home/whale-d/zenus
+================================================================================
+
+                            RINGKASAN EKSEKUTIF
+--------------------------------------------------------------------------------
+Zenus OS adalah kernel server prototipe yang ditulis dalam Rust untuk arsitektur
+x86_64. Proyek ini masih dalam tahap pre-alpha (diperkirakan ~18.5% kesiapan
+produksi). Kernel menggunakan Limine bootloader, higher-half mapping, dan
+mendukung preemptive multitasking, SMP, TCP/IP stack, filesystem ext2, dan
+sistem file virtual.
+
+Kode sumber terdiri dari 9 crate dalam satu workspace Cargo, dengan satu crate
+utama (apps/) sebagai entry point. Total perkiraan ~8.000-10.000 baris kode Rust.
+
+================================================================================
+I.   SUBSISTEM ARSITEKTUR (zenus-arch) - x86_64
+================================================================================
+
+1.1  LIMINE BOOT PROTOCOL (limine.rs) ── 321 baris
+     [OK] Mengimplementasikan protokol Limine v11+ dengan benar
+     [OK] Mendukung: memory map, HHDM, RSDP ACPI, modul initrd, MP tables
+     [OK] Struct C-compatible untuk komunikasi bootloader
+     [INFO] Hanya mendukung Limine; tidak ada fallback boot protocol lain
+
+1.2  CPU INITIALIZATION (cpu.rs) ── 212 baris
+     [OK] Deteksi vendor CPU via CPUID
+     [OK] Deteksi fitur: APIC, x2APIC, MSR, SSE/SSE2, PAE, PGE, NX, SYSCALL, RDRAND
+     [OK] Enables: SSE, NXE (Non-Execute), SYSCALL (SCE)
+     [OK] Per-CPU data via MSR (GS.base)
+     [OK] SYSCALL entry via STAR/LSTAR/SFMASK MSR
+     [OK] SWAPGS-based syscall entry/exit
+     [KRITIK] PER_CPU adalah static mut array — rawan race condition di SMP
+     [KRITIK] syscall_entry menggunakan alamat absolut; tidak ada KASLR untuk MSR LSTAR
+     [KRITIK] SFMASK = 0xFFFFFFFF (mask semua flag) — mungkin terlalu agresif
+
+1.3  GDT/TSS (gdt.rs) ── 105 baris
+     [OK] GDT dengan Ring 0 dan Ring 3 segmen
+     [OK] TSS dengan IST untuk double fault
+     [OK] Per-CPU GDT/TSS untuk AP (Application Processors)
+     [OK] RSP0 berganti pada setiap context switch (set_tss_stack)
+     [KRITIK] Ukuran stack AP: hanya 8KB (4096*8) — sangat rentan stack overflow
+     [KRITIK] Stack double fault: 4KB — terlalu kecil untuk fault handling kompleks
+
+1.4  INTERRUPT HANDLING (interrupts/idt.rs, handler.rs) ── 368+ baris
+     [OK] IDT dengan handler untuk semua 32 exception + IRQ
+     [OK] Double fault dengan IST stack
+     [OK] Page fault handler dengan dump register lengkap
+     [OK] User page fault handler untuk heap on-demand (COW-like)
+     [OK] NMI handler, Machine Check handler
+     [KRITIK] Semua exception (kecuali breakpoint & NMI) infinite loop tanpa recovery
+     [KRITIK] Tidak ada proses kill on page fault dari user mode — kernel panic langsung
+     [KRITIK] Tidak ada opsi reboot setelah kernel panic
+     [KRITIK] try_handle_user_page_fault() tidak memeriksa apakah addr valid user space
+
+1.5  APIC & TIMER (interrupts/apic.rs) ── 109 baris
+     [OK] Local APIC initialization dengan SVR
+     [OK] APIC timer periodik (10_000_000 count, ~100ms)
+     [OK] EOI function, IPI sending
+     [OK] PIC remapping ke vector 32-47
+     [KRITIK] Inisialisasi APIC timer hardcoded (10M) tanpa kalibrasi bus frequency
+     [KRITIK] Tidak ada verifikasi bahwa APIC benar-benar aktif setelah enable_lapic()
+     [KRITIK] LINT0 dimask (0x0100FF) tapi tidak ada penanganan NMI dari LINT1
+
+1.6  I/O APIC (interrupts/ioapic.rs) - IRQ 11 untuk NIC
+     [OK] I/O APIC RTE programming untuk IRQ routing
+     [KRITIK] Hanya mengkonfigurasi IRQ 11 (RTL8139) — sisanya tidak tersentuh
+
+1.7  SMP (smp.rs) ── 163 baris
+     [OK] Deteksi CPU via Limine MP protocol
+     [OK] AP wakeup via goto_address
+     [OK] Per-CPU init: SSE, GDT, SYSCALL, APIC
+     [OK] AP idle loop dengan yield + hlt
+     [KRITIK] CPU_TABLE static mutable tanpa proteksi concurrent access
+     [KRITIK] Tidak ada mekanisme CPU hotplug
+     [KRITIK] Tidak ada load balancing — scheduler hanya round-robin per-CPU
+     [KRITIK] AP_READY_COUNT spinloop adalah busy wait
+
+1.8  PCI (pci.rs) ── 187 baris
+     [OK] PCI bus scan via I/O ports 0xCF8/0xCFC
+     [OK] Multi-bus system detection via PCI-PCI bridge check
+     [OK] Baca semua BAR, interrupt line/pin
+     [OK] enable_bus_master()
+     [KRITIK] PCI_DEVICES static mut array — tidak aman untuk concurrent access
+     [KRITIK] Tidak ada MSI/MSI-X support
+     [KRITIK] Tidak ada PCIe extended config space (ECAM)
+
+1.9  ATA PIO DRIVER (ata.rs) ── 292 baris
+     [OK] Primary & Secondary IDE channel support
+     [OK] Identify drive, read/write sectors via PIO
+     [OK] Spinlock per-channel
+     [OK] Batas maksimum 256 sektor per operasi
+     [KRITIK] PIO mode hanya ~3-5 MB/s — sangat lambat
+     [KRITIK] Tidak ada DMA (Bus Master IDE / UDMA)
+     [KRITIK] Tidak ada interrupt-driven I/O (polling murni)
+     [KRITIK] Tidak ada error recovery mechanism
+     [KRITIK] Tidak ada NCQ, trim, atau perintah ATA modern lainnya
+     [KRITIK] Tidak mendukung drive SATA via AHCI — hanya legacy IDE
+
+1.10 KEYBOARD DRIVER (keyboard.rs)
+     [OK] PS/2 scancode set 1, IRQ1 handler
+     [OK] Tombol shift + caps lock
+     [OK] Shell interaktif via keyboard
+     [KRITIK] Tidak ada key repeat handling
+     [KRITIK] Hanya US keyboard layout
+
+1.11 RTC & RANDOM (rtc.rs, random.rs)
+     [OK] RTC/CMOS read untuk time-of-day
+     [OK] PRNG dengan seed dari RTC + PIT + RDTSC
+     [OK] get_random_page_aligned() untuk ASLR
+     [KRITIK] LCG adalah PRNG kriptografis lemah
+     [KRITIK] Tidak ada RDRAND fallback yang proper
+     [KRITIK] Entropy sumber terbatas
+
+1.12 ACPI (acpi.rs)
+     [OK] Reboot via FADT reset register, 0xCF9, keyboard controller
+     [OK] Shutdown via PM1a_CNT_BLK
+     [KRITIK] Tidak ada parsing tabel ACPI yang mendalam (DSDT, SSDT, etc.)
+     [KRITIK] Tidak ada power management (C-states, P-states)
+     [KRITIK] Tidak ada suspend/resume
+
+--------------------------------------------------------------------------------
+II.  SUBSISTEM MANAJEMEN MEMORI (zenus-mem)
+--------------------------------------------------------------------------------
+
+2.1  PHYSICAL FRAME ALLOCATOR (frame_allocator.rs) ── 261 baris
+     [OK] Bump allocator + free stack (4096 frame)
+     [OK] reserve_region() untuk kernel/module pages
+     [OK] Total memory tracking
+     [OK] Trait x86_64 FrameAllocator implementasi
+     [KRITIK] Free stack overflow menyebabkan frame hilang (leak) setelah 4096 frame
+     [KRITIK] Tidak ada coalescing pada free stack — fragmentasi cepat
+     [KRITIK] Lock contention tinggi — FRAME_ALLOCATOR global single lock
+     [KRITIK] Tidak ada NUMA-aware allocation
+     [KRITIK] Tidak ada page reclaim / OOM killer
+     [KRITIK] Tidak ada swap
+
+2.2  4-LEVEL PAGING (paging.rs) ── 272 baris
+     [OK] OffsetPageTable via HHDM
+     [OK] map_page, unmap_page, map_user_page_raw
+     [OK] virt_to_phys_raw dengan 4-level walk
+     [OK] create_address_space (copy-on-write kernel space)
+     [OK] destroy_address_space dengan free semua level page table
+     [OK] Global pages (PGE) enabled via CR4
+     [KRITIK] create_address_space hanya kopi PML4 — masih ada kernel mapping
+     [KRITIK] Tidak ada huge pages (2MiB/1GiB) untuk kinerja TLB
+     [KRITIK] Tidak ada page coloring
+     [KRITIK] Tidak ada KASLR untuk kernel base
+     [KRITIK] Tidak ada page table isolation (Meltdown mitigation)
+     [KRITIK] Tidak ada madvise/mprotect userspace API
+
+2.3  KERNEL HEAP ALLOCATOR (allocator.rs) ── 248 baris
+     [OK] Free-list allocator dengan coalescing
+     [OK] Heap 16MB statis
+     [OK] GlobalAlloc implementasi
+     [OK] Aligment-aware allocation
+     [OK] Magic number untuk deteksi corruption (0x46524545_424C4F43 / 0x55534544_424C4F43)
+     [KRITIK] Heap size 16MB fixed — tidak bisa grow
+     [KRITIK] Free-list linear search — O(n) kompleksitas
+     [KRITIK] Single global HEAP_LOCK — contention tinggi
+     [KRITIK] Tidak ada slab allocator untuk objek kecil
+     [KRITIK] Tidak ada memory tracking atau leak detection
+     [KRITIK] OOM hanya print log lalu return null — tidak ada recovery
+     [KRITIK] 16MB heap untuk gambar dmesg: "4MB free-list allocator ready" (inconsistent)
+
+--------------------------------------------------------------------------------
+III. SUBSISTEM PENJADWALAN (zenus-sched)
+--------------------------------------------------------------------------------
+
+3.1  TASK MANAGEMENT (task.rs) ── 90 baris
+     [OK] Task struct dengan ID, state, priority, UID/GID/EUID/EGID
+     [OK] TaskState: Ready, Running, Waiting, Sleeping, Terminated
+     [OK] Max 128 tasks
+     [OK] UID/GID allocation atomik
+     [KRITIK] priority field ada tapi tidak digunakan oleh scheduler
+     [KRITIK] Tidak ada waiting queue / sleep queue
+
+3.2  SCHEDULER (scheduler.rs) ── 794 baris
+     [OK] Preemptive round-robin via APIC timer ISR
+     [OK] Context switch dengan assembly inline (15 GP registers + interrupt frame)
+     [OK] Ring 0 → Ring 3 dan Ring 3 → Ring 3 context switch
+     [OK] Task creation (kernel + user)
+     [OK] task_exit() dengan stack reaping
+     [OK] kill_task() untuk terminate task
+     [OK] Time slice 50 ticks (~5 detik dengan timer 100ms)
+     [OK] Stack validation pada context switch
+     [OK] ASLR untuk user stack dan heap
+     [KRITIK] TIME_SLICE = 50 ticks × 100ms = 5 detik — TERLALU BESAR
+     [KRITIK] find_next_ready() round-robin statis — tidak ada prioritas
+     [KRITIK] Tidak ada load balancing antar CPU
+     [KRITIK] schedule_tick() try_lock — jika gagal, task kehilangan timeslice
+     [KRITIK] CR3 switching di schedule_tick() — overhead TLB flush tinggi
+     [KRITIK] Stack validation hanya cek bounds, tidak cek stack canary
+     [KRITIK] Tidak ada signal handling
+     [KRITIK] Tidak ada wait/notify mechanism
+     [KRITIK] Tidak ada futex
+     [KRITIK] Tidak ada real-time guarantees
+     [KRITIK] CURRENT_TASK atomic array diinisialisasi manual — rawan human error
+
+--------------------------------------------------------------------------------
+IV.  SUBSISTEM FILESYSTEM (zenus-fs)
+--------------------------------------------------------------------------------
+
+4.1  VIRTUAL FILESYSTEM (vfs.rs) ── 431 baris
+     [OK] FileSystem trait dengan operasi standar
+     [OK] Mount table (32 mount points)
+     [OK] Path resolution dengan mount prefix matching
+     [OK] File permission (Unix mode bits: rwxrwxrwx)
+     [OK] access_check() untuk UID/GID/EUID/EGID
+     [OK] create_file, create_dir, remove, open, read_dir
+     [OK] Parent directory dan file name parsing
+     [KRITIK] find_mount() O(n) search — tidak ada tree structure
+     [KRITIK] access_check() parameter _uid dan _gid tidak dipakai — warning
+     [KRITIK] Tidak ada symlink handling di path resolution
+     [KRITIK] Tidak ada file locking (flock, fcntl)
+     [KRITIK] Tidak ada inotify/fanotify
+     [KRITIK] Path traversal belum tentu aman (belum diuji secara ekstensif)
+     [KRITIK] Mount path static &'static str — tidak bisa unmount
+
+4.2  TMPFS (tmpfs.rs)
+     [OK] In-memory filesystem untuk root
+     [OK] 128 node, 4KB max file size, linked-list directory
+     [KRITIK] 4KB max file size — sangat terbatas
+     [KRITIK] Linked-list directory — O(n) lookup
+     [KRITIK] Tidak ada hard link support
+     [KRITIK] Tidak ada sparse file support
+
+4.3  DEVFS (devfs.rs)
+     [OK] Device filesystem: null, zero, console, serial
+     [OK] Block device registration
+     [OK] ATA drive terdaftar sebagai /dev/sda, sdb, sdc, sdd
+     [KRITIK] Block device read/write callback hardcoded — tidak fleksibel
+     [KRITIK] Tidak ada device numbering otomatis (major/minor)
+
+4.4  TARFS (tarfs.rs)
+     [OK] Read-only ustar tar parser
+     [OK] Mount di /initrd
+     [OK] 64 entries max
+     [KRITIK] Read-only — tidak bisa write
+     [KRITIK] Tidak ada compression support (gzip, xz, zstd)
+
+4.5  EXT2 FILESYSTEM (ext2.rs, ext2_fsck.rs) ── +500 baris
+     [OK] Read-write ext2 driver
+     [OK] Superblock, BGDT, inode parsing
+     [OK] Block allocation, indirect blocks
+     [OK] ext2 fsck (superblock, BGDT, bitmap, root inode)
+     [KRITIK] Tidak ada ext3/4 journal — journal terpisah (lihat 4.7)
+     [KRITIK] Tidak ada ext4 features: extent, flex_bg, 64-bit, inline data
+     [KRITIK] Tidak ada extended attributes (xattr)
+     [KRITIK] Tidak ada ACL
+     [KRITIK] Performa buruk karena PIO ATA
+
+4.6  BLOCK CACHE (block_cache.rs)
+     [OK] 64-entry LRU write-back cache
+     [OK] bc_read, bc_write, bc_flush, bc_stats
+     [KRITIK] 64 entry × 512 byte = 32KB cache — SANGAT KECIL
+     [KRITIK] Tidak ada write-back throttling
+     [KRITIK] Tidak ada cache coherency antar CPU
+     [KRITIK] Tidak ada read-ahead
+
+4.7  JOURNAL (journal.rs)
+     [OK] Write-ahead journal (block 3000-3015 = 16 blocks)
+     [OK] init/begin/write/commit/replay
+     [KRITIK] Ukuran journal sangat kecil (16 blocks = 8KB)
+     [KRITIK] Journal terpisah dari filesystem — tidak ada integrasi ext3-style
+     [KRITIK] Tidak ada journal recovery yang sophisticated
+
+4.8  I/O SCHEDULER (io_scheduler.rs)
+     [OK] Noop I/O scheduler (FIFO queue)
+     [OK] Per-device statistics
+     [KRITIK] Tidak ada elevator algorithm (deadline, CFQ, BFQ, kyber)
+     [KRITIK] Tidak ada IO priority
+
+--------------------------------------------------------------------------------
+V.   SUBSISTEM JARINGAN (zenus-net)
+--------------------------------------------------------------------------------
+
+5.1  NIC ABSTRACTION (nic.rs)
+     [OK] Interface table, send_packet/receive_packet, net_poll
+     [OK] NIC registration
+     [KRITIK] Hanya satu NIC driver (RTL8139)
+
+5.2  ETHERNET (ethernet.rs)
+     [OK] Ethernet frame parsing/building
+     [KRITIK] Tidak ada VLAN support (802.1Q)
+     [KRITIK] Tidak ada jumbo frame
+
+5.3  IPV4 (ipv4.rs)
+     [OK] IPv4 packet parsing, header validation
+     [KRITIK] Tidak ada IPv6
+     [KRITIK] Tidak ada IP fragmentation/reassembly
+     [KRITIK] Tidak ada IP options handling
+     [KRITIK] Tidak ada IPsec
+
+5.4  TCP (tcp.rs) ── stack state machine
+     [OK] 11/11 RFC 793 states terimplementasi
+     [OK] Three-way handshake
+     [OK] Retransmission
+     [OK] ISN randomization
+     [OK] Socket integration
+     [OK] TCP echo server (port 7)
+     [KRITIK] Maximum 16 TCB entries — sangat terbatas
+     [KRITIK] Tidak ada congestion control (AIMD, CUBIC, BBR)
+     [KRITIK] Tidak ada window scaling (TCP_WSCALE)
+     [KRITIK] Tidak ada selective ACK (SACK)
+     [KRITIK] Tidak ada timestamp option
+     [KRITIK] Tidak ada Nagle algorithm
+     [KRITIK] Tidak ada keep-alive
+     [KRITIK] Tidak ada SYN flood protection (SYN cookie)
+     [KRITIK] Retransmission timer implementasi dasar — tidak ada RTT estimation
+
+5.5  UDP (udp.rs)
+     [OK] UDP send/recv datagram
+     [OK] Port binding
+     [OK] Ring buffer 8×1500 bytes
+     [KRITIK] Ring buffer kecil (12KB total)
+     [KRITIK] Tidak ada UDP Lite
+     [KRITIK] Tidak ada multicast/broadcast support
+
+5.6  SOCKET API (socket.rs)
+     [OK] BSD socket API: socket/bind/listen/accept/connect/send/recv/sendto/close
+     [OK] AF_INET, SOCK_STREAM, SOCK_DGRAM
+     [KRITIK] Tidak ada AF_UNIX (UNIX domain sockets)
+     [KRITIK] Tidak ada AF_NETLINK
+     [KRITIK] Tidak ada setsockopt/getsockopt comprehensive
+     [KRITIK] Tidak ada non-blocking I/O (O_NONBLOCK)
+     [KRITIK] Tidak ada poll/epoll/select — blocking I/O only
+
+5.7  RTL8139 DRIVER (rtl8139.rs)
+     [OK] PIO mode, IRQ 11 via I/O APIC
+     [OK] RX/TX ring buffer
+     [OK] Link status detection
+     [KRITIK] Hanya PIO mode — tidak ada bus master DMA
+     [KRITIK] Hanya mendukung RTL8139 — tidak ada e1000, virtio, etc.
+     [KRITIK] Tidak ada multi-queue support
+     [KRITIK] Tidak ada checksum offloading
+     [KRITIK] Driver monolithic di crate zenus-net — tidak pluggable
+
+5.8  ARP (arp.rs)
+     [OK] ARP cache, request/reply, gateway support
+     [KRITIK] ARP cache sederhana — tidak ada timeout/garbage collection yang jelas
+     [KRITIK] Tidak ada ARP spoofing protection (DAI, SAVI)
+
+5.9  ICMP (icmp.rs)
+     [OK] ICMP echo reply (ping)
+     [KRITIK] Tidak ada ICMP error generation (destination unreachable, TTL exceed)
+     [KRITIK] Tidak ada ICMPv6
+
+5.10 DHCP CLIENT & SERVER (dhcp.rs, dhcp_server.rs)
+     [OK] DHCP client state machine (DISCOVER→OFFER→REQUEST→ACK)
+     [OK] DHCP server dengan IP pool 10.0.2.100-115, lease table
+     [KRITIK] DHCP server IP pool sangat kecil (16 addr)
+     [KRITIK] Tidak ada DHCPv6
+     [KRITIK] Tidak ada DDNS integration
+
+5.11 DNS (dns.rs)
+     [OK] DNS stub resolver, A-record, CNAME compression
+     [KRITIK] Tidak ada DNSSEC
+     [KRITIK] Tidak ada mDNS
+     [KRITIK] Resolver blocking — tidak ada asynchronous DNS
+
+5.12 ROUTING (route.rs)
+     [OK] Routing table (8 entries, longest-prefix match)
+     [OK] Default gateway
+     [KRITIK] 8 routing entries — sangat terbatas
+     [KRITIK] Tidak ada dynamic routing (OSPF, BGP, RIP)
+     [KRITIK] Tidak ada NAT/PAT
+     [KRITIK] Tidak ada firewall (iptables/nftables)
+     [KRITIK] Tidak ada policy routing
+
+--------------------------------------------------------------------------------
+VI.  SUBSISTEM SYSCALL (zenus-syscall)
+--------------------------------------------------------------------------------
+
+6.1  SYSCALL DISPATCH (syscall.rs) ── 437 baris
+     [OK] 22 syscalls terimplementasi dari 128 slot
+     [OK] User pointer validation (validate_user_range, validate_user_ptr)
+     [OK] Copy user ↔ kernel dengan page-by-page validation (TOCTOU mitigation)
+     [OK] File descriptor management
+     [OK] brk() heap allocation untuk user
+     [OK] stat, readdir, lseek, ioctl, dup, nanosleep, getpid, uname
+     [OK] User/group management: getuid, geteuid, getgid, getegid, setuid, setgid
+     [KRITIK] Hanya 22 syscall — perlu 100+ untuk Linux compatibility
+     [KRITIK] Tidak ada mmap/munmap — brk-only heap
+     [KRITIK] Tidak ada fork/exec/wait — proses model tidak lengkap
+     [KRITIK] Tidak ada pipe — tidak ada IPC sederhana
+     [KRITIK] Tidak ada signal system calls (kill, sigaction, sigreturn)
+     [KRITIK] Tidak ada timer syscalls (timerfd, setitimer)
+     [KRITIK] Tidak ada eventfd, signalfd, epoll
+     [KRITIK] sys_nanosleep mengimplementasi busy-wait dengan PIT ticks
+     [KRITIK] syscall_dispatch hanya 4 argumen — Linux memiliki 6
+     [KRITIK] Tidak ada ptrace — tidak bisa debug user program
+
+6.2  ELF LOADER (elf.rs) ── 472 baris
+     [OK] ELF64 loader dengan PT_LOAD segment mapping
+     [OK] Flat binary loader untuk user.s
+     [OK] User page table creation & mapping
+     [OK] ASLR untuk stack dan heap
+     [OK] Stack (16 pages = 64KB)
+     [KRITIK] Tidak ada ELF interpreter (dynamic linker) — static binaries only
+     [KRITIK] Tidak ada shared library support (no libc)
+     [KRITIK] Tidak ada PT_GNU_STACK, PT_GNU_RELRO, PT_GNU_EH_FRAME
+     [KRITIK] Tidak ada RELRO/ASLR/PIE checking
+     [KRITIK] Stack guard page tidak ada — stack overflow bisa corrupt user memory
+     [KRITIK] load_flat_binary mapping read-only — tidak bisa write (writable=false)
+     [KRITIK] Tidak ada validation bahwa e_entry masuk akal
+
+6.3  FILE DESCRIPTOR (syscall/fd.rs)
+     [OK] fd_open, fd_read, fd_write, fd_close, fd_seek, fd_stat, fd_readdir
+     [OK] fd_close_all_for_task untuk cleanup task exit
+     [OK] fd_dup
+     [KRITIK] File descriptor table per-task tidak terlihat — mungkin global?
+     [KRITIK] Tidak ada O_CLOEXEC flags
+
+--------------------------------------------------------------------------------
+VII. SUBSISTEM SYNCHRONIZATION (zenus-sync)
+--------------------------------------------------------------------------------
+
+7.1  SPINLOCK (spinlock.rs) ── 117 baris
+     [OK] IRQ-safe spinlock dengan atomic CAS
+     [OK] Exponential backoff (1→256 iterations)
+     [OK] try_lock() dengan IRQ disable
+     [OK] lock_no_irq() dan try_lock_no_irq() untuk interrupt context
+     [KRITIK] Exponential backoff maksimal 256 — masih cukup agresif
+     [KRITIK] Tidak ada deadlock detection
+     [KRITIK] Tidak ada lockdep / lock ordering validation
+     [KRITIK] Tidak ada RWLock — writer bias
+     [KRITIK] CAS weak — bisa false negative (spurious fail)
+
+7.2  IRQ GUARD (irq_guard.rs) ── 23 baris
+     [OK] RAII interrupt disable/enable
+     [KRITIK] Tidak ada NMI protection
+
+--------------------------------------------------------------------------------
+VIII. SUBSISTEM KONSOL (zenus-console)
+--------------------------------------------------------------------------------
+
+8.1  SERIAL PORT (serial.rs)
+     [OK] NS16550A UART driver
+     [OK] init, read/write byte, hex output, u64 output
+     [OK] is_data_available
+     [KRITIK] Hardcoded port 0x3F8 (COM1)
+     [KRITIK] Tidak ada interrupt-driven serial I/O (polling murni)
+     [KRITIK] Tidak ada baud rate configuration
+
+8.2  VGA TEXT MODE (vga.rs)
+     [OK] VGA text mode buffer via HHDM direct-map
+     [OK] write_str
+     [KRITIK] Hanya VGA text mode — tidak ada framebuffer / graphics
+     [KRITIK] Tidak ada scrollback buffer
+     [KRITIK] Tidak ada color control
+
+8.3  KERNEL LOGGING (log.rs) ── 181 baris
+     [OK] 6 log levels (Trace, Debug, Info, Warn, Error, Critical)
+     [OK] Circular DMESG buffer (256 entries × 128 bytes)
+     [OK] DMESG snapshot untuk debugging
+     [OK] Macros: ktrace!, kdebug!, kinfo!, kwarn!, kerror!, kcrit!
+     [KRITIK] DMESG buffer 256 × 128 = 32KB — cukup tapi bisa penuh cepat
+     [KRITIK] Tidak ada log rotation
+     [KRITIK] Tidak ada structured logging (JSON)
+     [KRITIK] Tidak ada rate limiting — flood bisa membanjiri log
+
+--------------------------------------------------------------------------------
+IX.  ENTRY POINT & MAIN (apps/)
+--------------------------------------------------------------------------------
+
+9.1  BOOT SEQUENCE (apps/src/lib.rs) ── 357 baris
+     [OK] Boot sequence terstruktur:
+          1. Serial init
+          2. Limine boot info parsing
+          3. Memory regions
+          4. CPU features
+          5. Frame allocator
+          6. Paging
+          7. Interrupts
+          8. APIC + PIT + RTC + RNG
+          9. Interrupt enable
+         10. Scheduler init
+         11. Filesystem init (tmpfs + devfs)
+         12. Initrd load
+         13. PCI scan
+         14. ATA init
+         15. Unit tests (jika testing feature)
+         16. Network init
+         17. TCP echo server (port 7)
+         18. Journal init
+         19. SMP init
+         20. Shell task spawn
+         21. APIC timer start
+         22. User-mode task spawn
+         23. Idle loop
+     [KRITIK] Urutan boot: APIC timer dimulai SETELAH shell task — ada race condition
+     [KRITIK] SMP wake_aps() setelah networking init — AP mungkin melewatkan setup
+     [KRITIK] Global mutables tanpa proteksi pada early boot
+     [KRITIK] Tidak ada boot splash atau progress indicator
+     [KRITIK] Switch statement ATA device 0-3 hardcoded — kode duplikasi
+
+9.2  SHELL (apps/src/shell.rs) ── 1085 baris
+     [OK] 30+ commands: ls, cat, echo, ps, kill, df, mount, dmesg, etc.
+     [OK] History, tab completion
+     [OK] Keyboard input via IRQ1
+     [OK] Task management: ps, kill
+     [OK] Filesystem: ls, cat, echo, mkdir, rm
+     [KRITIK] Shell berjalan sebagai kernel task — tidak ada isolation
+     [KRITIK] Jika shell crash → kernel panic
+
+9.3  USER MODE (user.rs, user.s)
+     [OK] User task spawn via IRETQ
+     [OK] FLAT binary loader
+     [OK] ASLR
+     [KRITIK] User binary (user.s) sangat minimal — hanya demo syscall
+     [KRITIK] Tidak ada libc — semua program harus bare-metal syscall
+
+9.4  LINKER SCRIPT (apps/src/linker.ld) ── 44 baris
+     [OK] Higher-half mapping (0xFFFFFFFF80000000+)
+     [OK] PHDRs untuk load segments
+     [OK] .limine_reqs section di retain
+     [OK] .eh_frame di-discard — menghemat ruang
+     [KRITIK] BOOT SEGREGATION: .eh_frame di-discard → tidak ada stack unwind info
+     [KRITIK] Tidak ada .got section yang terlihat — mungkin implisit
+     [KRITIK] Hanya 4KB alignment — cukup untuk paging
+
+9.5  PANIC HANDLER
+     [OK] Output via serial: message, file, line number
+     [OK] Infinite HLT loop setelah panic
+     [KRITIK] Tidak ada stack trace / backtrace
+     [KRITIK] Tidak ada reboot on panic opsi
+     [KRITIK] Tidak ada kdump/crash dump
+
+--------------------------------------------------------------------------------
+X.   BUILD SYSTEM & KONFIGURASI
+--------------------------------------------------------------------------------
+
+10.1 CARGO WORKSPACE (Cargo.toml)
+     [OK] Workspace dengan 9 members
+     [OK] Single dependency: x86_64 = "0.15"
+     [OK] Rust edition 2021
+     [KRITIK] Hanya 1 dependency eksternal — bagus untuk bare-metal
+     [KRITIK] Tidak ada feature flags untuk modular building
+
+10.2 MAKEFILE (Makefile) ── 128 baris
+     [OK] Build, ISO, HDD image, QEMU run, GDB, test targets
+     [OK] Limine bootable ISO (BIOS + UEFI)
+     [OK] QEMU dengan RTL8139 NIC, 4GB RAM
+     [OK] Test runner dengan QEMU + ext2 disk
+     [KRITIK] Makefile tidak mendukung cross-compile untuk arch lain
+     [KRITIK] HDD image target membutuhkan root (losetup, mount)
+     [KRITIK] Tidak ada CI/CD configuration
+     [KRITIK] Tidak ada Dockerfile / devcontainer
+
+10.3 RUST TOOLCHAIN (rust-toolchain.toml)
+     [OK] Nightly 2026-05-01, target x86_64-unknown-none
+     [KRITIK] Nightly pinned — perlu update manual
+
+10.4 LIMINE CONFIG (limine.conf)
+     [OK] Kernel path, initrd, module path
+     [KRITIK] Tidak ada command line arguments untuk kernel
+
+================================================================================
+XI.  ANALISIS KEAMANAN (SECURITY AUDIT)
+================================================================================
+
+11.1 RING 3 / USER SPACE
+     [OK] Syscall entry via SYSCALL/SYSRET
+     [OK] User pointer validation pada syscall
+     [OK] ASLR untuk stack dan heap
+     [OK] NX bit untuk data pages
+     [OK] Page table isolation per-process (CR3 switching)
+     [KRITIK] Tidak ada SMAP/SMEP — kernel bisa akses user memory langsung
+     [KRITIK] Tidak ada Kernel Page Table Isolation (KPTI)
+     [KRITIK] Tidak ada stack canary / shadow stack (CET)
+     [KRITIK] Tidak ada MPK (Memory Protection Keys)
+     [KRITIK] User pages mapped di kernel page table — tidak ada separation
+
+11.2 MEMORY SAFETY
+     [OK] Rust's ownership & borrow checker
+     [OK] #![no_std] — no standard library memory issues
+     [KRITIK] Penggunaan unsafe blok sangat intensif (inline asm, pointer arithmetic)
+     [KRITIK] static mut variables di banyak tempat
+     [KRITIK] allow(static_mut_refs) — circumventing Rust safety
+     [KRITIK] allow(dead_code) — kode mati tidak dibersihkan
+
+11.3 KONEKSI JARINGAN
+     [OK] User pointer validation
+     [KRITIK] Tidak ada firewall — semua port terbuka
+     [KRITIK] TCP echo server tanpa otentikasi
+     [KRITIK] DHCP server tanpa validasi
+     [KRITIK] Tidak ada rate limiting untuk TCP connections
+     [KRITIK] Tidak ada TLS
+
+11.4 FILE SYSTEM SECURITY
+     [OK] Unix permission model (owner/group/other)
+     [OK] access_check() sebelum I/O
+     [KRITIK] Root (UID 0) mendapatkan akses penuh — standar Unix
+     [KRITIK] Tidak ada ACL
+     [KRITIK] Tidak ada audit log untuk akses file
+
+================================================================================
+XII. PERFORMA & SKALABILITAS
+================================================================================
+
+12.1 KINERJA KRITIS
+     [KRITIK] Single lock untuk frame allocator → contention di SMP
+     [KRITIK] PIO ATA (3-5 MB/s) vs DMA (300+ MB/s) — bottleneck utama
+     [KRITIK] PIO NIC (RTL8139) — bottleneck jaringan utama
+     [KRITIK] Tidak ada huge pages → TLB miss tinggi
+     [KRITIK] Free-list allocator O(n) — lambat untuk banyak alokasi
+     [KRITIK] Block cache 32KB — sangat kecil untuk filesystem I/O
+
+12.2 SKALABILITAS
+     [KRITIK] Maks 128 task — limitasi untuk server
+     [KRITIK] Maks 16 TCP connection — sangat kecil
+     [KRITIK] Maks 32 mount points
+     [KRITIK] Maks 64 PCI devices
+     [KRITIK] Maks 256 routing entries
+     [KRITIK] Tidak ada load balancing antar CPU
+
+================================================================================
+XIII. KELEBIHAN (POSITIVES / STRENGTHS)
+================================================================================
+
+  [POSITIF]  ✅ Ditulis dalam Rust — memory safety tanpa GC
+  [POSITIF]  ✅ Modular crate-based architecture — separation of concerns
+  [POSITIF]  ✅ Boot protocol Limine — modern, support BIOS+UEFI
+  [POSITIF]  ✅ TCP/IP stack dari awal (raw socket → TCP state machine)
+  [POSITIF]  ✅ ext2 read-write + fsck + journal — cukup mature
+  [POSITIF]  ✅ SMP boot dengan per-CPU initialization
+  [POSITIF]  ✅ Preemptive multitasking dengan APIC timer
+  [POSITIF]  ✅ Ring 3 user mode dengan syscall interface
+  [POSITIF]  ✅ ASLR untuk stack dan heap user
+  [POSITIF]  ✅ VFS dengan mount table — filesystem abstraction
+  [POSITIF]  ✅ Block cache + journal — crash safety
+  [POSITIF]  ✅ BSD socket API — familiar untuk developer
+  [POSITIF]  ✅ IRQ-safe spinlock dengan backoff
+  [POSITIF]  ✅ Logging system (dmesg) dengan multiple levels
+  [POSITIF]  ✅ Shell interaktif dengan 30+ commands
+  [POSITIF]  ✅ Dependency minimal (hanya x86_64 crate)
+  [POSITIF]  ✅ Kode terstruktur dan relatif mudah dibaca
+  [POSITIF]  ✅ Unix permission model (UID/GID, mode bits)
+  [POSITIF]  ✅ ELF loader untuk user program
+  [POSITIF]  ✅ ACPI reboot/shutdown support
+  [POSITIF]  ✅ DHCP client + server built-in
+
+================================================================================
+XIV.  KEKURANGAN KRITIS (CRITICAL SHORTCOMINGS)
+================================================================================
+
+  [KRITIS]   ❌ Hanya mendukung x86_64 — tidak ada portabilitas
+  [KRITIS]   ❌ Tidak ada driver virtio — tidak bisa jalan di cloud VM efisien
+  [KRITIS]   ❌ ATA PIO-only (tanpa DMA) — performa storage sangat buruk
+  [KRITIS]   ❌ Network driver PIO-only (RTL8139) — performa jaringan buruk
+  [KRITIS]   ❌ Tidak ada dynamic memory management (swap, OOM, page reclaim)
+  [KRITIS]   ❌ Kernel heap 16MB fixed — tidak bisa scale
+  [KRITIS]   ❌ Tidak ada shared library / libc — user program sangat terbatas
+  [KRITIS]   ❌ Hanya 22 syscall — perlu ratusan untuk aplikasi riil
+  [KRITIS]   ❌ Tidak ada fork/exec — tidak bisa spawn program
+  [KRITIS]   ❌ Tidak ada pipe/IPC — proses tidak bisa komunikasi
+  [KRITIS]   ❌ Tidak ada signal handling
+  [KRITIS]   ❌ Tidak ada filesystem journaling terintegrasi (ext3/4-style)
+  [KRITIS]   ❌ Shell berjalan di kernel space — risk total
+  [KRITIS]   ❌ Tidak ada init system (PID 1)
+  [KRITIS]   ❌ Tidak ada package manager
+  [KRITIS]   ❌ Tidak ada SSH
+  [KRITIS]   ❌ Tidak ada firewall
+  [KRITIS]   ❌ Tidak ada SMAP/SMEP/KPTI — mitigasi CPU bug absen
+  [KRITIS]   ❌ Tidak ada stack trace pada panic
+  [KRITIS]   ❌ Tidak ada CI/CD pipeline
+
+================================================================================
+XV.  METRIK KODE (APPROXIMATE)
+================================================================================
+
+  Total file .rs        : ~50 file
+  Total perkiraan baris : ~8,000 - 10,000 baris
+  Total crate           : 8 subsystem + 1 entry point
+  Total syscall         : 22 / 128 slot
+  Total task maximum    : 128
+  Total TCP connection  : 16
+  Total mount points    : 32
+  Total PCI devices     : 256 max
+  Total ATA devices     : 4 max
+  Test unit             : 25 tests (testing feature)
+  Dependency eksternal  : 1 (x86_64 = "0.15")
+  Fitur CPU             : 12 fitur terdeteksi
+  Heap size             : 16 MB
+  Block cache           : 32 KB (64 × 512 byte)
+  DMESG buffer          : 32 KB (256 × 128 byte)
+  Time slice            : 50 ticks (~5 detik)
+
+================================================================================
+XVI.  KATEGORI KEMATANGAN
+================================================================================
+
+  Boot & CPU Init       : ████████████████░░░░  80% (Stabil)
+  Memory Management     : ██████████░░░░░░░░░░  50% (Fungsional)
+  Interrupt Handling    : ████████████████░░░░  80% (Stabil)
+  Scheduling            : ██████████░░░░░░░░░░  50% (Dasar)
+  Filesystem            : ██████████░░░░░░░░░░  50% (Fungsional)
+  Networking            : █████████░░░░░░░░░░░  45% (Dasar)
+  Syscall API           : ██████░░░░░░░░░░░░░░  30% (Minimal)
+  Security              : ████░░░░░░░░░░░░░░░░  20% (Basic)
+  Drivers               : ██████░░░░░░░░░░░░░░  30% (Minimal)
+  User Space            : ██░░░░░░░░░░░░░░░░░░  10% (Prototipe)
+  Build System          : ██████████████░░░░░░  70% (Fungsional)
+  Testing               : ██████░░░░░░░░░░░░░░  30% (Minimal)
+  Documentation         : ████░░░░░░░░░░░░░░░░  20% (Sangat Kurang)
+  Production Readiness  : ███░░░░░░░░░░░░░░░░░  18.5% (Pre-Alpha)
+
+================================================================================
+XVII. KESIMPULAN
+================================================================================
+
+Zenus OS adalah proyek kernel yang ambisius dengan fondasi yang solid secara
+arsitektur. Ditulis dalam Rust, proyek ini menunjukkan pemahaman yang baik
+tentang low-level system programming: boot protocol, paging, interrupt
+handling, multitasking, TCP/IP stack, dan filesystem.
+
+KEKUATAN UTAMA:
+  - Bahasa Rust memberikan memory safety yang unik di dunia kernel
+  - Arsitektur crate-based modular dan bersih
+  - Implementasi TCP/IP dari awal cukup mengesankan
+  - ext2 + fsck + journal menunjukkan perhatian pada data integrity
+  - Preemptive multitasking + SMP functional
+
+KELEMAHAN UTAMA:
+  - Performa I/O sangat terbatas (PIO untuk ATA dan NIC)
+  - Tidak ada dynamic memory management (swap, OOM)
+  - User space sangat primitif (no libc, no fork/exec)
+  - Syscall API sangat terbatas (22 dari 300+ yang dibutuhkan)
+  - Tidak ada driver untuk hardware modern (virtio, NVMe, AHCI, e1000)
+  - Keamanan minimal (no SMAP/SMEP, no KPTI)
+  - Dokumentasi sangat kurang
+
+PROYEKSI:
+  Untuk mencapai beta, diperlukan setidaknya:
+  1. Driver AHCI/SATA dan virtio-blk (DMA)
+  2. Driver virtio-net (DMA)
+  3. Shared library support (dynamic linker + subset libc)
+  4. fork/exec/wait/exit system calls
+  5. Init system (PID 1)
+  6. Basic device model
+  7. Dynamic memory management (swap + OOM killer)
+
+  Estimasi waktu: 12-24 bulan dengan tim penuh waktu.
+
+================================================================================
+                     [AKHIR LAPORAN AUDIT]
+================================================================================
