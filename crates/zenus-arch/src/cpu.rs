@@ -22,6 +22,7 @@ pub fn init_percpu(cpu_id: u32) {
     let addr = unsafe { &PER_CPU[idx] as *const _ as u64 };
     unsafe {
         write_msr(0xC0000102, addr);
+        write_msr(0xC0000103, addr);
     }
 }
 

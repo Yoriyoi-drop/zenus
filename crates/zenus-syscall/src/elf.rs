@@ -160,7 +160,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
     let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
 
     let stack_pages = 16;
-    for i in 1..stack_pages {
+    for i in 0..stack_pages {
         let stack_virt = stack_top - ((stack_pages - i) as u64) * paging::PAGE_SIZE as u64;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {
@@ -271,7 +271,7 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
 
     let stack_pages = 16;
     dbg.write_str("[FLAT] stack...\n");
-    for i in 1..stack_pages {
+    for i in 0..stack_pages {
         let stack_virt = stack_top - ((stack_pages - i) as u64) * page_size;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {
@@ -443,7 +443,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
     let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
 
     let stack_pages = 16;
-    for i in 1..stack_pages {
+    for i in 0..stack_pages {
         let stack_virt = stack_top - ((stack_pages - i) as u64) * paging::PAGE_SIZE as u64;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {

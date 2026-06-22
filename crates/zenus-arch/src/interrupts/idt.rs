@@ -133,6 +133,39 @@ extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
             s.write_hex(val);
         }
     }
+    // Actual CPU registers at fault time
+    let rax: u64; let rbx: u64; let rcx: u64; let rdx: u64;
+    let rsi: u64; let rdi: u64; let rbp: u64;
+    let r8: u64; let r9: u64; let r10: u64; let r11: u64;
+    let r12: u64; let r13: u64; let r14: u64; let r15: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, rax", "mov {}, rbx", "mov {}, rcx", "mov {}, rdx",
+            "mov {}, rsi", "mov {}, rdi", "mov {}, rbp",
+            "mov {}, r8",  "mov {}, r9",  "mov {}, r10", "mov {}, r11",
+            "mov {}, r12", "mov {}, r13", "mov {}, r14", "mov {}, r15",
+            out(reg) rax,  out(reg) rbx,  out(reg) rcx,  out(reg) rdx,
+            out(reg) rsi,  out(reg) rdi,  out(reg) rbp,
+            out(reg) r8,   out(reg) r9,   out(reg) r10,  out(reg) r11,
+            out(reg) r12,  out(reg) r13,  out(reg) r14,  out(reg) r15,
+            options(nostack, preserves_flags),
+        );
+    }
+    s.write_str(" RAX="); s.write_hex(rax);
+    s.write_str(" RCX="); s.write_hex(rcx);
+    s.write_str(" RSI="); s.write_hex(rsi);
+    s.write_str(" RDI="); s.write_hex(rdi);
+    s.write_str(" RBX="); s.write_hex(rbx);
+    s.write_str(" RDX="); s.write_hex(rdx);
+    s.write_str(" RBP="); s.write_hex(rbp);
+    s.write_str(" R8="); s.write_hex(r8);
+    s.write_str(" R9="); s.write_hex(r9);
+    s.write_str(" R10="); s.write_hex(r10);
+    s.write_str(" R11="); s.write_hex(r11);
+    s.write_str(" R12="); s.write_hex(r12);
+    s.write_str(" R13="); s.write_hex(r13);
+    s.write_str(" R14="); s.write_hex(r14);
+    s.write_str(" R15="); s.write_hex(r15);
     s.write_str("\n");
     loop { x86_64::instructions::hlt(); }
 }
@@ -158,17 +191,51 @@ fn try_handle_user_page_fault(addr: u64, code: PageFaultErrorCode) -> bool {
         }
 
         let writable = (code.bits() & 0x2) != 0;
+        let executable = (code.bits() & 0x10) != 0;
         let page_virt = addr & !0xFFF;
         let cr3: u64;
         unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3); }
         return zenus_mem::paging::map_user_page_raw(
-            cr3, page_virt, frame.as_u64(), writable, false,
+            cr3, page_virt, frame.as_u64(), writable, executable,
         );
     }
     false
 }
 
-extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: PageFaultErrorCode) {
+extern "x86-interrupt" fn page_fault_handler(
+    frame: InterruptStackFrame,
+    code: PageFaultErrorCode,
+) {
+    // Capture CPU registers BEFORE any Rust code can modify them.
+    // The x86-interrupt ABI saves them on entry, but as soon as
+    // this function body starts, the compiler may reuse GP regs.
+    let (r_r15, r_r14, r_r13, r_r12, r_r11, r_r10, r_r9, r_r8);
+    let (r_rdi, r_rsi, r_rbp, r_rbx, r_rdx, r_rcx, r_rax);
+    unsafe {
+        core::arch::asm!(
+            "mov {}, r15",
+            "mov {}, r14",
+            "mov {}, r13",
+            "mov {}, r12",
+            "mov {}, r11",
+            "mov {}, r10",
+            "mov {}, r9",
+            "mov {}, r8",
+            "mov {}, rdi",
+            "mov {}, rsi",
+            "mov {}, rbp",
+            "mov {}, rbx",
+            "mov {}, rdx",
+            "mov {}, rcx",
+            "mov {}, rax",
+            out(reg) r_r15, out(reg) r_r14, out(reg) r_r13, out(reg) r_r12,
+            out(reg) r_r11, out(reg) r_r10, out(reg) r_r9, out(reg) r_r8,
+            out(reg) r_rdi, out(reg) r_rsi, out(reg) r_rbp, out(reg) r_rbx,
+            out(reg) r_rdx, out(reg) r_rcx, out(reg) r_rax,
+            options(nostack, preserves_flags),
+        );
+    }
+
     let addr = x86_64::registers::control::Cr2::read_raw();
 
     if try_handle_user_page_fault(addr, code) {
@@ -212,11 +279,21 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
         s.write_str("\n*** NEAR-NULL ADDRESS ***");
     }
 
-    let rax_val: u64;
-    unsafe {
-        core::arch::asm!("mov {}, rax", out(reg) rax_val);
-    }
-    s.write_str(" RAX="); s.write_hex(rax_val);
+    s.write_str(" RAX="); s.write_hex(r_rax);
+    s.write_str(" RBX="); s.write_hex(r_rbx);
+    s.write_str(" RCX="); s.write_hex(r_rcx);
+    s.write_str(" RDX="); s.write_hex(r_rdx);
+    s.write_str("\n RSI="); s.write_hex(r_rsi);
+    s.write_str(" RDI="); s.write_hex(r_rdi);
+    s.write_str(" RBP="); s.write_hex(r_rbp);
+    s.write_str(" R8=");  s.write_hex(r_r8);
+    s.write_str(" R9=");  s.write_hex(r_r9);
+    s.write_str("\n R10="); s.write_hex(r_r10);
+    s.write_str(" R11="); s.write_hex(r_r11);
+    s.write_str(" R12="); s.write_hex(r_r12);
+    s.write_str(" R13="); s.write_hex(r_r13);
+    s.write_str(" R14="); s.write_hex(r_r14);
+    s.write_str(" R15="); s.write_hex(r_r15);
 
     let stack = frame.stack_pointer.as_u64();
     s.write_str("\n[STACK]\n");

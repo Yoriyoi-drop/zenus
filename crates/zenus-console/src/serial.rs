@@ -1,7 +1,31 @@
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub struct SerialPort {
     port: u16,
+}
+
+/// Global serial I/O mutex. Prevents interleaved output from concurrent
+/// callers (including SMP cores). Uses `try_lock` internally — if the lock
+/// is contended (e.g. an interrupt handler interrupting a serial write),
+/// the caller spins briefly and then falls through to avoid deadlock.
+static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
+
+fn acquire_serial() {
+    let mut backoff = 1u32;
+    loop {
+        match SERIAL_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(_) => {
+                for _ in 0..backoff { core::hint::spin_loop(); }
+                backoff = backoff.saturating_mul(2).min(256);
+            }
+        }
+    }
+}
+
+fn release_serial() {
+    SERIAL_LOCK.store(false, Ordering::Release);
 }
 
 impl SerialPort {
@@ -21,7 +45,7 @@ impl SerialPort {
         }
     }
 
-    fn write_byte(&mut self, byte: u8) {
+    fn write_byte(&self, byte: u8) {
         unsafe {
             core::arch::asm!("out dx, al", in("dx") self.port, in("al") byte, options(nostack, preserves_flags));
         }
@@ -43,21 +67,22 @@ impl SerialPort {
         self.read_byte(self.port + 5) & 0x01 != 0
     }
 
-    pub fn read_byte_serial(&mut self) -> u8 {
+    pub fn read_byte_serial(&self) -> u8 {
         while !self.is_data_available() {
             core::hint::spin_loop();
         }
         self.read_byte(self.port)
     }
 
-    pub fn write_byte_serial(&mut self, byte: u8) {
+    pub fn write_byte_serial(&self, byte: u8) {
         while !self.is_transmit_empty() {
             core::hint::spin_loop();
         }
         self.write_byte(byte);
     }
 
-    pub fn write_str(&mut self, s: &str) {
+    pub fn write_str_locked(&self, s: &str) {
+        acquire_serial();
         for byte in s.bytes() {
             match byte {
                 0x0A => {
@@ -67,14 +92,17 @@ impl SerialPort {
                 _ => self.write_byte_serial(byte),
             }
         }
+        release_serial();
     }
 
-    pub fn write_u64(&mut self, val: u64) {
+    pub fn write_u64(&self, val: u64) {
         let mut buf = [0u8; 20];
         let mut i = 0;
         let mut v = val;
+        acquire_serial();
         if v == 0 {
             self.write_byte_serial(b'0');
+            release_serial();
             return;
         }
         while v > 0 {
@@ -86,9 +114,11 @@ impl SerialPort {
             i -= 1;
             self.write_byte_serial(buf[i]);
         }
+        release_serial();
     }
 
-    pub fn write_bytes(&mut self, buf: &[u8]) {
+    pub fn write_bytes(&self, buf: &[u8]) {
+        acquire_serial();
         for &byte in buf {
             match byte {
                 0x0A => {
@@ -98,15 +128,19 @@ impl SerialPort {
                 _ => self.write_byte_serial(byte),
             }
         }
+        release_serial();
     }
 
-    pub fn write_hex(&mut self, val: u64) {
+    pub fn write_hex(&self, val: u64) {
         let hex = b"0123456789ABCDEF";
-        self.write_str("0x");
+        acquire_serial();
+        self.write_byte_serial(b'0');
+        self.write_byte_serial(b'x');
         for i in (0..16).rev() {
             let nibble = ((val >> (i * 4)) & 0xF) as usize;
             self.write_byte_serial(hex[nibble]);
         }
+        release_serial();
     }
 }
 
@@ -121,7 +155,7 @@ impl fmt::Write for SerialPort {
 macro_rules! serial_print {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
-        let mut _serial = $crate::serial::SerialPort::new(0x3F8);
+        let _serial = $crate::serial::SerialPort::new(0x3F8);
         write!(_serial, $($arg)*).ok();
     }};
 }

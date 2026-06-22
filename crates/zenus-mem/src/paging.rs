@@ -179,9 +179,24 @@ pub fn create_address_space() -> Option<u64> {
 /// Walk the user-space page table and free all mapped frames and page table pages.
 /// Frees: all PT-level frame mappings, intermediate PDPT/PD/PT pages, and the PML4 page.
 /// Only walks user space (entries 0-255 of PML4).
+/// SAFETY: Must not be called on the currently active address space (unless it's
+/// the kernel's). Switches to kernel_cr3() if the target matches the current CR3.
 pub fn destroy_address_space(cr3_raw: u64) {
-    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+    let current_cr3 = get_level4_addr_raw() & !0xFFF;
     let cr3_phys = cr3_raw & !0xFFF;
+
+    // Never free the kernel's address space
+    let kernel_cr3_phys = KERNEL_CR3.load(Ordering::Acquire) & !0xFFF;
+    if cr3_phys == kernel_cr3_phys {
+        return;
+    }
+
+    // If freeing the currently active address space, switch to kernel CR3 first
+    if cr3_phys == current_cr3 {
+        set_cr3(kernel_cr3_phys);
+    }
+
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
     let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
 
     // PML4 (level 4)

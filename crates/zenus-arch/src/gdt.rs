@@ -38,7 +38,7 @@ pub fn init() {
         let top_addr = unsafe { STACK.as_ptr().add(STACK_SIZE) };
         VirtAddr::from_ptr(top_addr)
     };
-    tss.interrupt_stack_table[DF_IST_IDX] = {
+    tss.interrupt_stack_table[DF_IST_IDX + 1] = {
         const DF_STACK_SIZE: usize = 4096 * 4;
         static mut DF_STACK: [u8; DF_STACK_SIZE] = [0; DF_STACK_SIZE];
         let top_addr = unsafe { DF_STACK.as_ptr().add(DF_STACK_SIZE) };
@@ -71,7 +71,7 @@ pub fn init_ap() {
         let top_addr = unsafe { AP_STACKS[idx].as_ptr().add(AP_STACK_SIZE) };
         VirtAddr::from_ptr(top_addr)
     };
-    tss.interrupt_stack_table[DF_IST_IDX] = {
+    tss.interrupt_stack_table[DF_IST_IDX + 1] = {
         let top_addr = unsafe { AP_DF_STACKS[idx].as_ptr().add(AP_DF_STACK_SIZE) };
         VirtAddr::from_ptr(top_addr)
     };

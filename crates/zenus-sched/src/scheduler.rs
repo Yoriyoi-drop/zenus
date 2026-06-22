@@ -61,6 +61,10 @@ core::arch::global_asm!(
     //   RPL=3 → user frame (5 items): fix SS, iretq
     "context_switch_yield:",
     "  cli",
+    // Reserve 16 bytes so the 3-item frame (24 bytes at [RSP+120..143])
+    // does NOT overwrite the caller's stack frame above the return address.
+    // Net: after restore, RSP = caller's RSP (no +16 displacement).
+    "  sub rsp, 16",
     // Save all 15 GP registers first (preserves original RAX, RCX, etc.)
     "  push rax",
     "  push rcx",
@@ -77,10 +81,10 @@ core::arch::global_asm!(
     "  push r13",
     "  push r14",
     "  push r15",
-    // Stack: [R15..RAX][return_addr][saved_rdi, saved_rsi...]
-    // return_addr is at [rsp + 120] (15 items × 8)
+    // Stack: [R15..RAX][16 reserved][return_addr]
+    // return_addr is at [rsp + 136] (15 items × 8 + 16 reserved)
     // Read return_addr into rax (RAX is safe — saved at [rsp+112])
-    "  mov rax, [rsp + 120]",
+    "  mov rax, [rsp + 136]",
     // Write 3-item interrupt frame ABOVE the 15 regs,
     // overwriting return_addr and two caller-slots (no longer needed)
     // Layout: [rsp+120]=RIP, [rsp+128]=CS, [rsp+136]=RFLAGS
@@ -122,6 +126,10 @@ core::arch::global_asm!(
     "  jmp rax",
     // User task (5-item frame: RIP, CS, RFLAGS, RSP, SS)
     "3:",
+    "  xor eax, eax",
+    "  xor edx, edx",
+    "  mov ecx, 0xC0000102",
+    "  wrmsr",
     "  mov qword ptr [rsp + 32], 0x1b",
     "  iretq",
     ".att_syntax prefix",
@@ -181,6 +189,10 @@ core::arch::global_asm!(
   "  popfq",
   "  jmp rax",
     "3:",
+    "  xor eax, eax",
+    "  xor edx, edx",
+    "  mov ecx, 0xC0000102",
+    "  wrmsr",
     "  mov qword ptr [rsp + 32], 0x1b",
     "  iretq",
     ".att_syntax prefix",

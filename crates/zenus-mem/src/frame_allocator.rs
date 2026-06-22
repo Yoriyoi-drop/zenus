@@ -134,17 +134,29 @@ impl FrameAllocator {
     }
 
     pub fn free_frame(&mut self, addr: PhysAddr) {
+        let a = addr.as_u64();
+        for i in 0..self.free_count {
+            if self.free_stack[i] == a {
+                return;
+            }
+        }
+        for i in 0..self.region_count {
+            let r = self.regions[i];
+            if a >= r.base && a < r.base + r.length {
+                return;
+            }
+        }
         if self.free_count < FREE_STACK_SIZE {
-            self.free_stack[self.free_count] = addr.as_u64();
+            self.free_stack[self.free_count] = a;
             self.free_count += 1;
         } else if self.region_count < MAX_REGIONS {
             self.regions[self.region_count] = MemRegion {
-                base: addr.as_u64(),
+                base: a,
                 length: PAGE_SIZE as u64,
             };
             self.region_count += 1;
-            if self.next_free > addr.as_u64() {
-                self.next_free = addr.as_u64();
+            if self.next_free > a {
+                self.next_free = a;
             }
         } else {
             let mut s = zenus_console::serial::SerialPort::new(0x3F8);
