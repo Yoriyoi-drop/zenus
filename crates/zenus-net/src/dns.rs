@@ -126,7 +126,6 @@ fn parse_response(buf: &[u8]) -> Option<[u8; 4]> {
     }
 
     let mut off = 12usize;
-    let mut depth = 0usize;
 
     for _ in 0..qdcount {
         while off < buf.len() {
@@ -145,7 +144,7 @@ fn parse_response(buf: &[u8]) -> Option<[u8; 4]> {
     }
 
     for _ in 0..ancount {
-        depth = 0;
+        let mut depth = 0usize;
         while off < buf.len() && depth < 16 {
             let b = buf[off];
             if b == 0 {

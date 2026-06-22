@@ -136,14 +136,12 @@ pub fn journal_commit() -> bool {
     bc_flush();
 
     // Phase 2: Mark committed in header (after data is written)
-    let hdr = read_header();
-    let hdr = match hdr {
+    match read_header() {
         Some(mut h) => {
             h.state = JNL_STATE_COMMITTED;
             if !write_header(&h) {
                 return false;
             }
-            h
         }
         None => return false,
     };

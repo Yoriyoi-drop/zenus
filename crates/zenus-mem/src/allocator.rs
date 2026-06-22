@@ -127,7 +127,7 @@ impl FreeListAllocator {
         if ptr.is_null() { return; }
 
         let pad = if core::mem::size_of::<u16>() + 1 <= 16 {
-            unsafe { *((ptr as *const u16).sub(1)) } as usize
+            unsafe { *((ptr as *const u16).sub(1)) as usize }
         } else {
             0
         };

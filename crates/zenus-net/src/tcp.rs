@@ -679,7 +679,6 @@ pub fn poll_retransmit(iface_idx: usize) {
             let local_ip = tcb.local_ip;
             let src_port = tcb.local_port;
             let dst_port = tcb.remote_port;
-            let send_nxt = tcb.send_nxt;
             let send_una = tcb.send_una;
 
             if tcb.state == TCP_SYN_SENT || tcb.state == TCP_SYN_RECEIVED {
