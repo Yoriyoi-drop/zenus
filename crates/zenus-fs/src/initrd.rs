@@ -28,7 +28,7 @@ fn parse_octal(buf: &[u8]) -> u64 {
 }
 
 pub fn load_initrd(addr: u64, len: u64) {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str("[INITRD] Loading at ");
     s.write_hex(addr);
     s.write_str(" size ");

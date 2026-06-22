@@ -148,7 +148,7 @@ pub extern "C" fn entry() -> ! {
     frame_allocator::global_init(mem_regions);
     {
         let allocator = frame_allocator::FRAME_ALLOCATOR.lock();
-        let mut s2 = SerialPort::new(0x3F8);
+        let s2 = SerialPort::new(0x3F8);
         s2.write_str("[OK] Memory: ");
         s2.write_u64(allocator.total_memory() / (1024 * 1024));
         s2.write_str(" MB total\n");

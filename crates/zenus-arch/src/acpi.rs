@@ -7,7 +7,7 @@ const KBD_DATA: u16 = 0x60;
 const KBD_RESET_CPU: u8 = 0xFE;
 
 pub fn reboot_via_keyboard() -> ! {
-    let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+    let s = zenus_console::serial::SerialPort::new(0x3F8);
 
     // Try ACPI reset register from FADT
     let fadt_addr = find_fadt();
@@ -65,7 +65,7 @@ pub fn reboot_via_keyboard() -> ! {
 }
 
 pub fn shutdown_via_acpi() -> ! {
-    let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+    let s = zenus_console::serial::SerialPort::new(0x3F8);
     s.write_str("[ACPI] Attempting ACPI shutdown...\n");
 
     let fadt_addr = find_fadt();
@@ -101,7 +101,7 @@ fn find_fadt() -> u64 {
         Some(r) => r,
         None => return 0,
     };
-    let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+    let s = zenus_console::serial::SerialPort::new(0x3F8);
     s.write_str("[ACPI] RSDP at 0x");
     s.write_hex(rsdp);
     s.write_str("\n");
@@ -168,6 +168,6 @@ fn get_rsdp() -> Option<u64> {
 }
 
 pub fn init() {
-    let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+    let s = zenus_console::serial::SerialPort::new(0x3F8);
     s.write_str("[OK] ACPI subsystem initialized\n");
 }

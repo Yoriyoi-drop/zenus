@@ -200,7 +200,7 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
     if entry < 0x1000 || entry >= 0x0000_8000_0000_0000 {
         return None;
     }
-    let mut dbg = zenus_console::serial::SerialPort::new(0x3F8);
+    let dbg = zenus_console::serial::SerialPort::new(0x3F8);
     dbg.write_str("[FLAT] start\n");
 
     let page_size = paging::PAGE_SIZE as u64;
@@ -213,7 +213,8 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         return None;
     }
 
-    let mut frames: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    let mut frame_buf: [u64; 64] = [0; 64];
+    let mut frame_count: usize = 0;
 
     for i in 0..pages_needed {
         let page_virt = vaddr + (i as u64) * page_size;
@@ -223,12 +224,13 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
             None => {
                 dbg.write_str("[FLAT] alloc failed\n");
                 drop(allocator);
-                free_frames_raw(&frames);
+                free_frames_raw(&frame_buf[..frame_count]);
                 return None;
             }
         };
         drop(allocator);
-        frames.push(frame_phys.as_u64());
+        frame_buf[frame_count] = frame_phys.as_u64();
+        frame_count += 1;
 
         dbg.write_str("[FLAT] frame=");
         dbg.write_hex(frame_phys.as_u64());
@@ -241,10 +243,10 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         let writable = true;
         if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), writable, true) {
             dbg.write_str("[FLAT] map failed\n");
-            free_frames_raw(&frames);
+            free_frames_raw(&frame_buf[..frame_count]);
             return None;
         }
-        frames.pop();
+        frame_count -= 1;
         dbg.write_str("[FLAT] mapped\n");
 
         let copy_start = i * page_size as usize;
@@ -279,12 +281,13 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
             None => {
                 dbg.write_str("[FLAT] stack alloc failed\n");
                 drop(allocator);
-                free_frames_raw(&frames);
+                free_frames_raw(&frame_buf[..frame_count]);
                 return None;
             }
         };
         drop(allocator);
-        frames.push(frame_phys.as_u64());
+        frame_buf[frame_count] = frame_phys.as_u64();
+        frame_count += 1;
 
         unsafe {
             core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, page_size as usize);
@@ -292,10 +295,10 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
             dbg.write_str("[FLAT] stack map failed\n");
-            free_frames_raw(&frames);
+            free_frames_raw(&frame_buf[..frame_count]);
             return None;
         }
-        frames.pop();
+        frame_count -= 1;
     }
     dbg.write_str("[FLAT] done\n");
 

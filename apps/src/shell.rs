@@ -689,7 +689,7 @@ impl Shell {
                     for j in 0..MAX_ECHO_CLIENTS {
                         if state.client_fds[j].is_none() {
                             state.client_fds[j] = Some(client_fd);
-                            let mut s = SerialPort::new(0x3F8);
+                            let s = SerialPort::new(0x3F8);
                             s.write_str("[ECHO] accepted fd ");
                             s.write_u64(client_fd as u64);
                             s.write_str("\n");

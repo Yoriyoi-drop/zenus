@@ -5,7 +5,7 @@ use zenus_sched::scheduler;
 const USER_BINARY: &[u8] = include_bytes!("../user.bin");
 
 fn log(msg: &str) {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str(msg);
 }
 
@@ -20,7 +20,7 @@ pub fn spawn_user() -> u64 {
         }
     };
     log("[USER] New address space CR3=0x");
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_hex(user_cr3);
     s.write_str("\n");
 
@@ -58,7 +58,7 @@ pub fn spawn_user() -> u64 {
         return 0;
     }
 
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str("[OK] Real user mode task spawned (tid=");
     s.write_u64(task_id);
     s.write_str(")\n");

@@ -27,7 +27,7 @@ static mut INTERFACES: [Option<NetworkInterface>; MAX_INTERFACES] = [None; MAX_I
 static mut IFACE_COUNT: usize = 0;
 
 pub fn init() {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
 
     let lo = NetworkInterface {
         nic_type: NicType::Loopback,

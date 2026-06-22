@@ -64,7 +64,7 @@ extern "x86-interrupt" fn debug_handler(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn nmi_handler(_frame: InterruptStackFrame) {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str("!!! NMI !!!\n");
     loop { x86_64::instructions::hlt(); }
 }
@@ -95,7 +95,7 @@ extern "x86-interrupt" fn device_not_available_handler(_frame: InterruptStackFra
 }
 
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code: u64) -> ! {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str("!!! DOUBLE FAULT !!!\n");
     s.write_str("RIP: ");
     s.write_hex(frame.instruction_pointer.as_u64());
@@ -116,7 +116,7 @@ extern "x86-interrupt" fn stack_segment_handler(frame: InterruptStackFrame, _cod
 }
 
 extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     let stk = frame.stack_pointer.as_u64();
     s.write_str("\n[GPF] RIP: ");
     s.write_hex(frame.instruction_pointer.as_u64());
@@ -194,7 +194,7 @@ fn try_handle_user_page_fault(addr: u64, code: PageFaultErrorCode) -> bool {
         let executable = (code.bits() & 0x10) != 0;
         let page_virt = addr & !0xFFF;
         let cr3: u64;
-        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3); }
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags)); }
         return zenus_mem::paging::map_user_page_raw(
             cr3, page_virt, frame.as_u64(), writable, executable,
         );
@@ -242,7 +242,7 @@ extern "x86-interrupt" fn page_fault_handler(
         return;
     }
 
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
 
     let pf_type = match code.bits() & 0x7 {
         0x0 => "supervisor-read-nonpresent",
@@ -330,7 +330,7 @@ extern "x86-interrupt" fn alignment_check_handler(frame: InterruptStackFrame, _c
 }
 
 extern "x86-interrupt" fn machine_check_handler(_frame: InterruptStackFrame) -> ! {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str("!!! MACHINE CHECK !!!\n");
     loop { x86_64::instructions::hlt(); }
 }
@@ -354,24 +354,20 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     let r9: u64; let r10: u64; let r11: u64; let r12: u64;
     let r13: u64; let r14: u64; let r15: u64;
     unsafe {
-        core::arch::asm!("mov {}, rax", out(reg) rax);
-        core::arch::asm!("mov {}, rbx", out(reg) rbx);
-        core::arch::asm!("mov {}, rcx", out(reg) rcx);
-        core::arch::asm!("mov {}, rdx", out(reg) rdx);
-        core::arch::asm!("mov {}, rsi", out(reg) rsi);
-        core::arch::asm!("mov {}, rdi", out(reg) rdi);
-        core::arch::asm!("mov {}, rbp", out(reg) rbp);
-        core::arch::asm!("mov {}, r8", out(reg) r8);
-        core::arch::asm!("mov {}, r9", out(reg) r9);
-        core::arch::asm!("mov {}, r10", out(reg) r10);
-        core::arch::asm!("mov {}, r11", out(reg) r11);
-        core::arch::asm!("mov {}, r12", out(reg) r12);
-        core::arch::asm!("mov {}, r13", out(reg) r13);
-        core::arch::asm!("mov {}, r14", out(reg) r14);
-        core::arch::asm!("mov {}, r15", out(reg) r15);
+        core::arch::asm!(
+            "mov {}, rax", "mov {}, rbx", "mov {}, rcx", "mov {}, rdx",
+            "mov {}, rsi", "mov {}, rdi", "mov {}, rbp",
+            "mov {}, r8",  "mov {}, r9",  "mov {}, r10", "mov {}, r11",
+            "mov {}, r12", "mov {}, r13", "mov {}, r14", "mov {}, r15",
+            out(reg) rax,  out(reg) rbx,  out(reg) rcx,  out(reg) rdx,
+            out(reg) rsi,  out(reg) rdi,  out(reg) rbp,
+            out(reg) r8,   out(reg) r9,   out(reg) r10,  out(reg) r11,
+            out(reg) r12,  out(reg) r13,  out(reg) r14,  out(reg) r15,
+            options(nostack, preserves_flags),
+        );
     }
 
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str("!!! ");
     s.write_str(name);
     s.write_str(" !!!\n");

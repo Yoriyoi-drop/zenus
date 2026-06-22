@@ -1,32 +1,14 @@
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use zenus_sync::spinlock::SpinLock;
 
 pub struct SerialPort {
     port: u16,
 }
 
-/// Global serial I/O mutex. Prevents interleaved output from concurrent
-/// callers (including SMP cores). Uses `try_lock` internally — if the lock
-/// is contended (e.g. an interrupt handler interrupting a serial write),
-/// the caller spins briefly and then falls through to avoid deadlock.
-static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
-
-fn acquire_serial() {
-    let mut backoff = 1u32;
-    loop {
-        match SERIAL_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed) {
-            Ok(_) => return,
-            Err(_) => {
-                for _ in 0..backoff { core::hint::spin_loop(); }
-                backoff = backoff.saturating_mul(2).min(256);
-            }
-        }
-    }
-}
-
-fn release_serial() {
-    SERIAL_LOCK.store(false, Ordering::Release);
-}
+/// Global serial I/O mutex with IRQ disable to prevent deadlock when
+/// interrupt handlers (page fault, GPF, etc.) also write to serial.
+/// SpinLock::lock() disables interrupts while held.
+static SERIAL_LOCK: SpinLock<()> = SpinLock::new(());
 
 impl SerialPort {
     pub const fn new(port: u16) -> Self {
@@ -82,7 +64,7 @@ impl SerialPort {
     }
 
     pub fn write_str(&self, s: &str) {
-        acquire_serial();
+        let _guard = SERIAL_LOCK.lock();
         for byte in s.bytes() {
             match byte {
                 0x0A => {
@@ -92,17 +74,15 @@ impl SerialPort {
                 _ => self.write_byte_serial(byte),
             }
         }
-        release_serial();
     }
 
     pub fn write_u64(&self, val: u64) {
         let mut buf = [0u8; 20];
         let mut i = 0;
         let mut v = val;
-        acquire_serial();
+        let _guard = SERIAL_LOCK.lock();
         if v == 0 {
             self.write_byte_serial(b'0');
-            release_serial();
             return;
         }
         while v > 0 {
@@ -114,11 +94,10 @@ impl SerialPort {
             i -= 1;
             self.write_byte_serial(buf[i]);
         }
-        release_serial();
     }
 
     pub fn write_bytes(&self, buf: &[u8]) {
-        acquire_serial();
+        let _guard = SERIAL_LOCK.lock();
         for &byte in buf {
             match byte {
                 0x0A => {
@@ -128,19 +107,17 @@ impl SerialPort {
                 _ => self.write_byte_serial(byte),
             }
         }
-        release_serial();
     }
 
     pub fn write_hex(&self, val: u64) {
         let hex = b"0123456789ABCDEF";
-        acquire_serial();
+        let _guard = SERIAL_LOCK.lock();
         self.write_byte_serial(b'0');
         self.write_byte_serial(b'x');
         for i in (0..16).rev() {
             let nibble = ((val >> (i * 4)) & 0xF) as usize;
             self.write_byte_serial(hex[nibble]);
         }
-        release_serial();
     }
 }
 

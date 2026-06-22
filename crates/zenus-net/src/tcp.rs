@@ -224,7 +224,7 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
             time_wait_ticks: 0,
         });
 
-        let mut s = SerialPort::new(0x3F8);
+        let s = SerialPort::new(0x3F8);
         s.write_str("[TCP] connect sending SYN from ");
         s.write_u64(local_port as u64);
         s.write_str("->");
@@ -269,7 +269,7 @@ pub fn handle_receive(
     };
 
     if log {
-        let mut s = SerialPort::new(0x3F8);
+        let s = SerialPort::new(0x3F8);
         s.write_str("[TCP-IN] ");
         s.write_u64(src_ip[0] as u64); s.write_str(".");
         s.write_u64(src_ip[1] as u64); s.write_str(".");
@@ -409,7 +409,7 @@ pub fn handle_receive(
                     tcb.retry_count = 0;
                     tcb.retry_ticks = 0;
 
-                    let mut s = SerialPort::new(0x3F8);
+                    let s = SerialPort::new(0x3F8);
                     s.write_str("[TCP] connection ESTABLISHED\n");
                 } else if (flags & TCP_FLAG_SYN) != 0 {
                     let mut syn_ack = build_segment(
@@ -447,7 +447,7 @@ pub fn handle_receive(
                         tcb.retry_count = 0;
                         tcb.retry_ticks = 0;
 
-                        let mut s = SerialPort::new(0x3F8);
+                        let s = SerialPort::new(0x3F8);
                         s.write_str("[TCP] SYN_RCVD->ESTABLISHED\n");
 
                         if !payload.is_empty() {
@@ -741,7 +741,7 @@ pub fn poll_retransmit(iface_idx: usize) {
             tcb.retry_ticks = RETRY_INTERVAL;
 
             if tcb.retry_count == 0 {
-                let mut s = SerialPort::new(0x3F8);
+                let s = SerialPort::new(0x3F8);
                 s.write_str("[TCP] retry exhausted, closing conn ");
                 s.write_u64(i as u64);
                 s.write_str("\n");

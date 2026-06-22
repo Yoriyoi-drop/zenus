@@ -1,11 +1,10 @@
-use core::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 use zenus_console::serial::SerialPort;
 
 use crate::limine::{self, LimineMpInfo};
 
 static CPU_COUNT: AtomicU32 = AtomicU32::new(1);
 static AP_READY_COUNT: AtomicU32 = AtomicU32::new(0);
-static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
 
 static mut AP_IDLE_FN: Option<fn() -> !> = None;
 
@@ -14,12 +13,7 @@ pub fn set_ap_idle_fn(f: fn() -> !) {
 }
 
 fn serial_write(msg: &str) {
-    while SERIAL_LOCK.swap(true, Ordering::Acquire) {
-        core::hint::spin_loop();
-    }
-    let mut s = SerialPort::new(0x3F8);
-    s.write_str(msg);
-    SERIAL_LOCK.store(false, Ordering::Release);
+    SerialPort::new(0x3F8).write_str(msg);
 }
 
 #[repr(C)]
@@ -55,7 +49,7 @@ pub fn init() {
     }
 
     serial_write("[OK] Detected ");
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_u64(count as u64);
     s.write_str(" CPU(s)\n");
 }
@@ -113,14 +107,9 @@ pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
 
     AP_READY_COUNT.fetch_add(1, Ordering::Release);
 
-    while SERIAL_LOCK.swap(true, Ordering::Acquire) {
-        core::hint::spin_loop();
-    }
-    let mut s = SerialPort::new(0x3F8);
-    s.write_str("[AP] CPU ");
-    s.write_u64(info.lapic_id as u64);
-    s.write_str(" started\n");
-    SERIAL_LOCK.store(false, Ordering::Release);
+    SerialPort::new(0x3F8).write_str("[AP] CPU ");
+    SerialPort::new(0x3F8).write_u64(info.lapic_id as u64);
+    SerialPort::new(0x3F8).write_str(" started\n");
 
     let idle_fn = unsafe { AP_IDLE_FN };
     if let Some(f) = idle_fn {

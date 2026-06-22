@@ -117,7 +117,7 @@ impl Rtl8139 {
         let phys = Self::virt_to_phys(virt);
         // RTL8139 is a 32-bit PCI device — can only DMA to <4GB
         if phys == 0 || phys > 0xFFFF_FFFF {
-            let mut s = SerialPort::new(0x3F8);
+            let s = SerialPort::new(0x3F8);
             s.write_str("[RTL8139] ERROR: RX buffer phys addr >4GB or invalid\n");
             return None;
         }
@@ -171,7 +171,7 @@ impl Rtl8139 {
 
         match found {
             Some((io_base, mac, irq_line)) => {
-                let mut s = SerialPort::new(0x3F8);
+                let s = SerialPort::new(0x3F8);
                 s.write_str("[RTL8139] Found at IO 0x");
                 s.write_hex(io_base as u64);
                 s.write_str(" MAC ");
@@ -214,7 +214,7 @@ impl Rtl8139 {
                 }
             }
             None => {
-                let mut s = SerialPort::new(0x3F8);
+                let s = SerialPort::new(0x3F8);
                 s.write_str("[RTL8139] No RTL8139 NIC found\n");
                 None
             }
@@ -274,12 +274,12 @@ impl Rtl8139 {
             unsafe { Port::<u8>::new(0x80).read(); }
         }
 
-        let mut s = SerialPort::new(0x3F8);
+        let s = SerialPort::new(0x3F8);
         s.write_str("[RTL8139] Reset done\n");
     }
 
     pub fn init_hw(&self) {
-        let mut s = SerialPort::new(0x3F8);
+        let s = SerialPort::new(0x3F8);
         s.write_str("[RTL8139] rx_buf_phys=0x");
         s.write_hex(self.rx_buf_phys as u64);
         s.write_str(" virt=0x");
@@ -291,7 +291,7 @@ impl Rtl8139 {
         self.write32(RTL_RCR, rcr);
         self.write8(RTL_CR, CR_TE | CR_RE);
 
-        let mut s = SerialPort::new(0x3F8);
+        let s = SerialPort::new(0x3F8);
         s.write_str("[RTL8139] rx_buf_phys=0x");
         s.write_hex(self.rx_buf_phys as u64);
         s.write_str(" RB=0x");
@@ -373,7 +373,7 @@ impl Rtl8139 {
         let isr = self.read16(RTL_ISR);
         let cbr = self.read_cbr();
         {
-            let mut s = SerialPort::new(0x3F8);
+            let s = SerialPort::new(0x3F8);
             s.write_str("[RX] ISR=");
             s.write_hex(isr as u64);
             s.write_str(" CAPR=");

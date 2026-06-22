@@ -74,7 +74,7 @@ pub fn init() {
         }
     }
 
-    let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+    let s = zenus_console::serial::SerialPort::new(0x3F8);
     s.write_str("[OK] PS/2 Keyboard initialized\n");
 }
 

@@ -1,3 +1,4 @@
+use crate::cpu;
 use crate::gdt;
 
 pub fn switch_to_user(entry: u64, stack_top: u64) -> ! {
@@ -7,6 +8,11 @@ pub fn switch_to_user(entry: u64, stack_top: u64) -> ! {
 
     let rsp = stack_top;
 
+    // Set KERNEL_GS_BASE to PerCpu address so the next SYSCALL's
+    // SWAPGS produces a valid GS base. DO NOT zero it.
+    let percpu_addr = cpu::percpu_virt_addr(0);
+    unsafe { cpu::write_msr(0xC0000102, percpu_addr); }
+
     unsafe {
         core::arch::asm!(
             "mov ds, {user_ds}",
@@ -15,7 +21,7 @@ pub fn switch_to_user(entry: u64, stack_top: u64) -> ! {
             "mov gs, {user_ds}",
             "xor eax, eax",
             "xor edx, edx",
-            "mov ecx, 0xC0000102",
+            "mov ecx, 0xC0000101",
             "wrmsr",
             "push {user_ss}",
             "push {rsp}",

@@ -105,7 +105,7 @@ pub fn fd_read(fd: u64, buf: &mut [u8]) -> Option<u64> {
     let fs = entry.fs?;
     // stdin (fd 0) is special
     if fd == 0 {
-        let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+        let s = zenus_console::serial::SerialPort::new(0x3F8);
         let mut read = 0u64;
         for b in buf.iter_mut() {
             let byte = s.read_byte_serial();
@@ -126,7 +126,7 @@ pub fn fd_write(fd: u64, buf: &[u8]) -> Option<u64> {
     let mut table = FD_TABLE.lock();
     // stdout/stderr (fd 1, 2) are special
     if fd == 1 || fd == 2 {
-        let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+        let s = zenus_console::serial::SerialPort::new(0x3F8);
         for &b in buf {
             s.write_byte_serial(b);
         }

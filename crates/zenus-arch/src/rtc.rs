@@ -70,7 +70,7 @@ pub fn init() {
     let boot = read_all();
     *BOOT_TIME.lock() = Some(boot);
     let t = boot;
-    let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+    let s = zenus_console::serial::SerialPort::new(0x3F8);
     s.write_str("[OK] RTC: ");
     s.write_u64(t.year as u64);
     s.write_str("-");

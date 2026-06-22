@@ -17,12 +17,15 @@ pub struct PerCpu {
 #[no_mangle]
 static mut PER_CPU: [PerCpu; MAX_CPUS] = [PerCpu { user_rsp: 0, kernel_rsp: 0 }; MAX_CPUS];
 
-pub fn init_percpu(cpu_id: u32) {
+pub fn percpu_virt_addr(cpu_id: u32) -> u64 {
     let idx = (cpu_id as usize).min(MAX_CPUS - 1);
-    let addr = unsafe { &PER_CPU[idx] as *const _ as u64 };
+    unsafe { &PER_CPU[idx] as *const _ as u64 }
+}
+
+pub fn init_percpu(cpu_id: u32) {
+    let addr = percpu_virt_addr(cpu_id);
     unsafe {
         write_msr(0xC0000102, addr);
-        write_msr(0xC0000103, addr);
     }
 }
 

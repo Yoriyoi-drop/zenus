@@ -116,13 +116,13 @@ impl FileSystem for DevFs {
             2 => Some(buf.len() as u64),
             3 => {
                 use zenus_console::serial::SerialPort;
-                let mut s = SerialPort::new(0x3F8);
+                let s = SerialPort::new(0x3F8);
                 for &b in buf { s.write_byte_serial(b); }
                 Some(buf.len() as u64)
             }
             4 => {
                 use zenus_console::serial::SerialPort;
-                let mut s = SerialPort::new(0x3F8);
+                let s = SerialPort::new(0x3F8);
                 for &b in buf { s.write_byte_serial(b); }
                 Some(buf.len() as u64)
             }

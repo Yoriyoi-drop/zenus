@@ -138,7 +138,7 @@ fn model_str(model: &[u8; 40]) -> &str {
 }
 
 pub fn init() {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str("[ATA] Scanning IDE channels...\n");
 
     let channels = [

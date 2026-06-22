@@ -91,7 +91,7 @@ static MOUNT_TABLE: SpinLock<MountTable> = SpinLock::new(MountTable::new());
 static VFS_ROOT: SpinLock<Option<VfsNode>> = SpinLock::new(None);
 
 pub fn init() {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
 
     let tmp_fs = crate::tmpfs::TmpFs::new();
     let root = VfsNode {

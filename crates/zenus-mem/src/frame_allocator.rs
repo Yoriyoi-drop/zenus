@@ -86,7 +86,7 @@ impl FrameAllocator {
             0
         };
 
-        let mut s = SerialPort::new(0x3F8);
+        let s = SerialPort::new(0x3F8);
         s.write_str("[OK] Memory: ");
         s.write_u64(allocator.total_memory / (1024 * 1024));
         s.write_str(" MB total\n");
@@ -159,7 +159,7 @@ impl FrameAllocator {
                 self.next_free = a;
             }
         } else {
-            let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+            let s = zenus_console::serial::SerialPort::new(0x3F8);
             s.write_str("[WARN] Frame free stack overflow! Frame lost.\n");
         }
         self.used_memory = self.used_memory.saturating_sub(PAGE_SIZE as u64);

@@ -125,10 +125,12 @@ core::arch::global_asm!(
     "  popfq",
     "  jmp rax",
     // User task (5-item frame: RIP, CS, RFLAGS, RSP, SS)
+    // KERNEL_GS_BASE was set to PerCpu by Rust caller.
+    // Zero GS_BASE so user mode can't access kernel memory via GS segment.
     "3:",
     "  xor eax, eax",
     "  xor edx, edx",
-    "  mov ecx, 0xC0000102",
+    "  mov ecx, 0xC0000101",
     "  wrmsr",
     "  mov qword ptr [rsp + 32], 0x1b",
     "  iretq",
@@ -188,10 +190,12 @@ core::arch::global_asm!(
   "  add rsp, 8",
   "  popfq",
   "  jmp rax",
+    // KERNEL_GS_BASE set by schedule_tick() before return.
+    // Zero GS_BASE so user mode can't access kernel memory via GS.
     "3:",
     "  xor eax, eax",
     "  xor edx, edx",
-    "  mov ecx, 0xC0000102",
+    "  mov ecx, 0xC0000101",
     "  wrmsr",
     "  mov qword ptr [rsp + 32], 0x1b",
     "  iretq",
@@ -200,11 +204,34 @@ core::arch::global_asm!(
 
 pub fn init() {
     let mut tasks = TASKS.lock();
-    let idle = Task::new(0, 0);
-    tasks.tasks[0] = Some(idle);
+
+    // Idle task: allocate a 4K kernel stack and construct a 3-item kernel frame
+    // so the scheduler can switch to idle() with a valid RSP.
+    let (idle_stack_base, _idle_layout) = unsafe { alloc_stack(4096) };
+    let idle_stack_top = idle_stack_base.wrapping_add(4096);
+    let mut idle_sp = idle_stack_top as *mut u64;
+    unsafe {
+        idle_sp = idle_sp.sub(1);
+        idle_sp.write(0x202u64);                   // RFLAGS (IF set)
+        idle_sp = idle_sp.sub(1);
+        idle_sp.write(0x08u64);                    // CS (kernel)
+        idle_sp = idle_sp.sub(1);
+        idle_sp.write(idle as *const () as usize as u64);
+        for _ in 0..15 {
+            idle_sp = idle_sp.sub(1);
+            idle_sp.write(0u64);                   // zeroed GP registers
+        }
+    }
+    let idle_initial_rsp = idle_sp as u64;
+
+    let mut idle_task = Task::new(0, idle_initial_rsp);
+    idle_task.rsp = idle_initial_rsp;
+    idle_task.stack_alloc = idle_stack_base;
+    idle_task.stack_size = 4096;
+    tasks.tasks[0] = Some(idle_task);
     TASK_COUNT.store(1, Ordering::Release);
 
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str("[OK] Scheduler initialized\n");
 }
 
@@ -446,7 +473,10 @@ pub fn yield_now() {
     // handler can observe the TASKS array in an inconsistent state
     // or steal a context switch via try_lock().
     x86_64::instructions::interrupts::disable();
+    // SpinLockGuard::drop() may re-enable IF. Disable again after drop
+    // to close the window before context_switch_yield cli.
     drop(tasks);
+    x86_64::instructions::interrupts::disable();
 
     // Restore next task's user_rsp into PerCpu
     if next_user_rsp != 0 {
@@ -462,6 +492,14 @@ pub fn yield_now() {
     if next_kernel_rsp != 0 {
         zenus_arch::cpu::set_percpu_kernel_rsp(cpu, next_kernel_rsp);
         zenus_arch::gdt::set_tss_stack(x86_64::VirtAddr::new(next_kernel_rsp));
+    }
+
+    // Ensure KERNEL_GS_BASE points to this CPU's PerCpu struct before
+    // transitioning. Required when returning to Ring 3 so the next SYSCALL
+    // SWAPGS finds the correct GS base. Also safe for Ring 0→0 switches.
+    unsafe {
+        let percpu_addr = zenus_arch::cpu::percpu_virt_addr(cpu);
+        zenus_arch::cpu::write_msr(0xC0000102, percpu_addr);
     }
 
     unsafe { context_switch_yield(save_rsp, next_rsp); }
@@ -704,6 +742,14 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         }
         None => return 0,
     };
+
+    // Ensure KERNEL_GS_BASE points to this CPU's PerCpu struct before
+    // returning to the ISR stub which may iretq to Ring 3.
+    unsafe {
+        let percpu_addr = zenus_arch::cpu::percpu_virt_addr(cpu);
+        zenus_arch::cpu::write_msr(0xC0000102, percpu_addr);
+    }
+
     drop(tasks);
     new_rsp
 }

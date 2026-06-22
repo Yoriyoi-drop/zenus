@@ -113,7 +113,10 @@ pub fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool
     }
 
     let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
-    match unsafe { mapper.map_to(page, frame, flags, &mut *allocator) } {
+
+    let result = unsafe { mapper.map_to(page, frame, flags, &mut *allocator) };
+
+    match result {
         Ok(flush) => {
             flush.flush();
             true
@@ -179,8 +182,13 @@ pub fn create_address_space() -> Option<u64> {
 /// Walk the user-space page table and free all mapped frames and page table pages.
 /// Frees: all PT-level frame mappings, intermediate PDPT/PD/PT pages, and the PML4 page.
 /// Only walks user space (entries 0-255 of PML4).
-/// SAFETY: Must not be called on the currently active address space (unless it's
-/// the kernel's). Switches to kernel_cr3() if the target matches the current CR3.
+///
+/// SAFETY:
+/// - Must not be called on the currently active address space on THIS CPU (unless
+///   it is the kernel's). Automatically switches to kernel CR3 if the target matches.
+/// - SMP: caller must ensure no other CPU has this CR3 loaded. Since tasks are pinned
+///   to CPUs and destroy_address_space is called from task_exit() on the task's own CPU,
+///   this is safe. No cross-CPU TLB shootdown is performed.
 pub fn destroy_address_space(cr3_raw: u64) {
     let current_cr3 = get_level4_addr_raw() & !0xFFF;
     let cr3_phys = cr3_raw & !0xFFF;
@@ -213,8 +221,11 @@ pub fn destroy_address_space(cr3_raw: u64) {
         }
         let pdpt_phys = pml4_entry & 0x000FFFFFFFFFF000;
         if (pml4_entry & 0x80) != 0 {
-            // 1 GiB page
-            allocator.free_frame(x86_64::PhysAddr::new(pdpt_phys));
+            // 1 GiB huge page — free all 262144 constituent 4K frames
+            let base = pdpt_phys;
+            for off in (0..0x4000_0000u64).step_by(4096) {
+                allocator.free_frame(x86_64::PhysAddr::new(base + off));
+            }
             continue;
         }
 
@@ -227,8 +238,11 @@ pub fn destroy_address_space(cr3_raw: u64) {
             }
             let pd_phys = pdpt_entry & 0x000FFFFFFFFFF000;
             if (pdpt_entry & 0x80) != 0 {
-                // 2 MiB page
-                allocator.free_frame(x86_64::PhysAddr::new(pd_phys));
+                // 2 MiB huge page — free all 512 constituent 4K frames
+                let base = pd_phys;
+                for off in (0..0x20_0000u64).step_by(4096) {
+                    allocator.free_frame(x86_64::PhysAddr::new(base + off));
+                }
                 continue;
             }
 
@@ -241,7 +255,7 @@ pub fn destroy_address_space(cr3_raw: u64) {
                 }
                 let pt_phys = pd_entry & 0x000FFFFFFFFFF000;
                 if (pd_entry & 0x80) != 0 {
-                    // 4 KiB page (huge page at PD level)
+                    // 4 KiB page (PS bit at PD level)
                     allocator.free_frame(x86_64::PhysAddr::new(pt_phys));
                     continue;
                 }

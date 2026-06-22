@@ -42,7 +42,7 @@ pub fn current_apic_id() -> u32 {
 fn enable_lapic() {
     let val = lapic_read(0xF0);
     let apic_id = lapic_read(0x20) >> 24;
-    let mut s = zenus_console::serial::SerialPort::new(0x3F8);
+    let s = zenus_console::serial::SerialPort::new(0x3F8);
     s.write_str("[APIC] SVR=0x");
     s.write_hex(val as u64);
     s.write_str(" APIC ID=0x");

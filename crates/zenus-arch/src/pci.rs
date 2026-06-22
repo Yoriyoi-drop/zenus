@@ -53,7 +53,7 @@ unsafe fn pci_write_config(bus: u8, dev: u8, func: u8, offset: u8, value: u32) {
 }
 
 pub fn init() {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str("[PCI] Scanning buses...\n");
     let count = unsafe { scan_all_buses() };
     s.write_str("[OK] PCI: ");
@@ -168,7 +168,7 @@ pub unsafe fn enable_bus_master(bus: u8, dev: u8, func: u8) {
 }
 
 fn log_device(dev: &PciDevice) {
-    let mut s = SerialPort::new(0x3F8);
+    let s = SerialPort::new(0x3F8);
     s.write_str("  PCI ");
     s.write_hex(dev.bus as u64);
     s.write_str(":");

@@ -52,7 +52,7 @@ impl FreeListAllocator {
         self.free_head.store(heap_start as usize, Ordering::Release);
         self.initialized.store(true, Ordering::Release);
 
-        let mut s = SerialPort::new(0x3F8);
+        let s = SerialPort::new(0x3F8);
         s.write_str("[OK] Heap: 4MB free-list allocator ready\n");
     }
 
