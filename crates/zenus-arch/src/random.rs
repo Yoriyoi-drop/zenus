@@ -36,9 +36,12 @@ pub fn init_rng() {
         | (rtc.day as u64) << 16
         | (rtc.hour as u64) << 8
         | (rtc.minute as u64);
-    PRNG_STATE.store(seed, Ordering::Relaxed);
-    let mix = PRNG_STATE.load(Ordering::Relaxed);
     let ticks = crate::interrupts::pit::get_ticks();
-    PRNG_STATE.store(mix.wrapping_add(ticks), Ordering::Relaxed);
-    prng_next();
+    let mut mixed = seed.wrapping_mul(6364136223846793005)
+        .wrapping_add(ticks)
+        .wrapping_add(rtc.second as u64);
+    let cycles = core::arch::x86_64::_rdtsc();
+    mixed = mixed.wrapping_mul(2685821657736338717).wrapping_add(cycles);
+    PRNG_STATE.store(mixed, Ordering::Relaxed);
+    for _ in 0..8 { prng_next(); }
 }

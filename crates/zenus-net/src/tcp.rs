@@ -2,6 +2,7 @@ use crate::ipv4;
 use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 
+#[allow(static_mut_refs)]
 pub const TCP_CLOSED: u8 = 0;
 pub const TCP_LISTEN: u8 = 1;
 pub const TCP_SYN_SENT: u8 = 2;
@@ -133,6 +134,8 @@ pub fn build_segment(
 
 fn rand_isn() -> u32 {
     let r = zenus_arch::random::get_random_u64();
+    let ticks = x86_64::instructions::interrupts::are_enabled() as u64;
+    let r = r.wrapping_add(ticks.wrapping_mul(6364136223846793005));
     (r & 0xFFFFFFFF) as u32
 }
 

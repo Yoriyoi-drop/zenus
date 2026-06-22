@@ -76,10 +76,9 @@ pub fn map_page<A: FrameAllocator<Size4KiB>>(
         let page = Page::<Size4KiB>::containing_address(virt);
         let frame = PhysFrame::containing_address(phys);
         unsafe {
-            mapper
-                .map_to(page, frame, flags, allocator)
-                .unwrap()
-                .flush();
+            if let Ok(flush) = mapper.map_to(page, frame, flags, allocator) {
+                flush.flush();
+            }
         }
     })
 }
@@ -87,10 +86,11 @@ pub fn map_page<A: FrameAllocator<Size4KiB>>(
 pub fn unmap_page(virt: VirtAddr) {
     with_mapper(|mapper| {
         let page = Page::<Size4KiB>::containing_address(virt);
-        let (frame, flush) = mapper.unmap(page).unwrap();
-        flush.flush();
-        let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
-        allocator.free_frame(frame.start_address());
+        if let Ok((frame, flush)) = mapper.unmap(page) {
+            flush.flush();
+            let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+            allocator.free_frame(frame.start_address());
+        }
     })
 }
 

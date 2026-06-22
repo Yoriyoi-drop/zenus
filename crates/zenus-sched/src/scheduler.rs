@@ -4,7 +4,7 @@ use zenus_sync::spinlock::SpinLock;
 use super::task::{Task, TaskInfo, TaskState, MAX_TASKS};
 use zenus_mem::allocator::ALLOCATOR;
 
-const TIME_SLICE: u64 = 50;
+pub const TIME_SLICE: u64 = 50;
 const MAX_CPUS: usize = 8;
 
 static CURRENT_TASK: [AtomicU32; MAX_CPUS] = [
@@ -238,10 +238,7 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64) 
             if tasks.tasks[i].is_none() {
                 tasks.tasks[i] = Some(task);
                 placed = true;
-                let new_count = (i + 1) as u32;
-                if new_count > TASK_COUNT.load(Ordering::Relaxed) {
-                    TASK_COUNT.store(new_count, Ordering::Release);
-                }
+                TASK_COUNT.fetch_add(1, Ordering::Release);
                 break;
             }
         }
@@ -290,24 +287,21 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
 
         let mut tasks = TASKS.lock();
         wb!(b'H');
-        let mut placed = false;
-        for i in 0..MAX_TASKS {
-            if tasks.tasks[i].is_none() {
-                tasks.tasks[i] = Some(task);
-                placed = true;
-                let new_count = (i + 1) as u32;
-                if new_count > TASK_COUNT.load(Ordering::Relaxed) {
-                    TASK_COUNT.store(new_count, Ordering::Release);
+                let mut placed = false;
+                for i in 0..MAX_TASKS {
+                    if tasks.tasks[i].is_none() {
+                        tasks.tasks[i] = Some(task);
+                        placed = true;
+                        TASK_COUNT.fetch_add(1, Ordering::Release);
+                        break;
+                    }
                 }
-                break;
+                if !placed {
+                    dealloc_stack(stack_base, stack_size);
+                    return 0;
+                }
             }
-        }
-        if !placed {
-            dealloc_stack(stack_base, stack_size);
-            return 0;
-        }
-    }
-    wb!(b'I');
+            wb!(b'I');
 
     wb!(b'J');
     CPU_TASK_COUNT[cpu as usize].fetch_add(1, Ordering::SeqCst);
@@ -630,7 +624,9 @@ pub fn idle() -> ! {
 
 pub fn ap_idle() -> ! {
     loop {
+        x86_64::instructions::interrupts::enable();
         x86_64::instructions::hlt();
+        x86_64::instructions::interrupts::disable();
         yield_now();
     }
 }
@@ -641,15 +637,16 @@ pub struct TerminatedStack {
     pub size: usize,
 }
 
-static mut TERMINATED_STACKS: [Option<TerminatedStack>; 8] = [None; 8];
+static mut TERMINATED_STACKS: [Option<TerminatedStack>; 64] = [None; 64];
 static mut TERMINATED_STACK_COUNT: usize = 0;
 
 pub fn reap_terminated_stacks() {
     unsafe {
         for i in 0..TERMINATED_STACK_COUNT {
             if let Some(ts) = TERMINATED_STACKS[i].take() {
-                let layout = core::alloc::Layout::from_size_align(ts.size, 16).unwrap();
-                alloc::alloc::dealloc(ts.base as *mut u8, layout);
+                if let Ok(layout) = core::alloc::Layout::from_size_align(ts.size, 16) {
+                    alloc::alloc::dealloc(ts.base as *mut u8, layout);
+                }
             }
         }
         TERMINATED_STACK_COUNT = 0;
@@ -667,7 +664,7 @@ pub fn task_exit() {
     if let (Some(sa), Some(ss), Some(tc)) = (stack_alloc, stack_size, task_cpu) {
         if sa != 0 && ss > 0 {
             unsafe {
-                if TERMINATED_STACK_COUNT < 8 {
+                if TERMINATED_STACK_COUNT < 64 {
                     TERMINATED_STACKS[TERMINATED_STACK_COUNT] = Some(TerminatedStack {
                         base: sa,
                         size: ss as usize,
@@ -719,6 +716,8 @@ pub fn kill_task(id: u64) -> bool {
                 TASK_COUNT.store(new_count, Ordering::Release);
                 return true;
             }
+            tasks.tasks[i] = None;
+            CPU_TASK_COUNT[task_cpu as usize].fetch_sub(1, Ordering::SeqCst);
             if stack_alloc != 0 && stack_size > 0 {
                 unsafe {
                     let layout = core::alloc::Layout::from_size_align(
@@ -727,8 +726,6 @@ pub fn kill_task(id: u64) -> bool {
                     alloc::alloc::dealloc(stack_alloc as *mut u8, layout);
                 }
             }
-            tasks.tasks[i] = None;
-            CPU_TASK_COUNT[task_cpu as usize].fetch_sub(1, Ordering::SeqCst);
             let mut new_count = 1u32;
             for scan in (1..MAX_TASKS).rev() {
                 if tasks.tasks[scan].is_some() {

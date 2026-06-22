@@ -41,6 +41,19 @@ impl<T> SpinLock<T> {
         SpinLockGuard { lock: self, irq_was_enabled }
     }
 
+    pub fn lock_no_irq(&self) -> SpinLockGuard<'_, T> {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            while self.locked.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        }
+        SpinLockGuard { lock: self, irq_was_enabled: false }
+    }
+
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         let irq_was_enabled = interrupts::are_enabled();
         if irq_was_enabled {
@@ -56,6 +69,18 @@ impl<T> SpinLock<T> {
             if irq_was_enabled {
                 interrupts::enable();
             }
+            None
+        }
+    }
+
+    pub fn try_lock_no_irq(&self) -> Option<SpinLockGuard<'_, T>> {
+        if self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            Some(SpinLockGuard { lock: self, irq_was_enabled: false })
+        } else {
             None
         }
     }

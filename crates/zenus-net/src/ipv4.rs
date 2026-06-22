@@ -34,6 +34,18 @@ pub fn parse(packet: &[u8]) -> Option<(Ipv4Header, &[u8])> {
         return None;
     }
 
+    let stored_csum = u16::from_be(unsafe { core::ptr::read_unaligned(ptr.add(10) as *const u16) });
+    if stored_csum != 0 {
+        let mut csum_buf = [0u8; 20];
+        csum_buf.copy_from_slice(&packet[..ihl.min(20)]);
+        csum_buf[10] = 0;
+        csum_buf[11] = 0;
+        let calc_csum = internet_checksum(&csum_buf[..ihl.min(20)]);
+        if calc_csum != stored_csum {
+            return None;
+        }
+    }
+
     let header = Ipv4Header {
         version_ihl,
         dscp_ecn: unsafe { *ptr.add(1) },

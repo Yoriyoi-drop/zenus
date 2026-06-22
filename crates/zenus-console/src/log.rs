@@ -1,5 +1,6 @@
 use core::fmt::Write;
 use crate::serial::SerialPort;
+use zenus_sync::spinlock::SpinLock;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LogLevel {
@@ -87,7 +88,12 @@ impl<'a> Iterator for DmesgIter<'a> {
         let i = (self.start + self.pos) % DMESG_SIZE;
         let entry = &self.buf[i];
         let len = entry.len as usize;
-        let s = core::str::from_utf8(&entry.msg[..len]).unwrap_or("");
+        let s = match core::str::from_utf8(&entry.msg[..len]) {
+            Ok(s) => s,
+            Err(_) => {
+                " "
+            }
+        };
         self.pos += 1;
         Some((entry.level, s))
     }
@@ -96,7 +102,7 @@ impl<'a> Iterator for DmesgIter<'a> {
 use core::sync::atomic::{AtomicBool, Ordering};
 
 static DMESG_INIT: AtomicBool = AtomicBool::new(false);
-static mut DMESG_BUF: Dmesg = Dmesg::new();
+static DMESG_BUF: SpinLock<Dmesg> = SpinLock::new(Dmesg::new());
 
 pub fn dmesg_init() {
     DMESG_INIT.store(true, Ordering::Release);
@@ -104,7 +110,7 @@ pub fn dmesg_init() {
 
 pub fn dmesg_push(level: LogLevel, msg: &str) {
     if !DMESG_INIT.load(Ordering::Acquire) { return; }
-    unsafe { DMESG_BUF.push(level, msg); }
+    DMESG_BUF.lock().push(level, msg);
 }
 
 pub struct DmesgSnapshot {
@@ -118,9 +124,9 @@ pub fn dmesg_snapshot() -> DmesgSnapshot {
         count: 0,
     };
     if !DMESG_INIT.load(Ordering::Acquire) { return snap; }
-    unsafe {
-        snap.count = DMESG_BUF.count;
-        for (i, (level, msg)) in DMESG_BUF.iter().enumerate() {
+    let buf = DMESG_BUF.lock();
+    snap.count = buf.count;
+    for (i, (level, msg)) in buf.iter().enumerate() {
             if i >= DMESG_SIZE { break; }
             let entry = &mut snap.entries[i];
             entry.level = level;
@@ -130,13 +136,12 @@ pub fn dmesg_snapshot() -> DmesgSnapshot {
             entry.msg[n] = 0;
             entry.len = n as u8;
         }
-    }
     snap
 }
 
 pub fn dmesg_count() -> usize {
     if !DMESG_INIT.load(Ordering::Acquire) { return 0; }
-    unsafe { DMESG_BUF.count }
+    DMESG_BUF.lock().count
 }
 
 pub fn log(level: LogLevel, module: &str, msg: &str) {

@@ -1,5 +1,6 @@
 use crate::tcp;
 
+#[allow(static_mut_refs)]
 pub const AF_INET: u8 = 2;
 pub const SOCK_STREAM: u8 = 1;
 pub const SOCK_DGRAM: u8 = 2;
@@ -253,12 +254,15 @@ pub fn connect(fd: usize, iface_idx: usize, dst_ip: [u8; 4], dst_port: u16) -> b
 }
 
 fn allocate_ephemeral_port() -> u16 {
-    static mut NEXT_EPHEMERAL: u16 = 49152;
-    unsafe {
-        let port = NEXT_EPHEMERAL;
-        NEXT_EPHEMERAL = if NEXT_EPHEMERAL >= 65535 { 49152 } else { NEXT_EPHEMERAL + 1 };
-        port
-    }
+    static NEXT_EPHEMERAL: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(49152);
+    let port = NEXT_EPHEMERAL.fetch_update(
+        core::sync::atomic::Ordering::SeqCst,
+        core::sync::atomic::Ordering::SeqCst,
+        |p| {
+            if p >= 65534 { Some(49152) } else { Some(p + 1) }
+        }
+    );
+    port.unwrap_or(49152)
 }
 
 pub fn send(fd: usize, data: &[u8], iface_idx: usize) -> bool {

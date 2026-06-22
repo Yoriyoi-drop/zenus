@@ -6,8 +6,16 @@ const PROMPT: &str = "zenus$ ";
 
 const MAX_ECHO_LISTENS: usize = 8;
 const MAX_ECHO_CLIENTS: usize = 16;
-static mut ECHO_LISTEN_FDS: [Option<usize>; MAX_ECHO_LISTENS] = [None; MAX_ECHO_LISTENS];
-static mut ECHO_CLIENT_FDS: [Option<usize>; MAX_ECHO_CLIENTS] = [None; MAX_ECHO_CLIENTS];
+
+struct EchoState {
+    listen_fds: [Option<usize>; MAX_ECHO_LISTENS],
+    client_fds: [Option<usize>; MAX_ECHO_CLIENTS],
+}
+
+static ECHO_STATE: zenus_sync::spinlock::SpinLock<EchoState> = zenus_sync::spinlock::SpinLock::new(EchoState {
+    listen_fds: [None; MAX_ECHO_LISTENS],
+    client_fds: [None; MAX_ECHO_CLIENTS],
+});
 
 pub struct Shell {
     serial: SerialPort,
@@ -674,48 +682,46 @@ impl Shell {
 
     fn echo_server_poll() {
         zenus_net::socket::poll_all(1);
-        unsafe {
-            for i in 0..MAX_ECHO_LISTENS {
-                if let Some(fd) = ECHO_LISTEN_FDS[i] {
-                    while let Some(client_fd) = zenus_net::socket::accept(fd, 1) {
-                        for j in 0..MAX_ECHO_CLIENTS {
-                            if ECHO_CLIENT_FDS[j].is_none() {
-                                ECHO_CLIENT_FDS[j] = Some(client_fd);
-                                let mut s = SerialPort::new(0x3F8);
-                                s.write_str("[ECHO] accepted fd ");
-                                s.write_u64(client_fd as u64);
-                                s.write_str("\n");
-                                break;
-                            }
+        let mut state = ECHO_STATE.lock();
+        for i in 0..MAX_ECHO_LISTENS {
+            if let Some(fd) = state.listen_fds[i] {
+                while let Some(client_fd) = zenus_net::socket::accept(fd, 1) {
+                    for j in 0..MAX_ECHO_CLIENTS {
+                        if state.client_fds[j].is_none() {
+                            state.client_fds[j] = Some(client_fd);
+                            let mut s = SerialPort::new(0x3F8);
+                            s.write_str("[ECHO] accepted fd ");
+                            s.write_u64(client_fd as u64);
+                            s.write_str("\n");
+                            break;
                         }
                     }
                 }
             }
-            for i in 0..MAX_ECHO_CLIENTS {
-                let fd = match ECHO_CLIENT_FDS[i] {
-                    Some(fd) => fd,
-                    None => continue,
-                };
-                let mut buf = [0u8; 1500];
-                if let Some(len) = zenus_net::socket::recv(fd, &mut buf) {
-                    if len > 0 {
-                        zenus_net::socket::send(fd, &buf[..len], 1);
-                    }
+        }
+        for i in 0..MAX_ECHO_CLIENTS {
+            let fd = match state.client_fds[i] {
+                Some(fd) => fd,
+                None => continue,
+            };
+            let mut buf = [0u8; 1500];
+            if let Some(len) = zenus_net::socket::recv(fd, &mut buf) {
+                if len > 0 {
+                    zenus_net::socket::send(fd, &buf[..len], 1);
                 }
-                if !zenus_net::socket::is_connected(fd) {
-                    ECHO_CLIENT_FDS[i] = None;
-                }
+            }
+            if !zenus_net::socket::is_connected(fd) {
+                state.client_fds[i] = None;
             }
         }
     }
 
     fn echo_register_listen(fd: usize) -> bool {
-        unsafe {
-            for i in 0..MAX_ECHO_LISTENS {
-                if ECHO_LISTEN_FDS[i].is_none() {
-                    ECHO_LISTEN_FDS[i] = Some(fd);
-                    return true;
-                }
+        let mut state = ECHO_STATE.lock();
+        for i in 0..MAX_ECHO_LISTENS {
+            if state.listen_fds[i].is_none() {
+                state.listen_fds[i] = Some(fd);
+                return true;
             }
         }
         false

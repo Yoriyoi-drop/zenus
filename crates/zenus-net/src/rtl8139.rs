@@ -437,7 +437,7 @@ impl Rtl8139 {
     }
 
     pub fn handle_irq() {
-    let _rtl_guard = RTL_LOCK.lock();
+    let _rtl_guard = RTL_LOCK.lock_no_irq();
     let io_base = NIC_IO_BASE.load(core::sync::atomic::Ordering::Relaxed);
     if io_base == 0 { return; }
     unsafe {
@@ -454,8 +454,8 @@ impl Rtl8139 {
     }
 }
 
-pub fn poll(&mut self) {
-        let _rtl_guard = RTL_LOCK.lock();
+    pub fn poll(&mut self) {
+        let _rtl_guard = RTL_LOCK.lock_no_irq();
         let isr = self.read16(RTL_ISR);
         if isr != 0 {
             self.write16(RTL_ISR, isr);
@@ -497,10 +497,8 @@ pub fn poll(&mut self) {
             }
 
             self.rx_cur = ((self.rx_cur as u16) + 4 + ((pkt_len as u16 + 3) & !3)) % RX_BUF_SIZE as u16;
-            let capr_val = self.rx_cur.wrapping_sub(0x10);
-            if capr_val <= self.rx_cur || self.rx_cur >= 0x10 {
-                self.write16(RTL_CAPR, capr_val);
-            }
+            let capr_val = self.rx_cur.saturating_sub(0x10);
+            self.write16(RTL_CAPR, capr_val);
 
             self.handle_packet(&packet[..copy_len]);
         }
