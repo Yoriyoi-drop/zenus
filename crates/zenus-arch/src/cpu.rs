@@ -32,6 +32,18 @@ pub fn set_percpu_kernel_rsp(cpu_id: u32, rsp: u64) {
     }
 }
 
+pub fn get_percpu_user_rsp(cpu_id: u32) -> u64 {
+    let idx = (cpu_id as usize).min(MAX_CPUS - 1);
+    unsafe { PER_CPU[idx].user_rsp }
+}
+
+pub fn set_percpu_user_rsp(cpu_id: u32, rsp: u64) {
+    let idx = (cpu_id as usize).min(MAX_CPUS - 1);
+    unsafe {
+        PER_CPU[idx].user_rsp = rsp;
+    }
+}
+
 pub unsafe fn percpu_ptr() -> u64 {
     &PER_CPU[0] as *const _ as u64
 }
@@ -100,7 +112,7 @@ pub fn enable_syscall_ap() {
     let mut sfmask = Msr::new(0xC000_0084);
     unsafe {
         lstar.write(syscall_entry as *const () as u64);
-        sfmask.write(0xFFFFFFFF);
+        sfmask.write(!0x202);
     }
 }
 
@@ -128,7 +140,7 @@ fn enable_syscall() {
         efer.write(efer.read() | 1); // set EFER.SCE bit
         star.write((code_seg << 32) | (user_base << 48));
         lstar.write(syscall_entry as *const () as u64);
-        sfmask.write(0xFFFFFFFF);
+        sfmask.write(!0x202);
     }
 
     // Initialize per-CPU data for BSP (CPU 0)
@@ -144,11 +156,11 @@ pub unsafe fn read_msr(msr: u32) -> u64 {
     Msr::new(msr).read()
 }
 
-pub fn get_cpu_vendor() -> &'static str {
+pub fn get_cpu_vendor() -> [u8; 12] {
     let mut eax: u32;
     let mut ebx: u32;
-    let mut ecx = 0u32;
-    let mut edx = 0u32;
+    let mut ecx: u32;
+    let mut edx: u32;
     unsafe {
         core::arch::asm!(
             "push rbx",
@@ -157,15 +169,14 @@ pub fn get_cpu_vendor() -> &'static str {
             "mov {:e}, ebx",
             "pop rbx",
             out(reg) ebx,
-            lateout("eax") eax,
-            lateout("ecx") ecx,
-            lateout("edx") edx,
-            options(nostack, preserves_flags)
+            out("eax") eax,
+            out("ecx") ecx,
+            out("edx") edx,
+            options(nostack)
         );
     }
     let _ = eax;
-    static mut VENDOR_BUF: [u8; 12] = [0; 12];
-    let buf = unsafe { &mut VENDOR_BUF };
+    let mut buf = [0u8; 12];
     buf[0] = (ebx & 0xFF) as u8;
     buf[1] = ((ebx >> 8) & 0xFF) as u8;
     buf[2] = ((ebx >> 16) & 0xFF) as u8;
@@ -178,21 +189,22 @@ pub fn get_cpu_vendor() -> &'static str {
     buf[9] = ((ecx >> 8) & 0xFF) as u8;
     buf[10] = ((ecx >> 16) & 0xFF) as u8;
     buf[11] = ((ecx >> 24) & 0xFF) as u8;
-    core::str::from_utf8(buf).unwrap_or("Unknown")
+    buf
 }
 
 pub fn has_feature(feature: &str) -> bool {
-    let mut ecx = 0u32;
-    let mut edx = 0u32;
+    let mut ecx: u32;
+    let mut edx: u32;
     unsafe {
         core::arch::asm!(
             "push rbx",
             "mov eax, 1",
             "cpuid",
             "pop rbx",
-            lateout("ecx") ecx,
-            lateout("edx") edx,
-            options(nostack, preserves_flags)
+            out("ecx") ecx,
+            out("edx") edx,
+            out("eax") _,
+            options(nostack)
         );
     }
     match feature {

@@ -209,7 +209,7 @@ fn set_current_cpu_id(cpu: u32, idx: u32) {
     CURRENT_TASK[cpu as usize].store(idx, Ordering::Release);
 }
 
-pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64) -> u64 {
+pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64, heap_base: u64) -> u64 {
     let (stack_base, _stack_layout) = unsafe { alloc_stack(stack_size) };
     if stack_base == 0 {
         return 0;
@@ -226,9 +226,13 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64) 
         user_rsp
     };
 
-    let heap_brk = zenus_arch::random::get_random_page_aligned(
-        0x6000_0000_0000u64, 0x6000_0020_0000u64,
-    );
+    let heap_brk = if heap_base != 0 {
+        heap_base
+    } else {
+        zenus_arch::random::get_random_page_aligned(
+            0x6000_0000_0000u64, 0x6000_0020_0000u64,
+        )
+    };
 
     unsafe {
         let mut sp = stack_top as *mut u64;
@@ -247,6 +251,7 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64) 
         task.stack_alloc = stack_base;
         task.stack_size = stack_size as u64;
         task.kernel_rsp_top = stack_top;
+        task.user_rsp = aslr_user_rsp;
         task.cpu = cpu;
         task.cr3 = cr3;
         task.heap_brk = heap_brk;
@@ -375,7 +380,8 @@ pub fn yield_now() {
             let rsp = next_task.rsp;
             let stack_bottom = next_task.stack_alloc;
             let stack_top = stack_bottom + next_task.stack_size as u64;
-            if rsp < stack_bottom || rsp >= stack_top {
+            let margin = 256u64;
+            if rsp < stack_bottom + margin || rsp >= stack_top {
                 drop(tasks);
                 return;
             }
@@ -404,14 +410,31 @@ pub fn yield_now() {
         return;
     }
 
+    // Save user_rsp from PerCpu to current task before switching
+    if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
+        current_task.user_rsp = zenus_arch::cpu::get_percpu_user_rsp(cpu);
+    }
+
     CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
 
     let next_kernel_rsp = tasks.tasks[next as usize].as_ref()
         .map(|t| t.kernel_rsp_top).unwrap_or(0);
+    let next_user_rsp = tasks.tasks[next as usize].as_ref()
+        .map(|t| t.user_rsp).unwrap_or(0);
     let save_rsp: *mut u64 = unsafe {
         &raw mut tasks.tasks[current as usize].as_mut().unwrap_unchecked().rsp
     };
     drop(tasks);
+
+    // Close IRQ window immediately after lock release
+    x86_64::instructions::interrupts::disable();
+
+    // Restore next task's user_rsp into PerCpu
+    if next_user_rsp != 0 {
+        zenus_arch::cpu::set_percpu_user_rsp(cpu, next_user_rsp);
+    } else {
+        zenus_arch::cpu::set_percpu_user_rsp(cpu, 0);
+    }
 
     if next_cr3 != 0 && next_cr3 != current_cr3_raw {
         zenus_mem::paging::set_cr3(next_cr3);
@@ -587,6 +610,8 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
         current_task.rsp = current_rsp;
         current_task.cr3 = current_cr3_raw;
+        // Save user_rsp from PerCpu into the task struct before switch
+        current_task.user_rsp = zenus_arch::cpu::get_percpu_user_rsp(cpu);
     } else {
         return 0;
     }
@@ -605,7 +630,8 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
             let rsp = next_task.rsp;
             let stack_bottom = next_task.stack_alloc;
             let stack_top = stack_bottom + next_task.stack_size as u64;
-            if rsp < stack_bottom || rsp >= stack_top {
+            let margin = 256u64;
+            if rsp < stack_bottom + margin || rsp >= stack_top {
                 return 0;
             }
         }
@@ -622,6 +648,13 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         Some(nt) => {
             nt.state = TaskState::Running;
             nt.ticks_left = TIME_SLICE;
+
+            // Restore next task's user_rsp into PerCpu
+            if nt.user_rsp != 0 {
+                zenus_arch::cpu::set_percpu_user_rsp(cpu, nt.user_rsp);
+            } else {
+                zenus_arch::cpu::set_percpu_user_rsp(cpu, 0);
+            }
 
             let next_cr3 = nt.cr3;
             if next_cr3 != 0 && next_cr3 != current_cr3_raw {
@@ -773,6 +806,18 @@ pub fn kill_task(id: u64) -> bool {
             if state == TaskState::Running {
                 tasks.tasks[i] = None;
                 CPU_TASK_COUNT[task_cpu as usize].fetch_sub(1, Ordering::SeqCst);
+                if stack_alloc != 0 && stack_size > 0 {
+                    unsafe {
+                        if let Ok(layout) = core::alloc::Layout::from_size_align(
+                            stack_size as usize, 16,
+                        ) {
+                            alloc::alloc::dealloc(stack_alloc as *mut u8, layout);
+                        }
+                    }
+                }
+                if cr3 != 0 {
+                    zenus_mem::paging::destroy_address_space(cr3);
+                }
                 let mut new_count = 1u32;
                 for scan in (1..MAX_TASKS).rev() {
                     if tasks.tasks[scan].is_some() {

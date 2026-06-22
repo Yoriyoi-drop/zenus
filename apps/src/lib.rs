@@ -336,7 +336,7 @@ pub extern "C" fn entry() -> ! {
 
         // 13. Start APIC timer for preemptive multitasking
         interrupts::apic::init_timer(48);
-        unsafe { core::arch::asm!("mov dx, 0x3f8; mov al, '!'; out dx, al"); }
+        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'!', options(nostack, preserves_flags)); }
         both!(serial, hhdm_offset, "[OK] Shell task spawned\n");
 
         // 13a. Spawn user-mode demo task with proper isolation

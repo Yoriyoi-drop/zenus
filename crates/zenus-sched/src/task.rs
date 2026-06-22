@@ -12,6 +12,7 @@ pub fn alloc_gid() -> u32 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
 pub enum TaskState {
     Ready,
     Running,
@@ -43,6 +44,7 @@ pub struct Task {
     pub stack_alloc: u64,
     pub stack_size: u64,
     pub kernel_rsp_top: u64,
+    pub user_rsp: u64,
     pub cpu: u32,
     pub cr3: u64,
     pub heap_brk: u64,
@@ -63,6 +65,7 @@ impl Task {
             stack_alloc: 0,
             stack_size: 0,
             kernel_rsp_top: 0,
+            user_rsp: 0,
             cpu: 0,
             cr3: 0,
             heap_brk: 0,
@@ -80,6 +83,7 @@ impl Task {
 
 pub const MAX_TASKS: usize = 128;
 
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TaskInfo {
     pub id: u64,

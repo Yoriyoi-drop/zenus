@@ -49,6 +49,7 @@ pub fn spawn_user() -> u64 {
         65536,
         loaded.stack_top,
         user_cr3,
+        loaded.heap_base,
     );
     if task_id == 0 {
         log("[USER] Failed to create user task\n");

@@ -2,6 +2,32 @@ use core::fmt::Write;
 use crate::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 
+struct LogBuf {
+    buf: [u8; 256],
+    pos: usize,
+}
+
+#[allow(dead_code)]
+impl LogBuf {
+    fn new() -> Self {
+        LogBuf { buf: [0u8; 256], pos: 0 }
+    }
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.pos]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Write for LogBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let remaining = self.buf.len().saturating_sub(self.pos);
+        let n = bytes.len().min(remaining);
+        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
+        self.pos += n;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LogLevel {
     Trace,
@@ -152,30 +178,54 @@ pub fn log(level: LogLevel, module: &str, msg: &str) {
 
 #[macro_export]
 macro_rules! ktrace {
-    ($($arg:tt)*) => { $crate::log::log($crate::log::LogLevel::Trace, module_path!(), &format_args!($($arg)*).to_string()); };
+    ($($arg:tt)*) => {{
+        let mut _buf = $crate::log::LogBuf::new();
+        let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
+        $crate::log::log($crate::log::LogLevel::Trace, module_path!(), _buf.as_str());
+    }};
 }
 
 #[macro_export]
 macro_rules! kdebug {
-    ($($arg:tt)*) => { $crate::log::log($crate::log::LogLevel::Debug, module_path!(), &format_args!($($arg)*).to_string()); };
+    ($($arg:tt)*) => {{
+        let mut _buf = $crate::log::LogBuf::new();
+        let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
+        $crate::log::log($crate::log::LogLevel::Debug, module_path!(), _buf.as_str());
+    }};
 }
 
 #[macro_export]
 macro_rules! kinfo {
-    ($($arg:tt)*) => { $crate::log::log($crate::log::LogLevel::Info, module_path!(), &format_args!($($arg)*).to_string()); };
+    ($($arg:tt)*) => {{
+        let mut _buf = $crate::log::LogBuf::new();
+        let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
+        $crate::log::log($crate::log::LogLevel::Info, module_path!(), _buf.as_str());
+    }};
 }
 
 #[macro_export]
 macro_rules! kwarn {
-    ($($arg:tt)*) => { $crate::log::log($crate::log::LogLevel::Warn, module_path!(), &format_args!($($arg)*).to_string()); };
+    ($($arg:tt)*) => {{
+        let mut _buf = $crate::log::LogBuf::new();
+        let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
+        $crate::log::log($crate::log::LogLevel::Warn, module_path!(), _buf.as_str());
+    }};
 }
 
 #[macro_export]
 macro_rules! kerror {
-    ($($arg:tt)*) => { $crate::log::log($crate::log::LogLevel::Error, module_path!(), &format_args!($($arg)*).to_string()); };
+    ($($arg:tt)*) => {{
+        let mut _buf = $crate::log::LogBuf::new();
+        let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
+        $crate::log::log($crate::log::LogLevel::Error, module_path!(), _buf.as_str());
+    }};
 }
 
 #[macro_export]
 macro_rules! kcrit {
-    ($($arg:tt)*) => { $crate::log::log($crate::log::LogLevel::Critical, module_path!(), &format_args!($($arg)*).to_string()); };
+    ($($arg:tt)*) => {{
+        let mut _buf = $crate::log::LogBuf::new();
+        let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
+        $crate::log::log($crate::log::LogLevel::Critical, module_path!(), _buf.as_str());
+    }};
 }

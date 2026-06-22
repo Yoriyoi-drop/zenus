@@ -83,9 +83,10 @@ impl Rtl8139 {
 
         let levels = [4usize, 3, 2, 1];
         let cr3_val = zenus_mem::paging::kernel_cr3();
+        let cr3_phys = cr3_val & !0xFFF;
 
         unsafe {
-            let mut table_virt = (cr3_val + hhdm) as *const u64;
+            let mut table_virt = (cr3_phys + hhdm) as *const u64;
 
             for &level in &levels {
                 let shift = 12 + (level - 1) * 9;

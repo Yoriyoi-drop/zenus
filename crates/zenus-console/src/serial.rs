@@ -10,26 +10,27 @@ impl SerialPort {
     }
 
     pub fn init() {
-        let mut s = SerialPort { port: 0x3F8 };
-        s.write_byte(0x00); // Disable interrupts
-        s.write_byte(0x80); // Enable DLAB
-        s.write_byte(0x03); // Divisor low (38400 baud)
-        s.write_byte(0x00); // Divisor high
-        s.write_byte(0x03); // 8N1
-        s.write_byte(0x0F); // Enable FIFO, clear, 14-byte threshold
-        s.write_byte(0x0B); // Enable IRQs, RTS/DSR set
+        unsafe {
+            core::arch::asm!("out dx, al", in("dx") 0x3F9u16, in("al") 0x00u8, options(nostack, preserves_flags));
+            core::arch::asm!("out dx, al", in("dx") 0x3FBu16, in("al") 0x80u8, options(nostack, preserves_flags));
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") 0x03u8, options(nostack, preserves_flags));
+            core::arch::asm!("out dx, al", in("dx") 0x3F9u16, in("al") 0x00u8, options(nostack, preserves_flags));
+            core::arch::asm!("out dx, al", in("dx") 0x3FBu16, in("al") 0x03u8, options(nostack, preserves_flags));
+            core::arch::asm!("out dx, al", in("dx") 0x3FAu16, in("al") 0x0Fu8, options(nostack, preserves_flags));
+            core::arch::asm!("out dx, al", in("dx") 0x3FCu16, in("al") 0x0Bu8, options(nostack, preserves_flags));
+        }
     }
 
     fn write_byte(&mut self, byte: u8) {
         unsafe {
-            core::arch::asm!("out dx, al", in("dx") self.port, in("al") byte);
+            core::arch::asm!("out dx, al", in("dx") self.port, in("al") byte, options(nostack, preserves_flags));
         }
     }
 
     fn read_byte(&self, port: u16) -> u8 {
         let val: u8;
         unsafe {
-            core::arch::asm!("in al, dx", out("al") val, in("dx") port);
+            core::arch::asm!("in al, dx", out("al") val, in("dx") port, options(nostack, preserves_flags));
         }
         val
     }

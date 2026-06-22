@@ -121,19 +121,20 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
             }
             frames.pop();
 
-            let page_off = (phdr.p_vaddr & 0xFFF) as usize;
-            let file_start = file_off + i * paging::PAGE_SIZE;
-            let copy_start = if i == 0 { 0 } else { file_start.saturating_sub(page_off) };
-            let copy_size = if file_sz > copy_start {
-                let remaining = file_sz - copy_start;
-                let space = paging::PAGE_SIZE - page_off;
-                core::cmp::min(remaining, space)
+            let first_page_off = (phdr.p_vaddr & 0xFFF) as usize;
+            let page_off = if i == 0 { first_page_off } else { 0 };
+            let copied_before = if i == 0 {
+                0usize
             } else {
-                0
+                let before = (i as u64) * paging::PAGE_SIZE as u64 - first_page_off as u64;
+                (before.min(file_sz as u64)) as usize
             };
+            let remaining = (file_sz as usize).saturating_sub(copied_before);
+            let space = paging::PAGE_SIZE - page_off;
+            let copy_size = remaining.min(space);
 
             if copy_size > 0 {
-                let src_offset = file_off + i * paging::PAGE_SIZE;
+                let src_offset = file_off + copied_before;
                 let dst = (hhdm + frame_phys.as_u64() + page_off as u64) as *mut u8;
                 if src_offset + copy_size <= data.len() {
                     unsafe {
@@ -228,7 +229,7 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
             core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, page_size as usize);
         }
 
-        let writable = false;
+        let writable = true;
         if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), writable, true) {
             dbg.write_str("[FLAT] map failed\n");
             free_unmapped_frames_raw(&frames, cr3);
@@ -390,30 +391,20 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
             }
             frames.pop();
 
-            let page_off = if i == 0 { (phdr.p_vaddr & 0xFFF) as usize } else { 0 };
-            let copy_size = if i == 0 {
-                let remaining = file_sz as usize;
-                if remaining > paging::PAGE_SIZE - page_off {
-                    paging::PAGE_SIZE - page_off
-                } else {
-                    remaining
-                }
+            let first_page_off = (phdr.p_vaddr & 0xFFF) as usize;
+            let page_off = if i == 0 { first_page_off } else { 0 };
+            let copied_before = if i == 0 {
+                0u64
             } else {
-                let copied_before = (i as u64) * paging::PAGE_SIZE as u64;
-                if file_sz > copied_before {
-                    let remaining = (file_sz - copied_before) as usize;
-                    if remaining > paging::PAGE_SIZE {
-                        paging::PAGE_SIZE
-                    } else {
-                        remaining
-                    }
-                } else {
-                    0
-                }
+                let before = (i as u64) * paging::PAGE_SIZE as u64 - first_page_off as u64;
+                before.min(file_sz)
             };
+            let remaining = file_sz.saturating_sub(copied_before) as usize;
+            let space = paging::PAGE_SIZE - page_off;
+            let copy_size = remaining.min(space);
 
             if copy_size > 0 {
-                let read_off = file_off + (i as u64) * paging::PAGE_SIZE as u64;
+                let read_off = file_off + copied_before;
                 let dst = (hhdm + frame_phys.as_u64() + page_off as u64) as *mut u8;
                 let mut read_buf = alloc::vec::Vec::with_capacity(copy_size);
                 read_buf.resize(copy_size, 0);
