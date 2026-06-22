@@ -40,7 +40,7 @@ pub fn init_rng() {
     let mut mixed = seed.wrapping_mul(6364136223846793005)
         .wrapping_add(ticks)
         .wrapping_add(rtc.second as u64);
-    let cycles = core::arch::x86_64::_rdtsc();
+    let cycles = unsafe { core::arch::x86_64::_rdtsc() };
     mixed = mixed.wrapping_mul(2685821657736338717).wrapping_add(cycles);
     PRNG_STATE.store(mixed, Ordering::Relaxed);
     for _ in 0..8 { prng_next(); }

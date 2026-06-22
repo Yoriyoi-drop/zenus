@@ -22,9 +22,9 @@ pub struct FileStat {
     pub mode: u16,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DirEntry {
-    pub name: &'static str,
+    pub name: alloc::string::String,
     pub file_type: FileType,
     pub inode: u64,
 }
@@ -34,7 +34,7 @@ pub trait FileSystem: Send + Sync {
     fn root_inode(&self) -> u64;
     fn read(&self, inode: u64, offset: u64, buf: &mut [u8]) -> Option<u64>;
     fn write(&self, inode: u64, offset: u64, buf: &[u8]) -> Option<u64>;
-    fn read_dir(&self, inode: u64) -> &'static [DirEntry];
+    fn read_dir(&self, inode: u64) -> alloc::vec::Vec<DirEntry>;
     fn stat(&self, inode: u64) -> FileStat;
     fn create(&self, parent_inode: u64, name: &str, file_type: FileType) -> Option<u64>;
     fn unlink(&self, parent_inode: u64, name: &str) -> bool;
@@ -69,6 +69,14 @@ struct MountTable {
 }
 
 const EMPTY_MOUNT: Mount = Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem };
+
+fn empty_dir_entry() -> DirEntry {
+    DirEntry {
+        name: alloc::string::String::new(),
+        file_type: FileType::None,
+        inode: 0,
+    }
+}
 
 impl MountTable {
     const fn new() -> Self {
@@ -188,26 +196,23 @@ fn file_name<'a>(path: &'a str) -> &'a str {
 }
 
 /// Read directory entries for a given VFS path, merging mount points into the listing.
-pub fn read_dir(path: &str) -> &'static [DirEntry] {
-    // For root, merge underlying fs entries with mount points
+pub fn read_dir(path: &str) -> alloc::vec::Vec<DirEntry> {
     if path == "/" || path.is_empty() {
         return read_dir_root();
     }
 
     match open(path) {
         Some(node) => node.fs.read_dir(node.inode),
-        None => &[],
+        None => alloc::vec::Vec::new(),
     }
 }
 
-fn read_dir_root() -> &'static [DirEntry] {
-    static ROOT_BUF: SpinLock<RootDirBuf> = SpinLock::new(RootDirBuf::new());
-    let mut buf = ROOT_BUF.lock();
-    buf.reset();
+fn read_dir_root() -> alloc::vec::Vec<DirEntry> {
+    let mut entries = alloc::vec::Vec::with_capacity(32);
 
     if let Some(root_node) = root() {
         for e in root_node.fs.read_dir(root_node.inode) {
-            buf.push(*e);
+            entries.push(e);
         }
     }
 
@@ -216,56 +221,19 @@ fn read_dir_root() -> &'static [DirEntry] {
         let m = &mt.mounts[i];
         let dir_name = m.path.trim_start_matches('/');
         if !dir_name.is_empty() {
-            buf.push_unique(DirEntry {
-                name: dir_name,
-                file_type: FileType::Directory,
-                inode: 0,
-            });
+            let dup = entries.iter().any(|e| e.name == dir_name);
+            if !dup {
+                entries.push(DirEntry {
+                    name: alloc::string::String::from(dir_name),
+                    file_type: FileType::Directory,
+                    inode: 0,
+                });
+            }
         }
     }
     drop(mt);
 
-    buf.as_slice()
-}
-
-struct RootDirBuf {
-    entries: [DirEntry; 32],
-    count: usize,
-}
-
-impl RootDirBuf {
-    const fn new() -> Self {
-        const EMPTY: DirEntry = DirEntry {
-            name: "", file_type: FileType::None, inode: 0,
-        };
-        RootDirBuf { entries: [EMPTY; 32], count: 0 }
-    }
-
-    fn reset(&mut self) {
-        self.count = 0;
-    }
-
-    fn push(&mut self, e: DirEntry) {
-        if self.count < self.entries.len() {
-            self.entries[self.count] = e;
-            self.count += 1;
-        }
-    }
-
-    fn push_unique(&mut self, e: DirEntry) {
-        for j in 0..self.count {
-            if self.entries[j].name == e.name {
-                return;
-            }
-        }
-        self.push(e);
-    }
-
-    fn as_slice(&self) -> &'static [DirEntry] {
-        // SAFETY: this SpinLockGuard prevents concurrent access; the returned
-        // slice is valid only while the guard is held (caller copies immediately)
-        unsafe { core::slice::from_raw_parts(self.entries.as_ptr(), self.count) }
-    }
+    entries
 }
 
 pub fn open(path: &str) -> Option<VfsNode> {
@@ -357,17 +325,29 @@ pub fn access_check(_uid: u32, _gid: u32, euid: u32, egid: u32, stat: &FileStat,
     if euid == 0 {
         return true;
     }
-    let mut ok = false;
     if euid == stat.uid {
-        if !want_write || (mode & S_IWUSR) != 0 { ok = true; }
-        if want_write && (mode & S_IXUSR) == 0 && stat.file_type == FileType::Directory { ok = false; }
+        if want_write {
+            if (mode & S_IWUSR) == 0 { return false; }
+            if (mode & S_IXUSR) == 0 && stat.file_type == FileType::Directory { return false; }
+            return true;
+        } else {
+            return (mode & S_IRUSR) != 0;
+        }
     } else if egid == stat.gid {
-        if !want_write || (mode & S_IWGRP) != 0 { ok = true; }
-        if want_write && (mode & S_IXGRP) == 0 && stat.file_type == FileType::Directory { ok = false; }
+        if want_write {
+            if (mode & S_IWGRP) == 0 { return false; }
+            if (mode & S_IXGRP) == 0 && stat.file_type == FileType::Directory { return false; }
+            return true;
+        } else {
+            return (mode & S_IRGRP) != 0;
+        }
     } else {
-        if !want_write || (mode & S_IWOTH) != 0 { ok = true; }
+        if want_write {
+            return (mode & S_IWOTH) != 0;
+        } else {
+            return (mode & S_IROTH) != 0;
+        }
     }
-    ok
 }
 
 pub fn perm_str(mode: u16) -> [u8; 10] {

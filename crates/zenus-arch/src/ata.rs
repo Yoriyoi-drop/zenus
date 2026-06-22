@@ -179,11 +179,15 @@ fn get_device_copy(dev_idx: usize) -> Option<AtaDevice> {
     guard.get(dev_idx).and_then(|d| *d)
 }
 
+const MAX_RW_SECTORS: u16 = 256;
+
 pub fn read_sectors(dev_idx: usize, lba: u64, count: u16, buf: &mut [u8]) -> bool {
     let dev = match get_device_copy(dev_idx) {
         Some(d) => d,
         None => return false,
     };
+
+    let count = count.min(MAX_RW_SECTORS);
 
     if count == 0 || lba > dev.lba_sectors || dev.lba_sectors - lba < count as u64 {
         return false;
@@ -233,6 +237,8 @@ pub fn write_sectors(dev_idx: usize, lba: u64, count: u16, buf: &[u8]) -> bool {
         Some(d) => d,
         None => return false,
     };
+
+    let count = count.min(MAX_RW_SECTORS);
 
     if count == 0 || lba > dev.lba_sectors || dev.lba_sectors - lba < count as u64 {
         return false;

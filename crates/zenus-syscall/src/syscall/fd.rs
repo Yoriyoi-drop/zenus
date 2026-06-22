@@ -174,18 +174,18 @@ pub fn fd_close_all_for_task(task_id: u64) {
     table.close_all_for_task(task_id);
 }
 
-pub fn fd_readdir(fd: u64) -> &'static [DirEntry] {
+pub fn fd_readdir(fd: u64) -> alloc::vec::Vec<DirEntry> {
     let table = FD_TABLE.lock();
     let entry = match table.get(fd) {
         Some(e) => e,
-        None => return &[],
+        None => return alloc::vec::Vec::new(),
     };
     let fs = match entry.fs {
         Some(f) => f,
-        None => return &[],
+        None => return alloc::vec::Vec::new(),
     };
     if entry.file_type != FileType::Directory {
-        return &[];
+        return alloc::vec::Vec::new();
     }
     fs.read_dir(entry.inode)
 }

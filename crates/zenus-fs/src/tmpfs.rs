@@ -1,6 +1,6 @@
 use core::mem::MaybeUninit;
 use crate::vfs::{self, FileSystem, FileType, FileStat, DirEntry};
-use zenus_sync::spinlock::SpinLock;
+
 
 const MAX_NODES: usize = 128;
 const MAX_NAME: usize = 64;
@@ -159,41 +159,32 @@ impl FileSystem for TmpFs {
         Some(buf.len() as u64)
     }
 
-    fn read_dir(&self, inode: u64) -> &'static [DirEntry] {
-        static TMPFS_DIR_LOCK: SpinLock<()> = SpinLock::new(());
-        let _rd_guard = TMPFS_DIR_LOCK.lock();
-        static mut ENTRIES: [DirEntry; MAX_DIR_ENTRIES] = [DirEntry {
-            name: "", file_type: FileType::None, inode: 0,
-        }; MAX_DIR_ENTRIES];
-        static mut COUNT: usize = 0;
+    fn read_dir(&self, inode: u64) -> alloc::vec::Vec<DirEntry> {
+        let mut entries = alloc::vec::Vec::with_capacity(MAX_DIR_ENTRIES);
 
         let nodes = nodes();
         let idx = inode as usize;
         if idx >= *node_count() {
-            return &[];
+            return entries;
         }
 
-        unsafe {
-            COUNT = 0;
-            let mut child = nodes[idx].first_child as usize;
-            while child != 0 && COUNT < MAX_DIR_ENTRIES {
-                let node = &nodes[child];
-                let name = if node.name_len == 0 {
-                    "/"
-                } else {
-                    let len = node.name_len as usize;
-                    core::str::from_utf8_unchecked(&node.name[..len])
-                };
-                ENTRIES[COUNT] = DirEntry {
-                    name,
+        let mut child = nodes[idx].first_child as usize;
+        while child != 0 && entries.len() < MAX_DIR_ENTRIES {
+            let node = &nodes[child];
+            let name = if node.name_len == 0 {
+                "/"
+            } else {
+                let len = node.name_len as usize;
+                core::str::from_utf8(&node.name[..len]).unwrap_or("/")
+            };
+                entries.push(DirEntry {
+                    name: alloc::string::String::from(name),
                     file_type: node.file_type,
                     inode: child as u64,
-                };
-                COUNT += 1;
-                child = node.next_sibling as usize;
-            }
-            &ENTRIES[..COUNT]
+                });
+            child = node.next_sibling as usize;
         }
+        entries
     }
 
     fn stat(&self, inode: u64) -> FileStat {

@@ -74,6 +74,9 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         let vaddr = phdr.p_vaddr & !0xFFF;
         let end = phdr.p_vaddr.checked_add(phdr.p_memsz)?;
         let end = (end + 0xFFF) & !0xFFF;
+        if end > 0x0000_8000_0000_0000 || vaddr > 0x0000_8000_0000_0000 {
+            return None;
+        }
         if end > max_addr { max_addr = end; }
 
         let file_off = phdr.p_offset as usize;
@@ -199,6 +202,9 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         let vaddr = phdr.p_vaddr & !0xFFF;
         let end = phdr.p_vaddr.checked_add(phdr.p_memsz)?;
         let end = (end + 0xFFF) & !0xFFF;
+        if end > 0x0000_8000_0000_0000 || vaddr > 0x0000_8000_0000_0000 {
+            return None;
+        }
         if end > max_addr { max_addr = end; }
 
         let file_off = phdr.p_offset;

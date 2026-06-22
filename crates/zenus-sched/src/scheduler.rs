@@ -18,8 +18,7 @@ static CPU_TASK_COUNT: [AtomicU32; MAX_CPUS] = [
 static TASK_COUNT: AtomicU32 = AtomicU32::new(0);
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
-#[allow(static_mut_refs)]
-static mut TASKS: SpinLock<TaskArray> = SpinLock::new(TaskArray::new());
+static TASKS: SpinLock<TaskArray> = SpinLock::new(TaskArray::new());
 
 struct TaskArray {
     tasks: [Option<Task>; MAX_TASKS],
@@ -162,7 +161,7 @@ core::arch::global_asm!(
 );
 
 pub fn init() {
-    let mut tasks = unsafe { TASKS.lock() };
+    let mut tasks = TASKS.lock();
     let idle = Task::new(0, 0);
     tasks.tasks[0] = Some(idle);
     TASK_COUNT.store(1, Ordering::Release);
@@ -182,13 +181,6 @@ fn current_cpu_id() -> u32 {
 
 fn set_current_cpu_id(cpu: u32, idx: u32) {
     CURRENT_TASK[cpu as usize].store(idx, Ordering::Release);
-}
-
-macro_rules! wb {
-    ($b:expr) => {
-        #[allow(unused_unsafe)]
-        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") $b) }
-    };
 }
 
 pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64) -> u64 {
@@ -253,18 +245,14 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64) 
 }
 
 pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
-    wb!(b'A');
     let (stack_base, _stack_layout) = unsafe { alloc_stack(stack_size) };
     if stack_base == 0 {
         return 0;
     }
     let id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
-    wb!(b'B');
     let stack_top = stack_base + stack_size as u64;
-    wb!(b'C');
 
     let cpu = 0u32;
-    wb!(b'D');
 
     unsafe {
         let mut sp = stack_top as *mut u64;
@@ -275,49 +263,42 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
             sp = sp.sub(1); sp.write(0u64);
         }
         let initial_rsp = sp as u64;
-        wb!(b'E');
 
         let mut task = Task::new(id, initial_rsp);
-        wb!(b'F');
         task.rsp = initial_rsp;
         task.stack_alloc = stack_base;
         task.stack_size = stack_size as u64;
         task.cpu = cpu;
-        wb!(b'G');
 
         let mut tasks = TASKS.lock();
-        wb!(b'H');
-                let mut placed = false;
-                for i in 0..MAX_TASKS {
-                    if tasks.tasks[i].is_none() {
-                        tasks.tasks[i] = Some(task);
-                        placed = true;
-                        TASK_COUNT.fetch_add(1, Ordering::Release);
-                        break;
-                    }
-                }
-                if !placed {
-                    dealloc_stack(stack_base, stack_size);
-                    return 0;
-                }
+        let mut placed = false;
+        for i in 0..MAX_TASKS {
+            if tasks.tasks[i].is_none() {
+                tasks.tasks[i] = Some(task);
+                placed = true;
+                TASK_COUNT.fetch_add(1, Ordering::Release);
+                break;
             }
-            wb!(b'I');
+        }
+        if !placed {
+            dealloc_stack(stack_base, stack_size);
+            return 0;
+        }
+    }
 
-    wb!(b'J');
     CPU_TASK_COUNT[cpu as usize].fetch_add(1, Ordering::SeqCst);
-    wb!(b'K');
     id
 }
 
 unsafe fn dealloc_stack(base: u64, size: usize) {
-    if base == 0 { return; }
-    let layout = core::alloc::Layout::from_size_align(size, 16).unwrap();
+    if base == 0 || size == 0 { return; }
+    let Ok(layout) = core::alloc::Layout::from_size_align(size, 16) else { return; };
     alloc::alloc::dealloc(base as *mut u8, layout);
 }
 
 unsafe fn alloc_stack(size: usize) -> (u64, core::alloc::Layout) {
     use core::alloc::Layout;
-    let layout = Layout::from_size_align(size, 16).unwrap();
+    let Ok(layout) = Layout::from_size_align(size, 16) else { return (0, Layout::new::<u8>()); };
     let ptr = {
         use core::alloc::GlobalAlloc;
         ALLOCATOR.alloc(layout)
@@ -341,7 +322,7 @@ pub fn yield_now() {
     }
 
     let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let mut tasks = unsafe { TASKS.lock() };
+    let mut tasks = TASKS.lock();
 
     if tasks.tasks[current as usize].is_none() {
         drop(tasks);
@@ -420,12 +401,12 @@ fn find_next_ready(tasks: &TaskArray, current: u32, cpu: u32) -> u32 {
 pub fn current_task_id() -> u64 {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let tasks = unsafe { TASKS.lock() };
+    let tasks = TASKS.lock();
     tasks.tasks[idx as usize].as_ref().map(|t| t.id).unwrap_or(0)
 }
 
 pub fn list_tasks() -> [Option<TaskInfo>; MAX_TASKS] {
-    let tasks = unsafe { TASKS.lock() };
+    let tasks = TASKS.lock();
     let mut result: [Option<TaskInfo>; MAX_TASKS] = [None; MAX_TASKS];
     for (i, t) in tasks.tasks.iter().enumerate() {
         if let Some(ref task) = t {
@@ -438,35 +419,35 @@ pub fn list_tasks() -> [Option<TaskInfo>; MAX_TASKS] {
 pub fn current_uid() -> u32 {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let tasks = unsafe { TASKS.lock() };
+    let tasks = TASKS.lock();
     tasks.tasks[idx as usize].as_ref().map(|t| t.uid).unwrap_or(0)
 }
 
 pub fn current_gid() -> u32 {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let tasks = unsafe { TASKS.lock() };
+    let tasks = TASKS.lock();
     tasks.tasks[idx as usize].as_ref().map(|t| t.gid).unwrap_or(0)
 }
 
 pub fn current_euid() -> u32 {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let tasks = unsafe { TASKS.lock() };
+    let tasks = TASKS.lock();
     tasks.tasks[idx as usize].as_ref().map(|t| t.euid).unwrap_or(0)
 }
 
 pub fn current_egid() -> u32 {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let tasks = unsafe { TASKS.lock() };
+    let tasks = TASKS.lock();
     tasks.tasks[idx as usize].as_ref().map(|t| t.egid).unwrap_or(0)
 }
 
 pub fn set_current_uid(uid: u32) -> bool {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let mut tasks = unsafe { TASKS.lock() };
+    let mut tasks = TASKS.lock();
     if let Some(ref mut t) = tasks.tasks[idx as usize] {
         // Only root (uid=0) or current user can set uid
         if t.euid == 0 || t.euid == uid {
@@ -481,7 +462,7 @@ pub fn set_current_uid(uid: u32) -> bool {
 pub fn set_current_gid(gid: u32) -> bool {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let mut tasks = unsafe { TASKS.lock() };
+    let mut tasks = TASKS.lock();
     if let Some(ref mut t) = tasks.tasks[idx as usize] {
         if t.egid == 0 || t.egid == gid {
             t.gid = gid;
@@ -493,7 +474,7 @@ pub fn set_current_gid(gid: u32) -> bool {
 }
 
 pub fn get_task_heap_brk(id: u64) -> u64 {
-    let tasks = unsafe { TASKS.lock() };
+    let tasks = TASKS.lock();
     for t in tasks.tasks.iter() {
         if let Some(ref task) = t {
             if task.id == id {
@@ -510,7 +491,7 @@ pub fn get_task_heap_brk(id: u64) -> u64 {
 }
 
 pub fn set_task_heap_brk(id: u64, brk: u64) {
-    let mut tasks = unsafe { TASKS.lock() };
+    let mut tasks = TASKS.lock();
     for t in tasks.tasks.iter_mut() {
         if let Some(ref mut task) = t {
             if task.id == id {
@@ -539,7 +520,7 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     }
 
     let current = CURRENT_TASK[cpu as usize].load(Ordering::Relaxed);
-    let mut tasks = match unsafe { TASKS.try_lock() } {
+    let mut tasks = match TASKS.try_lock() {
         Some(t) => t,
         None => return 0,
     };
@@ -656,10 +637,15 @@ pub fn reap_terminated_stacks() {
 pub fn task_exit() {
     let cpu = current_cpu();
     let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let mut tasks = unsafe { TASKS.lock() };
-    let (stack_alloc, stack_size, task_cpu) = {
+    let mut tasks = TASKS.lock();
+    let (stack_alloc, stack_size, task_cpu, task_cr3) = {
         let task = &tasks.tasks[current as usize];
-        (task.as_ref().map(|t| t.stack_alloc), task.as_ref().map(|t| t.stack_size), task.as_ref().map(|t| t.cpu))
+        (
+            task.as_ref().map(|t| t.stack_alloc),
+            task.as_ref().map(|t| t.stack_size),
+            task.as_ref().map(|t| t.cpu),
+            task.as_ref().map(|t| t.cr3),
+        )
     };
     if let (Some(sa), Some(ss), Some(tc)) = (stack_alloc, stack_size, task_cpu) {
         if sa != 0 && ss > 0 {
@@ -675,6 +661,12 @@ pub fn task_exit() {
         }
         CPU_TASK_COUNT[tc as usize].fetch_sub(1, Ordering::SeqCst);
     }
+    // Free the user address space
+    if let Some(cr3) = task_cr3 {
+        if cr3 != 0 {
+            zenus_mem::paging::destroy_address_space(cr3);
+        }
+    }
     tasks.tasks[current as usize] = None;
     drop(tasks);
     loop { x86_64::instructions::hlt(); }
@@ -684,7 +676,7 @@ pub fn kill_task(id: u64) -> bool {
     if id == 0 { return false; }
     let cpu = current_cpu();
     let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let mut tasks = unsafe { TASKS.lock() };
+    let mut tasks = TASKS.lock();
 
     for i in 0..MAX_TASKS {
         if let Some(ref task) = tasks.tasks[i] {
@@ -698,11 +690,11 @@ pub fn kill_task(id: u64) -> bool {
         let task_info = {
             let t = &tasks.tasks[i];
             match t {
-                Some(tc) if tc.id == id && tc.is_active() => Some((tc.cpu, tc.stack_alloc, tc.stack_size, tc.state)),
+                Some(tc) if tc.id == id && tc.is_active() => Some((tc.cpu, tc.stack_alloc, tc.stack_size, tc.cr3, tc.state)),
                 _ => None,
             }
         };
-        if let Some((task_cpu, stack_alloc, stack_size, state)) = task_info {
+        if let Some((task_cpu, stack_alloc, stack_size, cr3, state)) = task_info {
             if state == TaskState::Running {
                 tasks.tasks[i] = None;
                 CPU_TASK_COUNT[task_cpu as usize].fetch_sub(1, Ordering::SeqCst);
@@ -720,11 +712,16 @@ pub fn kill_task(id: u64) -> bool {
             CPU_TASK_COUNT[task_cpu as usize].fetch_sub(1, Ordering::SeqCst);
             if stack_alloc != 0 && stack_size > 0 {
                 unsafe {
-                    let layout = core::alloc::Layout::from_size_align(
+                    if let Ok(layout) = core::alloc::Layout::from_size_align(
                         stack_size as usize, 16,
-                    ).unwrap();
-                    alloc::alloc::dealloc(stack_alloc as *mut u8, layout);
+                    ) {
+                        alloc::alloc::dealloc(stack_alloc as *mut u8, layout);
+                    }
                 }
+            }
+            // Free the task's address space (user pages, page tables)
+            if cr3 != 0 {
+                zenus_mem::paging::destroy_address_space(cr3);
             }
             let mut new_count = 1u32;
             for scan in (1..MAX_TASKS).rev() {

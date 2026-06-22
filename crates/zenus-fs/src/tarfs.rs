@@ -1,6 +1,6 @@
 use core::slice;
 use crate::vfs::{self, FileSystem, FileType, FileStat, DirEntry};
-use zenus_sync::spinlock::SpinLock;
+
 
 #[repr(C, packed)]
 struct UstarHeader {
@@ -181,124 +181,95 @@ impl FileSystem for TarFs {
         None
     }
 
-    fn read_dir(&self, inode: u64) -> &'static [DirEntry] {
-        static TARFS_DIR_LOCK: SpinLock<()> = SpinLock::new(());
-        let _rd_guard = TARFS_DIR_LOCK.lock();
-        static mut DIR_BUF: [DirEntry; MAX_DIR_ENTRIES] = [DirEntry {
-            name: "", file_type: FileType::None, inode: 0,
-        }; MAX_DIR_ENTRIES];
-        static mut DIR_COUNT: usize = 0;
+    fn read_dir(&self, inode: u64) -> alloc::vec::Vec<DirEntry> {
+        let mut entries = alloc::vec::Vec::with_capacity(MAX_DIR_ENTRIES);
 
-        unsafe {
-            DIR_COUNT = 0;
-            let mut count = 0;
+        let dir_name: &str = if inode == 0 {
+            ""
+        } else {
+            match self.entries.iter().find(|e| e.inode == inode) {
+                Some(e) => e.name,
+                None => return entries,
+            }
+        };
+        let dir_ends_slash = dir_name.ends_with('/');
 
-            // Get directory entry name; normalize to always end with '/'
-            let dir_name: &str = if inode == 0 {
-                ""
-            } else {
-                match self.entries.iter().find(|e| e.inode == inode) {
-                    Some(e) => e.name,
-                    None => return &[],
-                }
-            };
-            let dir_ends_slash = dir_name.ends_with('/');
-
-            for entry in self.entries.iter() {
-                if count >= MAX_DIR_ENTRIES {
-                    break;
-                }
-
-                let path = entry.name;
-
-                // Determine the immediate child name
-                let child = if inode == 0 {
-                    // Root: only top-level entries (no '/')
-                    if path.contains('/') {
-                        continue;
-                    }
-                    path
-                } else {
-                    // Subdir: must start with dir_name
-                    if !path.starts_with(dir_name) || path.len() <= dir_name.len() {
-                        continue;
-                    }
-                    let after_dir = &path[dir_name.len()..];
-                    // If dir_name doesn't end with '/', after_dir must start with '/'
-                    let after_slash = if dir_ends_slash {
-                        after_dir
-                    } else {
-                        if !after_dir.starts_with('/') {
-                            continue;
-                        }
-                        &after_dir[1..]
-                    };
-                    if after_slash.is_empty() {
-                        continue;
-                    }
-                    // Take only the first path component
-                    match after_slash.find('/') {
-                        Some(i) => &after_slash[..i],
-                        None => after_slash,
-                    }
-                };
-
-                if child.is_empty() {
-                    continue;
-                }
-
-                // Deduplicate
-                let mut dup = false;
-                for j in 0..count {
-                    if DIR_BUF[j].name == child {
-                        dup = true;
-                        break;
-                    }
-                }
-                if dup {
-                    continue;
-                }
-
-                // Find the entry that best represents this child to get its real type/inode.
-                // Match entry.name that is exactly dir_name + separator + child
-                // (possibly with trailing / for subdirectories).
-                let child_entry = if inode == 0 {
-                    Some(entry)
-                } else {
-                    self.entries.iter().find(|e| {
-                        let en = e.name;
-                        if !en.starts_with(dir_name) || en.len() <= dir_name.len() {
-                            return false;
-                        }
-                        let rest = &en[dir_name.len()..];
-                        let rest = if dir_ends_slash { rest } else {
-                            if !rest.starts_with('/') { return false; }
-                            &rest[1..]
-                        };
-                        // Check if rest starts with child and is either equal or followed by '/'
-                        if rest.len() < child.len() { return false; }
-                        if !rest.starts_with(child) { return false; }
-                        if rest.len() == child.len() { return true; }
-                        rest.as_bytes()[child.len()] == b'/'
-                    })
-                };
-
-                let (ft, child_ino) = match child_entry {
-                    Some(e) => (e.file_type, e.inode),
-                    None => (FileType::File, 0),
-                };
-
-                DIR_BUF[count] = DirEntry {
-                    name: child,
-                    file_type: ft,
-                    inode: child_ino,
-                };
-                count += 1;
+        for entry in self.entries.iter() {
+            if entries.len() >= MAX_DIR_ENTRIES {
+                break;
             }
 
-            DIR_COUNT = count;
-            &DIR_BUF[..count]
+            let path = entry.name;
+
+            let child = if inode == 0 {
+                if path.contains('/') {
+                    continue;
+                }
+                path
+            } else {
+                if !path.starts_with(dir_name) || path.len() <= dir_name.len() {
+                    continue;
+                }
+                let after_dir = &path[dir_name.len()..];
+                let after_slash = if dir_ends_slash {
+                    after_dir
+                } else {
+                    if !after_dir.starts_with('/') {
+                        continue;
+                    }
+                    &after_dir[1..]
+                };
+                if after_slash.is_empty() {
+                    continue;
+                }
+                match after_slash.find('/') {
+                    Some(i) => &after_slash[..i],
+                    None => after_slash,
+                }
+            };
+
+            if child.is_empty() {
+                continue;
+            }
+
+            let dup = entries.iter().any(|e| e.name == child);
+            if dup {
+                continue;
+            }
+
+            let child_entry = if inode == 0 {
+                Some(entry)
+            } else {
+                self.entries.iter().find(|e| {
+                    let en = e.name;
+                    if !en.starts_with(dir_name) || en.len() <= dir_name.len() {
+                        return false;
+                    }
+                    let rest = &en[dir_name.len()..];
+                    let rest = if dir_ends_slash { rest } else {
+                        if !rest.starts_with('/') { return false; }
+                        &rest[1..]
+                    };
+                    if rest.len() < child.len() { return false; }
+                    if !rest.starts_with(child) { return false; }
+                    if rest.len() == child.len() { return true; }
+                    rest.as_bytes()[child.len()] == b'/'
+                })
+            };
+
+            let (ft, child_ino) = match child_entry {
+                Some(e) => (e.file_type, e.inode),
+                None => (FileType::File, 0),
+            };
+
+            entries.push(DirEntry {
+                name: alloc::string::String::from(child),
+                file_type: ft,
+                inode: child_ino,
+            });
         }
+
+        entries
     }
 
     fn stat(&self, inode: u64) -> FileStat {

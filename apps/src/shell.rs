@@ -935,12 +935,10 @@ impl Shell {
 
     fn cmd_readdev(&mut self, args: &[&str]) {
         let path = args.iter().find(|a| !a.is_empty()).unwrap_or(&"/dev/sda");
-        let node = zenus_fs::vfs::open(path);
-        if node.is_none() {
+        let Some(node) = zenus_fs::vfs::open(path) else {
             self.serial.write_str("readdev: device not found\r\n");
             return;
-        }
-        let node = node.unwrap();
+        };
         let mut buf = [0u8; 512];
         match node.fs.read(node.inode, 0, &mut buf) {
             Some(_) => {
@@ -993,7 +991,7 @@ impl Shell {
                                 self.serial.write_u64(stat.size);
                                 self.serial.write_str(" ");
                             }
-                            self.serial_write_dirent(entry.name, entry.file_type);
+                            self.serial_write_dirent(&entry.name, entry.file_type);
                         }
                         self.serial.write_str("\r\n");
                     }
@@ -1022,12 +1020,13 @@ impl Shell {
                 self.serial.write_u64(stat.size);
                 self.serial.write_str(" ");
             }
-            self.serial_write_dirent(entry.name, entry.file_type);
+            self.serial_write_dirent(&entry.name, entry.file_type);
         }
         self.serial.write_str("\r\n");
     }
 
     fn serial_write_dirent(&mut self, name: &str, file_type: zenus_fs::vfs::FileType) {
+
         self.serial.write_str(name);
         if file_type == zenus_fs::vfs::FileType::Directory {
             self.serial.write_str("/");

@@ -134,9 +134,15 @@ pub fn build_segment(
 
 fn rand_isn() -> u32 {
     let r = zenus_arch::random::get_random_u64();
-    let ticks = x86_64::instructions::interrupts::are_enabled() as u64;
-    let r = r.wrapping_add(ticks.wrapping_mul(6364136223846793005));
-    (r & 0xFFFFFFFF) as u32
+    let lo: u32;
+    let hi: u32;
+    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack)); }
+    let rdtsc = (lo as u64) | ((hi as u64) << 32);
+    let counter = zenus_arch::interrupts::pit::get_ticks();
+    let mixed = r.wrapping_mul(6364136223846793005)
+        .wrapping_add(rdtsc)
+        .wrapping_add(counter.wrapping_mul(123456789));
+    (mixed ^ (mixed >> 16)) as u32
 }
 
 pub fn listen(port: u16) -> Option<usize> {

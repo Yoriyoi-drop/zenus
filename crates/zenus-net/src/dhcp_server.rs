@@ -97,7 +97,7 @@ fn alloc_lease() -> Option<usize> {
 
 fn allocate_ip(mac: &[u8; 6]) -> Option<[u8; 4]> {
     if let Some(idx) = find_lease_by_mac(mac) {
-        return unsafe { Some(LEASES[idx].as_ref().unwrap().ip) };
+        return unsafe { LEASES[idx].as_ref().map(|l| l.ip) };
     }
     let server_ip = get_server_ip();
     let server_u32 = ip_to_u32(server_ip);

@@ -2,6 +2,8 @@
 #![allow(static_mut_refs)]
 #![allow(dead_code)]
 
+extern crate alloc;
+
 pub mod vfs;
 pub mod devfs;
 pub mod tmpfs;

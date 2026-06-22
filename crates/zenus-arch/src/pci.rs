@@ -68,8 +68,40 @@ unsafe fn scan_all_buses() -> usize {
         return 0;
     }
 
-    // Scan bus 0 once — PCI bridge recursive scanning not yet implemented
-    scan_bus(0)
+    let mut total = 0usize;
+    // Check if bus 0 has multiple buses via PCI bridge
+    let max_bus = if is_multi_bus_system() { 256 } else { 1 };
+    for bus in 0..max_bus {
+        total += scan_bus(bus as u8);
+    }
+    total
+}
+
+unsafe fn is_multi_bus_system() -> bool {
+    // Check if there's a PCI-PCI bridge on bus 0
+    for dev in 0..32 {
+        let class_reg = pci_read_config(0, dev, 0, 8);
+        let class_code = ((class_reg >> 24) & 0xFF) as u8;
+        let subclass = ((class_reg >> 16) & 0xFF) as u8;
+        if class_code == 0x06 && subclass == 0x04 {
+            return true;
+        }
+        // Check multi-function devices that might be bridges
+        let header_type = (pci_read_config(0, dev, 0, 0x0E) >> 16) as u8;
+        if (header_type & 0x80) != 0 {
+            for func in 1..8 {
+                let f_vid_did = pci_read_config(0, dev, func, 0);
+                if (f_vid_did & 0xFFFF) != 0xFFFF {
+                    let f_class = (pci_read_config(0, dev, func, 8) >> 24) as u8;
+                    let f_sub = (pci_read_config(0, dev, func, 8) >> 16) as u8;
+                    if f_class == 0x06 && f_sub == 0x04 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 unsafe fn scan_bus(bus: u8) -> usize {

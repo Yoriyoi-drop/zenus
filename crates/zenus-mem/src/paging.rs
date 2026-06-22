@@ -170,6 +170,79 @@ pub fn create_address_space() -> Option<u64> {
     Some(new_frame.as_u64() | flags)
 }
 
+/// Walk the user-space page table and free all mapped frames and page table pages.
+/// Frees: all PT-level frame mappings, intermediate PDPT/PD/PT pages, and the PML4 page.
+/// Only walks user space (entries 0-255 of PML4).
+pub fn destroy_address_space(cr3_raw: u64) {
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+    let cr3_phys = cr3_raw & !0xFFF;
+    let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+
+    // PML4 (level 4)
+    let pml4_virt = (cr3_phys + hhdm) as *const u64;
+    for pml4_idx in 0..256 {
+        let pml4_entry = unsafe { *pml4_virt.add(pml4_idx) };
+        if (pml4_entry & 1) == 0 {
+            continue;
+        }
+        let pdpt_phys = pml4_entry & 0x000FFFFFFFFFF000;
+        if (pml4_entry & 0x80) != 0 {
+            // 1 GiB page
+            allocator.free_frame(x86_64::PhysAddr::new(pdpt_phys));
+            continue;
+        }
+
+        // PDPT (level 3)
+        let pdpt_virt = (pdpt_phys + hhdm) as *const u64;
+        for pdpt_idx in 0..512 {
+            let pdpt_entry = unsafe { *pdpt_virt.add(pdpt_idx) };
+            if (pdpt_entry & 1) == 0 {
+                continue;
+            }
+            let pd_phys = pdpt_entry & 0x000FFFFFFFFFF000;
+            if (pdpt_entry & 0x80) != 0 {
+                // 2 MiB page
+                allocator.free_frame(x86_64::PhysAddr::new(pd_phys));
+                continue;
+            }
+
+            // PD (level 2)
+            let pd_virt = (pd_phys + hhdm) as *const u64;
+            for pd_idx in 0..512 {
+                let pd_entry = unsafe { *pd_virt.add(pd_idx) };
+                if (pd_entry & 1) == 0 {
+                    continue;
+                }
+                let pt_phys = pd_entry & 0x000FFFFFFFFFF000;
+                if (pd_entry & 0x80) != 0 {
+                    // 4 KiB page (huge page at PD level)
+                    allocator.free_frame(x86_64::PhysAddr::new(pt_phys));
+                    continue;
+                }
+
+                // PT (level 1)
+                let pt_virt = (pt_phys + hhdm) as *const u64;
+                for pt_idx in 0..512 {
+                    let pt_entry = unsafe { *pt_virt.add(pt_idx) };
+                    if (pt_entry & 1) == 0 {
+                        continue;
+                    }
+                    let frame_phys = pt_entry & 0x000FFFFFFFFFF000;
+                    allocator.free_frame(x86_64::PhysAddr::new(frame_phys));
+                }
+                // Free the PT frame itself
+                allocator.free_frame(x86_64::PhysAddr::new(pt_phys));
+            }
+            // Free the PD frame itself
+            allocator.free_frame(x86_64::PhysAddr::new(pd_phys));
+        }
+        // Free the PDPT frame itself
+        allocator.free_frame(x86_64::PhysAddr::new(pdpt_phys));
+    }
+    // Free the PML4 frame itself
+    allocator.free_frame(x86_64::PhysAddr::new(cr3_phys));
+}
+
 #[cfg(feature = "testing")]
 pub mod tests {
     use super::PAGE_SIZE;

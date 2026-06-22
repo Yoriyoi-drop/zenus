@@ -1,5 +1,4 @@
 use crate::vfs::{FileSystem, FileType, FileStat, DirEntry};
-use zenus_sync::spinlock::SpinLock;
 
 const MAX_BLOCK_DEVS: usize = 8;
 
@@ -10,12 +9,9 @@ pub struct BlockDeviceOps {
     pub size: u64,
 }
 
-static STATIC_ENTRIES: &[DirEntry] = &[
-    DirEntry { name: "null", file_type: FileType::CharDevice, inode: 1 },
-    DirEntry { name: "zero", file_type: FileType::CharDevice, inode: 2 },
-    DirEntry { name: "console", file_type: FileType::CharDevice, inode: 3 },
-    DirEntry { name: "serial", file_type: FileType::CharDevice, inode: 4 },
-];
+const DEVFS_NAMES: [&str; 4] = ["null", "zero", "console", "serial"];
+const DEVFS_TYPES: [FileType; 4] = [FileType::CharDevice, FileType::CharDevice, FileType::CharDevice, FileType::CharDevice];
+const DEVFS_INODES: [u64; 4] = [1, 2, 3, 4];
 
 const BLOCK_INODE_BASE: u64 = 64;
 static mut BLOCK_DEVS: [Option<(&'static str, BlockDeviceOps)>; MAX_BLOCK_DEVS] = [None; MAX_BLOCK_DEVS];
@@ -58,7 +54,7 @@ impl DevFs {
     fn block_entry_at(&self, idx: usize) -> Option<DirEntry> {
         unsafe {
             BLOCK_DEVS.get(idx).and_then(|o| o.as_ref()).map(|(name, _)| {
-                DirEntry { name, file_type: FileType::BlockDevice, inode: BLOCK_INODE_BASE + idx as u64 }
+                DirEntry { name: alloc::string::String::from(*name), file_type: FileType::BlockDevice, inode: BLOCK_INODE_BASE + idx as u64 }
             })
         }
     }
@@ -74,10 +70,9 @@ impl FileSystem for DevFs {
     }
 
     fn lookup(&self, _parent_inode: u64, name: &str) -> Option<u64> {
-        // Check static entries
-        for e in STATIC_ENTRIES {
-            if e.name == name {
-                return Some(e.inode);
+        for i in 0..DEVFS_NAMES.len() {
+            if DEVFS_NAMES[i] == name {
+                return Some(DEVFS_INODES[i]);
             }
         }
         // Check block devices
@@ -144,36 +139,31 @@ impl FileSystem for DevFs {
         }
     }
 
-    fn read_dir(&self, inode: u64) -> &'static [DirEntry] {
+    fn read_dir(&self, inode: u64) -> alloc::vec::Vec<DirEntry> {
         if inode != 0 {
-            return &[];
+            return alloc::vec::Vec::new();
         }
-        static DEVFS_DIR_LOCK: SpinLock<()> = SpinLock::new(());
-        let _rd_guard = DEVFS_DIR_LOCK.lock();
+        let mut entries = alloc::vec::Vec::with_capacity(12);
+        for i in 0..DEVFS_NAMES.len() {
+            entries.push(DirEntry {
+                name: alloc::string::String::from(DEVFS_NAMES[i]),
+                file_type: DEVFS_TYPES[i],
+                inode: DEVFS_INODES[i],
+            });
+        }
         unsafe {
-            let total = STATIC_ENTRIES.len() + BLOCK_DEV_COUNT;
-            if total <= 4 {
-                return STATIC_ENTRIES;
-            }
-            static mut ALL_ENTRIES: [DirEntry; 12] = [DirEntry {
-                name: "", file_type: FileType::None, inode: 0,
-            }; 12];
-            for i in 0..STATIC_ENTRIES.len() {
-                ALL_ENTRIES[i] = STATIC_ENTRIES[i];
-            }
             for i in 0..BLOCK_DEV_COUNT {
-                let idx = STATIC_ENTRIES.len() + i;
-                if idx >= ALL_ENTRIES.len() { break; }
+                if entries.len() >= 12 { break; }
                 if let Some((name, _)) = &BLOCK_DEVS[i] {
-                    ALL_ENTRIES[idx] = DirEntry {
-                        name,
+                    entries.push(DirEntry {
+                        name: alloc::string::String::from(*name),
                         file_type: FileType::BlockDevice,
                         inode: BLOCK_INODE_BASE + i as u64,
-                    };
+                    });
                 }
             }
-            &ALL_ENTRIES[..core::cmp::min(total, ALL_ENTRIES.len())]
         }
+        entries
     }
 
     fn stat(&self, inode: u64) -> FileStat {

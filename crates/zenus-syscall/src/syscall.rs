@@ -19,6 +19,18 @@ fn validate_user_range(ptr: u64, len: u64) -> bool {
     if end > USER_SPACE_LIMIT {
         return false;
     }
+    // Check that the pages are actually mapped in the current page table
+    let start_page = ptr & !0xFFF;
+    let end_page = ((end + 0xFFF) & !0xFFF).min(USER_SPACE_LIMIT);
+    let mut page = start_page;
+    while page < end_page {
+        let cr3: u64;
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags)); }
+        if zenus_mem::paging::virt_to_phys_raw(cr3, page).is_none() {
+            return false;
+        }
+        page += 0x1000;
+    }
     true
 }
 
@@ -213,10 +225,13 @@ fn sys_dup(old_fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
 fn sys_nanosleep(sec: u64, nsec: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     let mut s = SerialPort::new(0x3F8);
     let _ = write!(s, "[sys] nanosleep {}s {}ns\n", sec, nsec);
-    let total_us = sec.saturating_mul(1_000_000).saturating_add(nsec / 1000);
-    for _ in 0..total_us {
-        for _ in 0..100 {
-            unsafe { core::arch::asm!("pause", options(nostack, preserves_flags)); }
+    let total_ms = sec.saturating_mul(1000).saturating_add(nsec / 1_000_000);
+    let start = zenus_arch::interrupts::pit::get_ticks();
+    loop {
+        zenus_sched::scheduler::yield_now();
+        let elapsed = zenus_arch::interrupts::pit::get_ticks().wrapping_sub(start);
+        if elapsed >= total_ms {
+            break;
         }
     }
     0
@@ -226,16 +241,50 @@ fn sys_getpid(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
     current_task()
 }
 
+fn map_heap_pages(cr3: u64, start: u64, end: u64) -> bool {
+    let start_page = start & !0xFFF;
+    let end_page = (end + 0xFFF) & !0xFFF;
+    let mut page = start_page;
+    while page < end_page {
+        if page >= USER_SPACE_LIMIT {
+            return false;
+        }
+        if zenus_mem::paging::virt_to_phys_raw(cr3, page).is_some() {
+            page += 0x1000;
+            continue;
+        }
+        let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
+        let frame = match allocator.alloc_frame() {
+            Some(f) => f,
+            None => return false,
+        };
+        drop(allocator);
+        let hhdm = zenus_mem::paging::hhdm_offset();
+        unsafe {
+            core::ptr::write_bytes((hhdm + frame.as_u64()) as *mut u8, 0, 4096);
+        }
+        if !zenus_mem::paging::map_user_page_raw(cr3, page, frame.as_u64(), true) {
+            return false;
+        }
+        page += 0x1000;
+    }
+    true
+}
+
 fn sys_brk(addr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     let task = scheduler::current_task_id();
     let heap_start = scheduler::get_task_heap_brk(task);
     if addr == 0 {
         return heap_start;
     }
-    if addr < heap_start {
+    if addr < heap_start || addr > USER_SPACE_LIMIT {
         return -1i64 as u64;
     }
-    // Update heap_brk for the task
+    let cr3: u64;
+    unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags)); }
+    if !map_heap_pages(cr3, heap_start, addr) {
+        return -1i64 as u64;
+    }
     scheduler::set_task_heap_brk(task, addr);
     addr
 }

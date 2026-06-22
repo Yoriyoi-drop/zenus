@@ -1,6 +1,5 @@
 use crate::vfs::{FileSystem, FileType, FileStat, DirEntry};
 use crate::block_cache::bc_read;
-use zenus_sync::spinlock::SpinLock;
 
 pub(crate) const EXT2_MAGIC: u16 = 0xEF53;
 const ROOT_INODE: u64 = 2;
@@ -473,6 +472,7 @@ impl FileSystem for Ext2Fs {
     }
 
     fn write(&self, inode: u64, offset: u64, buf: &[u8]) -> Option<u64> {
+
         let mut raw = self.read_inode_raw(inode)?;
         let block_size = self.block_size as usize;
         let file_size = raw.size_low as u64;
@@ -525,31 +525,21 @@ impl FileSystem for Ext2Fs {
         Some(written)
     }
 
-    fn read_dir(&self, inode: u64) -> &'static [DirEntry] {
-        static READ_DIR_LOCK: SpinLock<()> = SpinLock::new(());
-        let _rd_guard = READ_DIR_LOCK.lock();
-        static mut ENTRIES: [DirEntry; 64] = [DirEntry {
-            name: "", file_type: FileType::None, inode: 0,
-        }; 64];
-        static mut COUNT: usize = 0;
-        static mut NAME_BUF: [u8; 4096] = [0; 4096];
-        static mut NAME_OFF: usize = 0;
+    fn read_dir(&self, inode: u64) -> alloc::vec::Vec<DirEntry> {
+        let mut entries = alloc::vec::Vec::with_capacity(32);
 
         let raw = match self.read_inode_raw(inode) {
             Some(r) => r,
-            None => return &[],
+            None => return entries,
         };
 
         if Self::inode_file_type(raw.mode) != FileType::Directory {
-            return &[];
+            return entries;
         }
 
         let size = raw.size_low as u64;
         let block_size = self.block_size as usize;
         let mut block_buf = [0u8; 4096];
-        let mut count = 0usize;
-
-        unsafe { COUNT = 0; NAME_OFF = 0; }
 
         let mut file_offset = 0u64;
         while file_offset < size {
@@ -576,43 +566,32 @@ impl FileSystem for Ext2Fs {
                     if name_len > 0 && name_len <= 255 {
                         let name_start = pos + core::mem::size_of::<RawDirEntry>();
                         if name_start + name_len <= block_size {
-                            unsafe {
-                                if NAME_OFF + name_len + 1 > NAME_BUF.len() {
-                                    break;
-                                }
-                                NAME_BUF[NAME_OFF..NAME_OFF + name_len].copy_from_slice(
-                                    &block_buf[name_start..name_start + name_len],
-                                );
-                                let name = core::str::from_utf8_unchecked(
-                                    &NAME_BUF[NAME_OFF..NAME_OFF + name_len],
-                                );
-                                NAME_OFF += name_len + 1;
-
-                                if name != "." && name != ".." && count < 64 {
+                            let name_bytes = &block_buf[name_start..name_start + name_len];
+                            if let Ok(name) = core::str::from_utf8(name_bytes) {
+                                if name != "." && name != ".." {
                                     let ft = match de.file_type {
                                         EXT2_FT_DIR => FileType::Directory,
                                         _ => FileType::File,
                                     };
-                                    ENTRIES[count] = DirEntry {
-                                        name,
-                                        file_type: ft,
-                                        inode: de.inode as u64,
-                                    };
-                                    count += 1;
-    }
-}   // end impl FileSystem for Ext2Fs
+                                    if entries.len() < 64 {
+                                        entries.push(DirEntry {
+                                            name: alloc::string::String::from(name),
+                                            file_type: ft,
+                                            inode: de.inode as u64,
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 pos += de.rec_len as usize;
             }
-
             file_offset = ((file_offset / self.block_size) + 1) * self.block_size;
         }
-
-        unsafe { COUNT = count; }
-        unsafe { &ENTRIES[..COUNT] }
+        entries
     }
+
 
     fn stat(&self, inode: u64) -> FileStat {
         match self.read_inode_raw(inode) {

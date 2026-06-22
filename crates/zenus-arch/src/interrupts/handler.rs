@@ -2,8 +2,6 @@ use x86_64::structures::idt::InterruptStackFrame;
 use core::sync::atomic::AtomicUsize;
 use zenus_console::serial::SerialPort;
 
-type IrqHandlerFn = fn();
-
 static NIC_IRQ_HANDLER: AtomicUsize = AtomicUsize::new(0);
 
 // Kernel text bounds — defined by linker.ld
@@ -41,7 +39,7 @@ pub extern "x86-interrupt" fn interrupt_spurious(_frame: InterruptStackFrame) {
 pub extern "x86-interrupt" fn interrupt_nic(_frame: InterruptStackFrame) {
     let ptr = NIC_IRQ_HANDLER.load(core::sync::atomic::Ordering::Relaxed);
     if ptr != 0 && ptr_in_text(ptr) {
-        let handler: IrqHandlerFn = unsafe { core::mem::transmute(ptr) };
+        let handler: fn() = unsafe { core::mem::transmute_copy(&ptr) };
         handler();
     }
     crate::interrupts::apic::eoi();

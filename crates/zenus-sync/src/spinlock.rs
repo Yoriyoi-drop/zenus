@@ -29,26 +29,34 @@ impl<T> SpinLock<T> {
         if irq_was_enabled {
             interrupts::disable();
         }
+        let mut backoff = 1u32;
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             while self.locked.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
+                for _ in 0..backoff {
+                    core::hint::spin_loop();
+                }
+                backoff = backoff.saturating_mul(2).min(256);
             }
         }
         SpinLockGuard { lock: self, irq_was_enabled }
     }
 
     pub fn lock_no_irq(&self) -> SpinLockGuard<'_, T> {
+        let mut backoff = 1u32;
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             while self.locked.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
+                for _ in 0..backoff {
+                    core::hint::spin_loop();
+                }
+                backoff = backoff.saturating_mul(2).min(256);
             }
         }
         SpinLockGuard { lock: self, irq_was_enabled: false }
