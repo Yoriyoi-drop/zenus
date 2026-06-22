@@ -87,6 +87,18 @@ impl SerialPort {
         }
     }
 
+    pub fn write_bytes(&mut self, buf: &[u8]) {
+        for &byte in buf {
+            match byte {
+                0x0A => {
+                    self.write_byte_serial(0x0D);
+                    self.write_byte_serial(0x0A);
+                }
+                _ => self.write_byte_serial(byte),
+            }
+        }
+    }
+
     pub fn write_hex(&mut self, val: u64) {
         let hex = b"0123456789ABCDEF";
         self.write_str("0x");

@@ -29,7 +29,7 @@ pub struct DirEntry {
     pub inode: u64,
 }
 
-pub trait FileSystem {
+pub trait FileSystem: Send + Sync {
     fn name(&self) -> &'static str;
     fn root_inode(&self) -> u64;
     fn read(&self, inode: u64, offset: u64, buf: &mut [u8]) -> Option<u64>;
@@ -50,6 +50,7 @@ pub trait FileSystem {
     fn chown(&self, _inode: u64, _uid: u32, _gid: u32) -> bool { false }
 }
 
+#[derive(Clone, Copy)]
 pub struct VfsNode {
     pub fs: &'static dyn FileSystem,
     pub inode: u64,
@@ -60,21 +61,26 @@ struct Mount {
     fs: &'static dyn FileSystem,
 }
 
-const MAX_MOUNTS: usize = 8;
+const MAX_MOUNTS: usize = 32;
 
-static mut MOUNTS: [Mount; MAX_MOUNTS] = [
-    Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem },
-    Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem },
-    Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem },
-    Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem },
-    Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem },
-    Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem },
-    Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem },
-    Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem },
-];
-static mut MOUNT_COUNT: usize = 1;
+struct MountTable {
+    mounts: [Mount; MAX_MOUNTS],
+    count: usize,
+}
 
-static mut VFS_ROOT: Option<VfsNode> = None;
+const EMPTY_MOUNT: Mount = Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem };
+
+impl MountTable {
+    const fn new() -> Self {
+        MountTable {
+            mounts: [EMPTY_MOUNT; MAX_MOUNTS],
+            count: 0,
+        }
+    }
+}
+
+static MOUNT_TABLE: SpinLock<MountTable> = SpinLock::new(MountTable::new());
+static VFS_ROOT: SpinLock<Option<VfsNode>> = SpinLock::new(None);
 
 pub fn init() {
     let mut s = SerialPort::new(0x3F8);
@@ -84,44 +90,47 @@ pub fn init() {
         fs: tmp_fs,
         inode: tmp_fs.root_inode(),
     };
-    unsafe {
-        VFS_ROOT = Some(root);
-        MOUNTS[0] = Mount { path: "/", fs: tmp_fs };
-        MOUNT_COUNT = 1;
-    };
+    {
+        let mut root_lock = VFS_ROOT.lock();
+        *root_lock = Some(root);
+    }
+    {
+        let mut mt = MOUNT_TABLE.lock();
+        mt.mounts[0] = Mount { path: "/", fs: tmp_fs };
+        mt.count = 1;
+    }
 
     s.write_str("[OK] VFS initialized (tmpfs root)\n");
 }
 
 pub fn mount(path: &'static str, fs: &'static dyn FileSystem) -> bool {
-    unsafe {
-        if MOUNT_COUNT >= MAX_MOUNTS {
-            return false;
-        }
-        let i = MOUNT_COUNT;
-        MOUNTS[i] = Mount { path, fs };
-        MOUNT_COUNT += 1;
-        true
+    let mut mt = MOUNT_TABLE.lock();
+    if mt.count >= MAX_MOUNTS {
+        return false;
     }
+    let i = mt.count;
+    mt.mounts[i] = Mount { path, fs };
+    mt.count += 1;
+    true
 }
 
 fn find_mount(path: &str) -> Option<&'static (dyn FileSystem + 'static)> {
-    unsafe {
-        let mut best: Option<&dyn FileSystem> = None;
-        let mut best_len = 0usize;
-        for i in 0..MOUNT_COUNT {
-            let m = &MOUNTS[i];
-            if path.starts_with(m.path) && m.path.len() > best_len {
-                best = Some(m.fs);
-                best_len = m.path.len();
-            }
+    let mt = MOUNT_TABLE.lock();
+    let mut best: Option<&dyn FileSystem> = None;
+    let mut best_len = 0usize;
+    for i in 0..mt.count {
+        let m = &mt.mounts[i];
+        if path.starts_with(m.path) && m.path.len() > best_len {
+            best = Some(m.fs);
+            best_len = m.path.len();
         }
-        best
     }
+    best
 }
 
-pub fn root() -> Option<&'static VfsNode> {
-    unsafe { VFS_ROOT.as_ref() }
+pub fn root() -> Option<VfsNode> {
+    let root_lock = VFS_ROOT.lock();
+    root_lock.clone()
 }
 
 pub fn create_file(path: &str) -> bool {
@@ -192,53 +201,70 @@ pub fn read_dir(path: &str) -> &'static [DirEntry] {
 }
 
 fn read_dir_root() -> &'static [DirEntry] {
-    static ROOT_DIR_LOCK: SpinLock<()> = SpinLock::new(());
-    let _rd_guard = ROOT_DIR_LOCK.lock();
-    const MAX: usize = 16;
-    static mut BUF: [DirEntry; MAX] = [DirEntry {
-        name: "", file_type: FileType::None, inode: 0,
-    }; MAX];
-    static mut COUNT: usize = 0;
+    static ROOT_BUF: SpinLock<RootDirBuf> = SpinLock::new(RootDirBuf::new());
+    let mut buf = ROOT_BUF.lock();
+    buf.reset();
 
-    unsafe {
-        COUNT = 0;
+    if let Some(root_node) = root() {
+        for e in root_node.fs.read_dir(root_node.inode) {
+            buf.push(*e);
+        }
+    }
 
-        // Add devfs entries from root fs
-        if let Some(root_node) = root() {
-            for e in root_node.fs.read_dir(root_node.inode) {
-                if COUNT < MAX {
-                    BUF[COUNT] = *e;
-                    COUNT += 1;
-                }
+    let mt = MOUNT_TABLE.lock();
+    for i in 1..mt.count {
+        let m = &mt.mounts[i];
+        let dir_name = m.path.trim_start_matches('/');
+        if !dir_name.is_empty() {
+            buf.push_unique(DirEntry {
+                name: dir_name,
+                file_type: FileType::Directory,
+                inode: 0,
+            });
+        }
+    }
+    drop(mt);
+
+    buf.as_slice()
+}
+
+struct RootDirBuf {
+    entries: [DirEntry; 32],
+    count: usize,
+}
+
+impl RootDirBuf {
+    const fn new() -> Self {
+        const EMPTY: DirEntry = DirEntry {
+            name: "", file_type: FileType::None, inode: 0,
+        };
+        RootDirBuf { entries: [EMPTY; 32], count: 0 }
+    }
+
+    fn reset(&mut self) {
+        self.count = 0;
+    }
+
+    fn push(&mut self, e: DirEntry) {
+        if self.count < self.entries.len() {
+            self.entries[self.count] = e;
+            self.count += 1;
+        }
+    }
+
+    fn push_unique(&mut self, e: DirEntry) {
+        for j in 0..self.count {
+            if self.entries[j].name == e.name {
+                return;
             }
         }
+        self.push(e);
+    }
 
-        // Add mount point directories (skip "/")
-        for i in 1..MOUNT_COUNT {
-            let m = &MOUNTS[i];
-            if COUNT >= MAX { break; }
-            let dir_name = m.path.trim_start_matches('/');
-            if !dir_name.is_empty() {
-                // deduplicate
-                let mut dup = false;
-                for j in 0..COUNT {
-                    if BUF[j].name == dir_name {
-                        dup = true;
-                        break;
-                    }
-                }
-                if !dup {
-                    BUF[COUNT] = DirEntry {
-                        name: dir_name,
-                        file_type: FileType::Directory,
-                        inode: 0,
-                    };
-                    COUNT += 1;
-                }
-            }
-        }
-
-        &BUF[..COUNT]
+    fn as_slice(&self) -> &'static [DirEntry] {
+        // SAFETY: this SpinLockGuard prevents concurrent access; the returned
+        // slice is valid only while the guard is held (caller copies immediately)
+        unsafe { core::slice::from_raw_parts(self.entries.as_ptr(), self.count) }
     }
 }
 
@@ -251,10 +277,11 @@ pub fn open(path: &str) -> Option<VfsNode> {
     let root_inode = fs.root_inode();
 
     // Find relative path by stripping the mount prefix
-    let mount_prefix = unsafe {
+    let mount_prefix = {
+        let mt = MOUNT_TABLE.lock();
         let mut longest = "";
-        for i in 0..MOUNT_COUNT {
-            let m = &MOUNTS[i];
+        for i in 0..mt.count {
+            let m = &mt.mounts[i];
             if core::ptr::eq(m.fs as *const _, fs as *const _) {
                 if m.path.len() > longest.len() {
                     longest = m.path;
@@ -343,37 +370,22 @@ pub fn access_check(_uid: u32, _gid: u32, euid: u32, egid: u32, stat: &FileStat,
     ok
 }
 
-const PERM_BUF_COUNT: usize = 8;
-static mut PERM_BUFS: [[u8; 11]; PERM_BUF_COUNT] = [[b'-'; 11]; PERM_BUF_COUNT];
-static mut PERM_BUF_IDX: usize = 0;
-
-pub fn perm_str(mode: u16) -> &'static str {
-    unsafe {
-        let idx = PERM_BUF_IDX;
-        PERM_BUF_IDX = (PERM_BUF_IDX + 1) % PERM_BUF_COUNT;
-        let buf = &mut PERM_BUFS[idx];
-
-        buf[0..10].copy_from_slice(b"----------");
-        let ft = (mode >> 12) & 0xF;
-        buf[0] = match ft {
-            0x4 => b'd',
-            0x8 => b'-',
-            0x2 => b'c',
-            0x6 => b'b',
-            0xA => b'l',
-            _ => b'?',
-        };
-        if mode & S_IRUSR != 0 { buf[1] = b'r'; }
-        if mode & S_IWUSR != 0 { buf[2] = b'w'; }
-        if mode & S_IXUSR != 0 { buf[3] = b'x'; }
-        if mode & S_IRGRP != 0 { buf[4] = b'r'; }
-        if mode & S_IWGRP != 0 { buf[5] = b'w'; }
-        if mode & S_IXGRP != 0 { buf[6] = b'x'; }
-        if mode & S_IROTH != 0 { buf[7] = b'r'; }
-        if mode & S_IWOTH != 0 { buf[8] = b'w'; }
-        if mode & S_IXOTH != 0 { buf[9] = b'x'; }
-        core::str::from_utf8_unchecked(&buf[..10])
-    }
+pub fn perm_str(mode: u16) -> [u8; 10] {
+    let mut buf = *b"----------";
+    let ft = (mode >> 12) & 0xF;
+    buf[0] = match ft {
+        0x4 => b'd', 0x8 => b'-', 0x2 => b'c', 0x6 => b'b', 0xA => b'l', _ => b'?',
+    };
+    if mode & S_IRUSR != 0 { buf[1] = b'r'; }
+    if mode & S_IWUSR != 0 { buf[2] = b'w'; }
+    if mode & S_IXUSR != 0 { buf[3] = b'x'; }
+    if mode & S_IRGRP != 0 { buf[4] = b'r'; }
+    if mode & S_IWGRP != 0 { buf[5] = b'w'; }
+    if mode & S_IXGRP != 0 { buf[6] = b'x'; }
+    if mode & S_IROTH != 0 { buf[7] = b'r'; }
+    if mode & S_IWOTH != 0 { buf[8] = b'w'; }
+    if mode & S_IXOTH != 0 { buf[9] = b'x'; }
+    buf
 }
 
 #[cfg(feature = "testing")]

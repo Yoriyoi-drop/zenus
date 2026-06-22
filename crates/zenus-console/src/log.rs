@@ -30,7 +30,7 @@ pub fn set_level(level: LogLevel) {
     unsafe { LOG_LEVEL = level };
 }
 
-const DMESG_SIZE: usize = 32;
+const DMESG_SIZE: usize = 256;
 
 #[derive(Clone, Copy)]
 pub struct DmesgEntry {

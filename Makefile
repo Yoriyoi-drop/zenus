@@ -23,7 +23,6 @@ apps/user.bin: apps/src/user.s
 
 # Build kernel staticlib (depends on user binary)
 target/$(TARGET)/$(PROFILE_DIR)/libzenus.a: apps/src/lib.rs apps/user.bin $(shell find crates -name '*.rs')
-	RUSTFLAGS="-C target-cpu=x86-64" \
 	$(CARGO) build --package zenus --target $(TARGET) $(CARGO_FLAGS)
 
 # Link kernel with custom linker script
@@ -89,7 +88,6 @@ run-qemu-gdb: $(ISO)
 
 # Test build — enables testing feature for unit tests
 $(BUILD_DIR)/zenus-test: apps/src/lib.rs $(shell find crates -name '*.rs') apps/src/linker.ld
-	RUSTFLAGS="-C target-cpu=x86-64" \
 	$(CARGO) build --package zenus --target $(TARGET) --features testing
 	mkdir -p $(BUILD_DIR)
 	$(LD) -T apps/src/linker.ld -o $@ \

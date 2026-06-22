@@ -6,7 +6,7 @@ use zenus_sync::spinlock::SpinLock;
 
 static HEAP_LOCK: SpinLock<()> = SpinLock::new(());
 
-const HEAP_SIZE: usize = 1024 * 1024 * 4;
+const HEAP_SIZE: usize = 1024 * 1024 * 16;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 const HEADER_SIZE: usize = core::mem::size_of::<BlockHeader>();
@@ -117,6 +117,12 @@ impl FreeListAllocator {
             }
         }
 
+        {
+            use core::fmt::Write;
+            let mut s = SerialPort::new(0x3F8);
+            let _ = write!(s, "[OOM] Heap exhausted! free_head=0x{:x}, size_requested={}\n",
+                self.free_head.load(Ordering::Relaxed), size);
+        }
         ptr::null_mut()
     }
 
@@ -204,6 +210,27 @@ unsafe impl Sync for FreeListAllocator {}
 impl FreeListAllocator {
     pub fn free_head_addr(&self) -> usize {
         self.free_head.load(Ordering::Relaxed)
+    }
+
+    pub fn total_size(&self) -> usize {
+        HEAP_SIZE
+    }
+
+    pub fn free_size(&self) -> usize {
+        let _lock = HEAP_LOCK.lock();
+        self.ensure_initialized();
+        let mut total = 0usize;
+        let mut curr = self.free_head.load(Ordering::Acquire);
+        while curr != 0 {
+            unsafe {
+                let block = curr as *mut BlockHeader;
+                if (*block).magic == MAGIC_FREE {
+                    total += (*block).size;
+                }
+                curr = (*block).next as usize;
+            }
+        }
+        total
     }
 }
 

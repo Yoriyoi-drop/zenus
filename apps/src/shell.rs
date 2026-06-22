@@ -978,7 +978,7 @@ impl Shell {
                         for entry in e {
                             if long {
                                 let stat = node.fs.stat(entry.inode);
-                                self.serial.write_str(zenus_fs::vfs::perm_str(stat.mode));
+                                self.serial.write_bytes(&zenus_fs::vfs::perm_str(stat.mode));
                                 self.serial.write_str(" ");
                                 self.serial.write_u64(stat.uid as u64);
                                 self.serial.write_str(":");
@@ -1007,7 +1007,7 @@ impl Shell {
                     None => continue,
                 };
                 let stat = node.fs.stat(entry.inode);
-                self.serial.write_str(zenus_fs::vfs::perm_str(stat.mode));
+                self.serial.write_bytes(&zenus_fs::vfs::perm_str(stat.mode));
                 self.serial.write_str(" ");
                 self.serial.write_u64(stat.uid as u64);
                 self.serial.write_str(":");
