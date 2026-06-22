@@ -263,7 +263,7 @@ fn map_heap_pages(cr3: u64, start: u64, end: u64) -> bool {
         unsafe {
             core::ptr::write_bytes((hhdm + frame.as_u64()) as *mut u8, 0, 4096);
         }
-        if !zenus_mem::paging::map_user_page_raw(cr3, page, frame.as_u64(), true) {
+        if !zenus_mem::paging::map_user_page_raw(cr3, page, frame.as_u64(), true, false) {
             return false;
         }
         page += 0x1000;

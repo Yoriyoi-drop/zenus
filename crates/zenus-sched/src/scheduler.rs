@@ -52,7 +52,10 @@ core::arch::global_asm!(
     //   RFLAGS, CS, RIP      ← 3-item frame (Ring 0→Ring 0)
     //   R15..RAX             ← 15 GP registers
     // Total frame: 18 × 8 = 144 bytes
-    // Return: OR RFLAGS.IF at offset +136, write RSP to [rdi], load new RSP from rsi
+    //
+    // Restore: pops 15 GP regs, then checks CS.RPL:
+    //   RPL=0 → kernel frame (3 items): pop rax(add rsp,8) popfq jmp rax
+    //   RPL=3 → user frame (5 items): fix SS, iretq
     "context_switch_yield:",
     "  cli",
     "  pop rax",
@@ -94,10 +97,20 @@ core::arch::global_asm!(
     "  pop rdx",
     "  pop rcx",
     "  pop rax",
+    // Frame type detection via CS.RPL
+    // [rsp] = RIP, [rsp+8] = CS, [rsp+16] = RFLAGS [rsp+24] = ??? (5th item if user)
+    "  mov rcx, [rsp + 8]",
+    "  test cl, 3",
+    "  jnz 3f",
+    // Kernel task (3-item frame: RIP, CS, RFLAGS)
     "  pop rax",
     "  add rsp, 8",
     "  popfq",
     "  jmp rax",
+    // User task (5-item frame: RIP, CS, RFLAGS, RSP, SS)
+    "3:",
+    "  mov qword ptr [rsp + 32], 0x1b",
+    "  iretq",
     ".att_syntax prefix",
 );
 
@@ -220,6 +233,7 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64) 
         task.rsp = initial_rsp;
         task.stack_alloc = stack_base;
         task.stack_size = stack_size as u64;
+        task.kernel_rsp_top = stack_top;
         task.cpu = cpu;
         task.cr3 = cr3;
         task.heap_brk = heap_brk;
@@ -256,6 +270,8 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
 
     unsafe {
         let mut sp = stack_top as *mut u64;
+        sp = sp.sub(1); sp.write(0x10u64);
+        sp = sp.sub(1); sp.write(0u64);
         sp = sp.sub(1); sp.write(0x202u64);
         sp = sp.sub(1); sp.write(0x08u64);
         sp = sp.sub(1); sp.write(entry as u64);
@@ -268,6 +284,7 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
         task.rsp = initial_rsp;
         task.stack_alloc = stack_base;
         task.stack_size = stack_size as u64;
+        task.kernel_rsp_top = stack_top;
         task.cpu = cpu;
 
         let mut tasks = TASKS.lock();
@@ -374,10 +391,17 @@ pub fn yield_now() {
 
     CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
 
+    let next_kernel_rsp = tasks.tasks[next as usize].as_ref()
+        .map(|t| t.kernel_rsp_top).unwrap_or(0);
     let save_rsp: *mut u64 = unsafe {
         &raw mut tasks.tasks[current as usize].as_mut().unwrap_unchecked().rsp
     };
     drop(tasks);
+
+    if next_kernel_rsp != 0 {
+        zenus_arch::cpu::set_percpu_kernel_rsp(cpu, next_kernel_rsp);
+        zenus_arch::gdt::set_tss_stack(x86_64::VirtAddr::new(next_kernel_rsp));
+    }
 
     unsafe { context_switch_yield(save_rsp, next_rsp); }
 }
@@ -586,6 +610,17 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
             }
 
             CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
+
+            // Update per-CPU kernel stack for syscall entry
+            if nt.kernel_rsp_top != 0 {
+                zenus_arch::cpu::set_percpu_kernel_rsp(cpu, nt.kernel_rsp_top);
+            }
+
+            // Update TSS.RSP0 so interrupts from Ring 3 use correct kernel stack
+            if nt.kernel_rsp_top != 0 {
+                zenus_arch::gdt::set_tss_stack(x86_64::VirtAddr::new(nt.kernel_rsp_top));
+            }
+
             nt.rsp
         }
         None => return 0,

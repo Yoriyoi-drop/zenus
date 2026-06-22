@@ -64,7 +64,9 @@ extern "x86-interrupt" fn debug_handler(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn nmi_handler(_frame: InterruptStackFrame) {
-    SerialPort::new(0x3F8).write_str("NMI\n");
+    let mut s = SerialPort::new(0x3F8);
+    s.write_str("!!! NMI !!!\n");
+    loop { x86_64::instructions::hlt(); }
 }
 
 extern "x86-interrupt" fn breakpoint_handler(_frame: InterruptStackFrame) {
@@ -84,7 +86,12 @@ extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn device_not_available_handler(_frame: InterruptStackFrame) {
-    // Handle FPU/SSE context switch
+    unsafe {
+        let mut cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) cr0, options(nostack, preserves_flags));
+        cr0 &= !(1 << 3);
+        core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags));
+    }
 }
 
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code: u64) -> ! {
@@ -155,7 +162,7 @@ fn try_handle_user_page_fault(addr: u64, code: PageFaultErrorCode) -> bool {
         let cr3: u64;
         unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3); }
         return zenus_mem::paging::map_user_page_raw(
-            cr3, page_virt, frame.as_u64(), writable,
+            cr3, page_virt, frame.as_u64(), writable, false,
         );
     }
     false
@@ -309,9 +316,10 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
 
     s.write_str("[CODE]\n");
     if rip >= 0xFFFF800000000000 {
-        for i in 0..16u64 {
-            let addr = rip.wrapping_add(i);
-            let byte: u8 = unsafe { core::ptr::read_volatile(addr as *const u8) };
+        let page_off = rip & 0xFFF;
+        let count = 16.min(4096 - page_off);
+        for i in 0..count {
+            let byte: u8 = unsafe { core::ptr::read_volatile((rip + i) as *const u8) };
             s.write_hex(byte as u64);
             s.write_str(" ");
         }

@@ -5,10 +5,44 @@ extern "C" {
     pub fn syscall_dispatch(num: u64, arg1: u64, arg2: u64, arg3: u64) -> u64;
 }
 
+pub const MAX_CPUS: usize = 8;
+
+#[repr(C, align(64))]
+#[derive(Copy, Clone)]
+pub struct PerCpu {
+    pub user_rsp: u64,
+    pub kernel_rsp: u64,
+}
+
+#[no_mangle]
+static mut PER_CPU: [PerCpu; MAX_CPUS] = [PerCpu { user_rsp: 0, kernel_rsp: 0 }; MAX_CPUS];
+
+pub fn init_percpu(cpu_id: u32) {
+    let idx = (cpu_id as usize).min(MAX_CPUS - 1);
+    let addr = unsafe { &PER_CPU[idx] as *const _ as u64 };
+    unsafe {
+        write_msr(0xC0000102, addr);
+    }
+}
+
+pub fn set_percpu_kernel_rsp(cpu_id: u32, rsp: u64) {
+    let idx = (cpu_id as usize).min(MAX_CPUS - 1);
+    unsafe {
+        PER_CPU[idx].kernel_rsp = rsp;
+    }
+}
+
+pub unsafe fn percpu_ptr() -> u64 {
+    &PER_CPU[0] as *const _ as u64
+}
+
 core::arch::global_asm!(
     ".intel_syntax noprefix",
     ".globl syscall_entry",
     "syscall_entry:",
+    "  swapgs",
+    "  mov gs:[0], rsp",
+    "  mov rsp, gs:[8]",
     "  push rcx",
     "  push r11",
     "  mov rcx, rdx",
@@ -20,6 +54,8 @@ core::arch::global_asm!(
     "  call syscall_dispatch",
     "  pop r11",
     "  pop rcx",
+    "  mov rsp, gs:[0]",
+    "  swapgs",
     "  sysret",
     ".att_syntax prefix",
 );
@@ -67,6 +103,11 @@ pub fn enable_syscall_ap() {
     }
 }
 
+pub fn init_syscall_ap(cpu_id: u32) {
+    init_percpu(cpu_id);
+    enable_syscall_ap();
+}
+
 fn enable_syscall() {
     // EFER: enable SCE (System Call Enable)
     let mut efer = Msr::new(0xC000_0080);
@@ -88,6 +129,9 @@ fn enable_syscall() {
         lstar.write(syscall_entry as *const () as u64);
         sfmask.write(0xFFFFFFFF);
     }
+
+    // Initialize per-CPU data for BSP (CPU 0)
+    init_percpu(0);
 }
 
 pub unsafe fn write_msr(msr: u32, value: u64) {

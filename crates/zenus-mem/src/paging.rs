@@ -94,7 +94,7 @@ pub fn unmap_page(virt: VirtAddr) {
     })
 }
 
-pub fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool) -> bool {
+pub fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool, executable: bool) -> bool {
     let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
     let offset = VirtAddr::new(hhdm);
     let cr3_phys = cr3_phys_raw & !0xFFF;
@@ -104,10 +104,12 @@ pub fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
     let frame = PhysFrame::containing_address(PhysAddr::new(phys));
 
-    let mut flags =
-        PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if writable {
         flags |= PageTableFlags::WRITABLE;
+    }
+    if !executable {
+        flags |= PageTableFlags::NO_EXECUTE;
     }
 
     let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();

@@ -76,7 +76,8 @@ impl Rtl8139 {
     fn virt_to_phys(virt: u64) -> u64 {
         let hhdm = zenus_mem::paging::hhdm_offset();
         // Fast path: already in HHDM direct-map range
-        if virt >= hhdm {
+        // Kernel virtual addresses (>= 0xFFFFFFFF80000000) are NOT HHDM-mapped
+        if virt >= hhdm && virt < 0xFFFFFFFF80000000 {
             return virt - hhdm;
         }
 

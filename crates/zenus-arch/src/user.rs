@@ -15,7 +15,7 @@ pub fn switch_to_user(entry: u64, stack_top: u64) -> ! {
             "mov gs, {user_ds}",
             "push {user_ss}",
             "push {rsp}",
-            "pushfq",
+            "push 0x202",
             "push {user_cs}",
             "push {entry}",
             "iretq",

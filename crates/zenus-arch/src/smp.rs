@@ -97,7 +97,9 @@ pub fn wake_aps() {
 pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
     crate::cpu::enable_sse();
     crate::gdt::init_ap();
-    crate::cpu::enable_syscall_ap();
+    // Get CPU number from pre-populated CPU_TABLE using LAPIC ID
+    let cpu_id = cpu_number_for_apic(info.lapic_id);
+    crate::cpu::init_syscall_ap(cpu_id);
 
     let apic_base = unsafe { crate::cpu::read_msr(0x1B) & 0xFFFFF000 };
     let hhdm = crate::limine::HHDM_REQUEST.response;
@@ -126,6 +128,19 @@ pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
     } else {
         loop { x86_64::instructions::hlt(); }
     }
+}
+
+pub fn cpu_number_for_apic(lapic_id: u32) -> u32 {
+    let count = CPU_COUNT.load(Ordering::Relaxed) as usize;
+    if count == 0 || count > MAX_CPUS { return 0; }
+    unsafe {
+        for i in 0..count {
+            if CPU_TABLE[i].apic_id == lapic_id {
+                return i as u32;
+            }
+        }
+    }
+    0
 }
 
 pub fn cpu_count() -> u32 {

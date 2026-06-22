@@ -24,7 +24,7 @@ pub fn spawn_user() -> u64 {
     s.write_hex(user_cr3);
     s.write_str("\n");
 
-    let loaded = match zenus_syscall::elf::load_elf_raw(USER_BINARY, user_cr3) {
+    let loaded = match zenus_syscall::elf::load_flat_binary(USER_BINARY, 0x400000, user_cr3) {
         Some(elf) => elf,
         None => {
             log("[USER] Failed to load ELF binary\n");
@@ -39,7 +39,8 @@ pub fn spawn_user() -> u64 {
     s.write_str("\n");
 
     if paging::virt_to_phys_raw(user_cr3, loaded.entry).is_none() {
-        log("[USER] WARNING: Entry not mapped\n");
+        log("[USER] FATAL: Entry not mapped, aborting\n");
+        return 0;
     }
 
     let task_id = scheduler::create_user_task(

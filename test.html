@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Internet Speed Test</title>
+
+<style>
+body{
+    font-family: Arial, sans-serif;
+    background:#111;
+    color:#fff;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    height:100vh;
+    margin:0;
+}
+
+.card{
+    background:#1e1e1e;
+    padding:30px;
+    border-radius:15px;
+    width:350px;
+    text-align:center;
+    box-shadow:0 0 20px rgba(255,255,255,0.1);
+}
+
+h1{
+    margin-top:0;
+}
+
+.speed{
+    font-size:48px;
+    font-weight:bold;
+    margin:20px 0;
+}
+
+button{
+    background:#00c853;
+    color:white;
+    border:none;
+    padding:12px 25px;
+    border-radius:8px;
+    cursor:pointer;
+    font-size:16px;
+}
+
+button:hover{
+    background:#00e676;
+}
+
+.status{
+    margin-top:15px;
+    color:#aaa;
+}
+</style>
+</head>
+<body>
+
+<div class="card">
+    <h1>Internet Speed Test</h1>
+
+    <div class="speed" id="speed">0 Mbps</div>
+
+    <button onclick="startTest()">
+        Mulai Test
+    </button>
+
+    <div class="status" id="status">
+        Siap menguji...
+    </div>
+</div>
+
+<script>
+async function startTest() {
+
+    const speedElement = document.getElementById("speed");
+    const statusElement = document.getElementById("status");
+
+    statusElement.textContent = "Mengukur kecepatan...";
+    speedElement.textContent = "...";
+
+    const imageUrl =
+        "https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg";
+
+    const imageSizeBytes = 14679474; // ~14 MB
+
+    const startTime = performance.now();
+
+    const img = new Image();
+
+    img.onload = function() {
+
+        const endTime = performance.now();
+
+        const duration = (endTime - startTime) / 1000;
+
+        const bitsLoaded = imageSizeBytes * 8;
+
+        const speedMbps =
+            ((bitsLoaded / duration) / 1024 / 1024).toFixed(2);
+
+        speedElement.textContent = speedMbps + " Mbps";
+        statusElement.textContent =
+            "Selesai dalam " + duration.toFixed(2) + " detik";
+    };
+
+    img.onerror = function() {
+        speedElement.textContent = "Error";
+        statusElement.textContent =
+            "Gagal mengunduh file pengujian";
+    };
+
+    img.src = imageUrl + "?cache=" + Date.now();
+}
+</script>
+
+</body>
+</html>

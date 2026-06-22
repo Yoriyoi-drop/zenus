@@ -133,6 +133,56 @@ impl FrameAllocator {
     pub fn used_memory(&self) -> u64 { self.used_memory }
     pub fn total_memory(&self) -> u64 { self.total_memory }
     pub fn free_frames_count(&self) -> usize { self.free_count }
+
+    pub fn reserve_region(&mut self, base: u64, length: u64) {
+        if length == 0 { return; }
+        let end = base + length;
+        let mut i = 0;
+        while i < self.region_count {
+            let r = self.regions[i];
+            let r_end = r.base + r.length;
+            if end <= r.base || base >= r_end {
+                i += 1;
+                continue;
+            }
+            // Overlaps covers region completely
+            if base <= r.base && end >= r_end {
+                for j in i..self.region_count - 1 {
+                    self.regions[j] = self.regions[j + 1];
+                }
+                self.region_count -= 1;
+                continue;
+            }
+            // Overlap at start
+            if base <= r.base {
+                self.regions[i] = MemRegion { base: end, length: r_end - end };
+                i += 1;
+                continue;
+            }
+            // Overlap at end
+            if end >= r_end {
+                self.regions[i] = MemRegion { base: r.base, length: base - r.base };
+                i += 1;
+                continue;
+            }
+            // Split: kernel region in the middle
+            self.regions[i] = MemRegion { base: r.base, length: base - r.base };
+            if self.region_count < MAX_REGIONS {
+                let mut j = self.region_count;
+                while j > i + 1 {
+                    self.regions[j] = self.regions[j - 1];
+                    j -= 1;
+                }
+                self.regions[i + 1] = MemRegion { base: end, length: r_end - end };
+                self.region_count += 1;
+            }
+            i += 1;
+        }
+        // Fix next_free if it landed in the reserved range
+        if self.next_free >= base && self.next_free < end {
+            self.next_free = end;
+        }
+    }
 }
 
 unsafe impl FrameAllocatorTrait<Size4KiB> for FrameAllocator {
@@ -156,14 +206,32 @@ pub fn global_init(memory_map: &[MemoryRegion]) {
             }
         }
     }
+    // Exclude kernel/module pages (kind=6) from the frame allocator.
+    // Limine may report them as separate KERNEL_AND_MODULES entries.
+    // Without this, the allocator could hand out frames that overlap
+    // kernel image pages — corrupting .got, .data, or BSS on write.
+    for entry in memory_map {
+        if entry.kind == 6 && entry.length > 0 {
+            fa.reserve_region(entry.base, entry.length);
+        }
+    }
     fa.next_free = if fa.region_count > 0 {
         let base = fa.regions[0].base;
         let end = fa.regions[0].base + fa.regions[0].length;
-        if base < 0x100_0000 && end > 0x100_0000 {
+        let start = if base < 0x100_0000 && end > 0x100_0000 {
             0x100_0000
         } else {
             base
+        };
+        // Also advance past any kernel/module pages at the low end
+        let mut kernel_end = 0;
+        for entry in memory_map {
+            if entry.kind == 6 {
+                let candidate = entry.base + entry.length;
+                if candidate > kernel_end { kernel_end = candidate; }
+            }
         }
+        if start < kernel_end { kernel_end } else { start }
     } else {
         0
     };

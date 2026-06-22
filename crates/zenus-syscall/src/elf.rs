@@ -35,6 +35,7 @@ struct Elf64Phdr {
 }
 
 const PT_LOAD: u32 = 1;
+const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 
 pub struct LoadedElf {
@@ -98,7 +99,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
                 core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
             }
 
-            if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), (phdr.p_flags & PF_W) != 0) {
+            if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), (phdr.p_flags & PF_W) != 0, (phdr.p_flags & PF_X) != 0) {
                 return None;
             }
 
@@ -150,13 +151,99 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
             core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
         }
 
-        if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true) {
+        if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
             return None;
         }
     }
 
     Some(LoadedElf {
         entry: header.e_entry,
+        cr3,
+        heap_base,
+        stack_top,
+    })
+}
+
+/// Load a flat binary (raw .bin) at a fixed virtual address.
+/// Used for simple user-mode programs that don't have ELF headers.
+pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> {
+    let mut dbg = zenus_console::serial::SerialPort::new(0x3F8);
+    dbg.write_str("[FLAT] start\n");
+
+    let page_size = paging::PAGE_SIZE as u64;
+    let vaddr = entry & !0xFFF;
+    let pages_needed = ((data.len() + page_size as usize - 1) / page_size as usize).max(1);
+
+    let hhdm = paging::hhdm_offset();
+    for i in 0..pages_needed {
+        let page_virt = vaddr + (i as u64) * page_size;
+        let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
+        let frame_phys = match allocator.alloc_frame() {
+            Some(p) => p,
+            None => {
+                dbg.write_str("[FLAT] alloc failed\n");
+                return None;
+            }
+        };
+        drop(allocator);
+        dbg.write_str("[FLAT] frame=0x");
+        dbg.write_hex(frame_phys.as_u64());
+        dbg.write_str("\n");
+
+        unsafe {
+            core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, page_size as usize);
+        }
+
+        let writable = false;
+        if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), writable, true) {
+            dbg.write_str("[FLAT] map failed\n");
+            return None;
+        }
+        dbg.write_str("[FLAT] mapped\n");
+
+        let copy_start = i * page_size as usize;
+        let copy_end = core::cmp::min(copy_start + page_size as usize, data.len());
+        if copy_start < copy_end {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(copy_start),
+                    (hhdm + frame_phys.as_u64()) as *mut u8,
+                    copy_end - copy_start,
+                );
+            }
+        }
+    }
+    dbg.write_str("[FLAT] code ok\n");
+
+    let heap_base = 0x6000_0000_0000u64;
+    let stack_max = 0x0000_7FFF_FFFF_F000u64;
+    let stack_min = stack_max.saturating_sub(8u64 * 1024 * 1024 * 1024);
+    let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
+
+    let stack_pages = 16;
+    dbg.write_str("[FLAT] stack...\n");
+    for i in 1..stack_pages {
+        let stack_virt = stack_top - ((stack_pages - i) as u64) * page_size;
+        let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
+        let frame_phys = match allocator.alloc_frame() {
+            Some(p) => p,
+            None => return None,
+        };
+        drop(allocator);
+
+        unsafe {
+            core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, page_size as usize);
+        }
+
+        if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
+            dbg.write_str("[FLAT] stack map failed\n");
+            return None;
+        }
+    }
+    dbg.write_str("[FLAT] done\n");
+
+    Some(LoadedElf {
+        entry,
         cr3,
         heap_base,
         stack_top,
@@ -226,7 +313,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
                 core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
             }
 
-            if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), (phdr.p_flags & PF_W) != 0) {
+            if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), (phdr.p_flags & PF_W) != 0, (phdr.p_flags & PF_X) != 0) {
                 return None;
             }
 
@@ -294,7 +381,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
             core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
         }
 
-        if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true) {
+        if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
             return None;
         }
     }
