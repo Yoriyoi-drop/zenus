@@ -472,10 +472,8 @@ pub fn check_yield() {
 }
 
 fn find_next_ready(tasks: &TaskArray, current: u32, cpu: u32) -> u32 {
-    let count = (TASK_COUNT.load(Ordering::Acquire) as usize).min(MAX_TASKS) as u32;
-    if count == 0 { return 0; }
-    for i in 1..count {
-        let idx = (current + i) % count;
+    for i in 1..MAX_TASKS as u32 {
+        let idx = (current + i) % MAX_TASKS as u32;
         if let Some(ref task) = tasks.tasks[idx as usize] {
             if task.is_active() && task.cpu == cpu { return idx; }
         }
@@ -629,8 +627,18 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
         current_task.rsp = current_rsp;
         current_task.cr3 = current_cr3_raw;
-        // Save user_rsp from PerCpu into the task struct before switch
-        current_task.user_rsp = zenus_arch::cpu::get_percpu_user_rsp(cpu);
+        // Determine if interrupted from Ring 3 by checking CS.RPL on the stack.
+        // Stack layout at current_rsp (points to R15 after 15 pushes by ISR):
+        //   [current_rsp + 120] = RIP, [current_rsp + 128] = CS,
+        //   [current_rsp + 136] = RFLAGS, [current_rsp + 144] = user_RSP (if Ring 3→0)
+        // PerCpu.user_rsp can be stale if not inside a syscall;
+        // for Ring 3→0 interrupts, read user_RSP directly from the interrupt frame.
+        let cs_on_stack = unsafe { core::ptr::read_volatile((current_rsp + 128) as *const u64) };
+        if (cs_on_stack & 3) == 3 {
+            current_task.user_rsp = unsafe { core::ptr::read_volatile((current_rsp + 144) as *const u64) };
+        } else {
+            current_task.user_rsp = zenus_arch::cpu::get_percpu_user_rsp(cpu);
+        }
     } else {
         return 0;
     }

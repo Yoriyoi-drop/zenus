@@ -191,6 +191,11 @@ pub fn destroy_address_space(cr3_raw: u64) {
         return;
     }
 
+    // cr3_phys == 0 means no address space was allocated; nothing to free
+    if cr3_phys == 0 {
+        return;
+    }
+
     // If freeing the currently active address space, switch to kernel CR3 first
     if cr3_phys == current_cr3 {
         set_cr3(kernel_cr3_phys);

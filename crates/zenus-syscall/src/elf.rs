@@ -89,7 +89,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         let end = phdr.p_vaddr.checked_add(phdr.p_memsz)?;
         let end = (end + 0xFFF) & !0xFFF;
         if end > 0x0000_8000_0000_0000 || vaddr > 0x0000_8000_0000_0000 {
-            free_unmapped_frames_raw(&frames, cr3);
+            free_frames_raw(&frames);
             return None;
         }
         if end > max_addr { max_addr = end; }
@@ -98,7 +98,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         let file_sz = phdr.p_filesz as usize;
         let pages = ((end - vaddr) / paging::PAGE_SIZE as u64) as usize;
         if pages > MAX_ELF_PAGES {
-            free_unmapped_frames_raw(&frames, cr3);
+            free_frames_raw(&frames);
             return None;
         }
 
@@ -109,7 +109,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
                 Some(p) => p,
                 None => {
                     drop(allocator);
-                    free_unmapped_frames_raw(&frames, cr3);
+                    free_frames_raw(&frames);
                     return None;
                 }
             };
@@ -121,7 +121,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
             }
 
             if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), (phdr.p_flags & PF_W) != 0, (phdr.p_flags & PF_X) != 0) {
-                free_unmapped_frames_raw(&frames, cr3);
+                free_frames_raw(&frames);
                 return None;
             }
             frames.pop();
@@ -167,7 +167,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
             Some(p) => p,
             None => {
                 drop(allocator);
-                free_unmapped_frames_raw(&frames, cr3);
+                free_frames_raw(&frames);
                 return None;
             }
         };
@@ -179,7 +179,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         }
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
-            free_unmapped_frames_raw(&frames, cr3);
+            free_frames_raw(&frames);
             return None;
         }
         frames.pop();
@@ -223,7 +223,7 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
             None => {
                 dbg.write_str("[FLAT] alloc failed\n");
                 drop(allocator);
-                free_unmapped_frames_raw(&frames, cr3);
+                free_frames_raw(&frames);
                 return None;
             }
         };
@@ -241,7 +241,7 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         let writable = true;
         if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), writable, true) {
             dbg.write_str("[FLAT] map failed\n");
-            free_unmapped_frames_raw(&frames, cr3);
+            free_frames_raw(&frames);
             return None;
         }
         frames.pop();
@@ -279,7 +279,7 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
             None => {
                 dbg.write_str("[FLAT] stack alloc failed\n");
                 drop(allocator);
-                free_unmapped_frames_raw(&frames, cr3);
+                free_frames_raw(&frames);
                 return None;
             }
         };
@@ -292,7 +292,7 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
             dbg.write_str("[FLAT] stack map failed\n");
-            free_unmapped_frames_raw(&frames, cr3);
+            free_frames_raw(&frames);
             return None;
         }
         frames.pop();
@@ -307,14 +307,14 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
     })
 }
 
-fn free_unmapped_frames_raw(frames: &[u64], cr3: u64) {
+/// Free frames that were allocated but not yet mapped into the page table.
+/// Does NOT destroy the address space — caller is responsible for that.
+/// This prevents double-free: destroy_address_space frees mapped frames + page tables,
+/// while we only free frames that were never mapped (still in the Vec).
+fn free_frames_raw(frames: &[u64]) {
     let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
     for &phys in frames {
         allocator.free_frame(PhysAddr::new(phys));
-    }
-    drop(allocator);
-    if cr3 != 0 {
-        paging::destroy_address_space(cr3);
     }
 }
 
@@ -368,7 +368,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         let end = phdr.p_vaddr.checked_add(phdr.p_memsz)?;
         let end = (end + 0xFFF) & !0xFFF;
         if end > 0x0000_8000_0000_0000 || vaddr > 0x0000_8000_0000_0000 {
-            free_unmapped_frames_raw(&frames, cr3);
+            free_frames_raw(&frames);
             return None;
         }
         if end > max_addr { max_addr = end; }
@@ -377,7 +377,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         let file_sz = phdr.p_filesz;
         let pages = ((end - vaddr) / paging::PAGE_SIZE as u64) as usize;
         if pages > MAX_ELF_PAGES {
-            free_unmapped_frames_raw(&frames, cr3);
+            free_frames_raw(&frames);
             return None;
         }
 
@@ -388,7 +388,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
                 Some(p) => p,
                 None => {
                     drop(allocator);
-                    free_unmapped_frames_raw(&frames, cr3);
+                    free_frames_raw(&frames);
                     return None;
                 }
             };
@@ -400,7 +400,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
             }
 
             if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), (phdr.p_flags & PF_W) != 0, (phdr.p_flags & PF_X) != 0) {
-                free_unmapped_frames_raw(&frames, cr3);
+                free_frames_raw(&frames);
                 return None;
             }
             frames.pop();
@@ -423,7 +423,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
                 let mut read_buf = alloc::vec::Vec::with_capacity(copy_size);
                 read_buf.resize(copy_size, 0);
                 if node.fs.read(node.inode, read_off, &mut read_buf).is_none() {
-                    free_unmapped_frames_raw(&frames, cr3);
+                    free_frames_raw(&frames);
                     return None;
                 }
                 unsafe {
@@ -450,7 +450,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
             Some(p) => p,
             None => {
                 drop(allocator);
-                free_unmapped_frames_raw(&frames, cr3);
+                free_frames_raw(&frames);
                 return None;
             }
         };
@@ -462,7 +462,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         }
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
-            free_unmapped_frames_raw(&frames, cr3);
+            free_frames_raw(&frames);
             return None;
         }
         frames.pop();

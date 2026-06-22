@@ -41,6 +41,7 @@ pub fn spawn_user() -> u64 {
 
     if paging::virt_to_phys_raw(user_cr3, loaded.entry).is_none() {
         log("[USER] FATAL: Entry not mapped, aborting\n");
+        paging::destroy_address_space(user_cr3);
         return 0;
     }
 
@@ -53,6 +54,7 @@ pub fn spawn_user() -> u64 {
     );
     if task_id == 0 {
         log("[USER] Failed to create user task\n");
+        paging::destroy_address_space(user_cr3);
         return 0;
     }
 

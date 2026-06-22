@@ -81,7 +81,7 @@ impl SerialPort {
         self.write_byte(byte);
     }
 
-    pub fn write_str_locked(&self, s: &str) {
+    pub fn write_str(&self, s: &str) {
         acquire_serial();
         for byte in s.bytes() {
             match byte {
@@ -146,7 +146,9 @@ impl SerialPort {
 
 impl fmt::Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.write_str(s);
+        // Use &self to disambiguate from this trait method.
+        let r: &SerialPort = self;
+        r.write_str(s);
         Ok(())
     }
 }
