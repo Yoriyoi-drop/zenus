@@ -197,8 +197,11 @@ fn read_dir_root() -> &'static [DirEntry] {
         name: "", file_type: FileType::None, inode: 0,
     }; MAX];
     static mut COUNT: usize = 0;
+    static mut LOCKED: bool = false;
 
     unsafe {
+        if LOCKED { return &[]; }
+        LOCKED = true;
         COUNT = 0;
 
         // Add devfs entries from root fs
@@ -236,6 +239,7 @@ fn read_dir_root() -> &'static [DirEntry] {
             }
         }
 
+        LOCKED = false;
         &BUF[..COUNT]
     }
 }
@@ -277,13 +281,20 @@ pub fn open(path: &str) -> Option<VfsNode> {
 
     let trimmed = rel_path.trim_start_matches('/');
     let mut current = VfsNode { fs, inode: root_inode };
+    let root_inode_num = root_inode;
     let mut path_segments: [&str; 32] = [""; 32];
     let mut seg_count = 0;
 
     for part in trimmed.split('/') {
         if part.is_empty() || part == "." { continue; }
         if part == ".." {
-            if seg_count > 0 { seg_count -= 1; }
+            if seg_count > 0 {
+                // Check if removing this segment would cross mount boundary
+                if seg_count == 1 && current.inode == root_inode_num {
+                    continue;
+                }
+                seg_count -= 1;
+            }
             continue;
         }
         if seg_count < 32 {
@@ -334,12 +345,19 @@ pub fn access_check(_uid: u32, _gid: u32, euid: u32, egid: u32, stat: &FileStat,
     ok
 }
 
+const PERM_BUF_COUNT: usize = 8;
+static mut PERM_BUFS: [[u8; 11]; PERM_BUF_COUNT] = [[b'-'; 11]; PERM_BUF_COUNT];
+static mut PERM_BUF_IDX: usize = 0;
+
 pub fn perm_str(mode: u16) -> &'static str {
-    static mut BUF: [u8; 11] = [b'-'; 11];
     unsafe {
-        BUF[0..10].copy_from_slice(b"----------");
+        let idx = PERM_BUF_IDX;
+        PERM_BUF_IDX = (PERM_BUF_IDX + 1) % PERM_BUF_COUNT;
+        let buf = &mut PERM_BUFS[idx];
+
+        buf[0..10].copy_from_slice(b"----------");
         let ft = (mode >> 12) & 0xF;
-        BUF[0] = match ft {
+        buf[0] = match ft {
             0x4 => b'd',
             0x8 => b'-',
             0x2 => b'c',
@@ -347,16 +365,16 @@ pub fn perm_str(mode: u16) -> &'static str {
             0xA => b'l',
             _ => b'?',
         };
-        if mode & S_IRUSR != 0 { BUF[1] = b'r'; }
-        if mode & S_IWUSR != 0 { BUF[2] = b'w'; }
-        if mode & S_IXUSR != 0 { BUF[3] = b'x'; }
-        if mode & S_IRGRP != 0 { BUF[4] = b'r'; }
-        if mode & S_IWGRP != 0 { BUF[5] = b'w'; }
-        if mode & S_IXGRP != 0 { BUF[6] = b'x'; }
-        if mode & S_IROTH != 0 { BUF[7] = b'r'; }
-        if mode & S_IWOTH != 0 { BUF[8] = b'w'; }
-        if mode & S_IXOTH != 0 { BUF[9] = b'x'; }
-        core::str::from_utf8_unchecked(&BUF[..10])
+        if mode & S_IRUSR != 0 { buf[1] = b'r'; }
+        if mode & S_IWUSR != 0 { buf[2] = b'w'; }
+        if mode & S_IXUSR != 0 { buf[3] = b'x'; }
+        if mode & S_IRGRP != 0 { buf[4] = b'r'; }
+        if mode & S_IWGRP != 0 { buf[5] = b'w'; }
+        if mode & S_IXGRP != 0 { buf[6] = b'x'; }
+        if mode & S_IROTH != 0 { buf[7] = b'r'; }
+        if mode & S_IWOTH != 0 { buf[8] = b'w'; }
+        if mode & S_IXOTH != 0 { buf[9] = b'x'; }
+        core::str::from_utf8_unchecked(&buf[..10])
     }
 }
 

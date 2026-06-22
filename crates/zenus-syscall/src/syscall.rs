@@ -6,6 +6,26 @@ use zenus_sched::scheduler;
 mod fd;
 use fd::*;
 
+const USER_SPACE_LIMIT: u64 = 0x0000_8000_0000_0000;
+
+fn validate_user_range(ptr: u64, len: u64) -> bool {
+    if ptr == 0 || ptr < 0x1000 {
+        return false;
+    }
+    let end = match ptr.checked_add(len) {
+        Some(e) => e,
+        None => return false,
+    };
+    if end > USER_SPACE_LIMIT {
+        return false;
+    }
+    true
+}
+
+fn validate_user_ptr<T>(ptr: u64) -> bool {
+    validate_user_range(ptr, core::mem::size_of::<T>() as u64)
+}
+
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
@@ -61,7 +81,7 @@ fn current_task() -> u64 {
 }
 
 fn sys_read(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if buf == 0 { return -1i64 as u64; }
+    if !validate_user_range(buf, count) { return -1i64 as u64; }
     let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count as usize) };
     match fd_read(fd, slice) {
         Some(n) => n,
@@ -70,7 +90,7 @@ fn sys_read(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 
 }
 
 fn sys_write(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if buf == 0 { return -1i64 as u64; }
+    if !validate_user_range(buf, count) { return -1i64 as u64; }
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count as usize) };
     match fd_write(fd, slice) {
         Some(n) => n,
@@ -79,6 +99,7 @@ fn sys_write(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
 }
 
 fn sys_open(path_ptr: u64, _flags: u64, _mode: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if !validate_user_ptr::<u8>(path_ptr) { return -1i64 as u64; }
     let path = unsafe { core::ffi::CStr::from_ptr(path_ptr as *const i8) };
     let path_str = match path.to_str() {
         Ok(s) => s,
@@ -103,6 +124,8 @@ struct StatBuf {
 }
 
 fn sys_stat(path_ptr: u64, stat_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if !validate_user_ptr::<u8>(path_ptr) { return -1i64 as u64; }
+    if !validate_user_ptr::<StatBuf>(stat_ptr) { return -1i64 as u64; }
     let path = unsafe { core::ffi::CStr::from_ptr(path_ptr as *const i8) };
     let path_str = match path.to_str() {
         Ok(s) => s,
@@ -130,6 +153,7 @@ fn sys_stat(path_ptr: u64, stat_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64
 }
 
 fn sys_readdir(fd: u64, buf: u64, buf_size: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if !validate_user_range(buf, buf_size) { return -1i64 as u64; }
     let entries = fd_readdir(fd);
     if entries.is_empty() { return 0; }
 
@@ -218,12 +242,12 @@ fn sys_brk(addr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
 
 fn sys_exit(_fd: u64, _buf: u64, _count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     let tid = current_task();
-    if tid > 0 {
-        fd_close_all_for_task(tid);
-        scheduler::kill_task(tid);
-    }
     let mut s = SerialPort::new(0x3F8);
     let _ = write!(s, "[sys] task {} exit\n", tid);
+    if tid > 0 {
+        fd_close_all_for_task(tid);
+        scheduler::task_exit();
+    }
     loop { unsafe { core::arch::asm!("hlt", options(nostack, preserves_flags)); } }
 }
 
@@ -237,7 +261,7 @@ struct UtsName {
 }
 
 fn sys_uname(buf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if buf == 0 { return -1i64 as u64; }
+    if !validate_user_ptr::<UtsName>(buf) { return -1i64 as u64; }
     let uts = buf as *mut UtsName;
     unsafe {
         copy_str_to_fixed(&mut (*uts).sysname, "Zenus");

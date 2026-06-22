@@ -141,6 +141,9 @@ impl Ext2Fs {
 
         let rev = raw_sb.rev_level;
         let inode_size = if rev >= EXT2_DYNAMIC_REV {
+            if raw_sb.inode_size_raw < 128 || raw_sb.inode_size_raw > 256 {
+                return None;
+            }
             raw_sb.inode_size_raw
         } else {
             128
@@ -180,6 +183,10 @@ impl Ext2Fs {
         let sector = (self.bgdt_start * self.block_size / 512) + (offset / 512);
         let offset_in_sector = offset % 512;
 
+        if offset_in_sector + entry_size > 512 {
+            return None;
+        }
+
         let mut buf = [0u8; 512];
         if !bc_read(self.dev_id, sector, &mut buf) {
             return None;
@@ -200,8 +207,9 @@ impl Ext2Fs {
         let sector = (inode_table_block * self.block_size / 512) + (inode_offset / 512);
         let offset_in_sector = (inode_offset % 512) as usize;
 
+        let inode_size = self.inode_size as usize;
+        let needed_sectors = (offset_in_sector + inode_size + 511) / 512;
         let mut buf = [0u8; 1024];
-        let needed_sectors = (offset_in_sector + self.inode_size as usize + 511) / 512;
         for i in 0..needed_sectors as u64 {
             if !bc_read(self.dev_id, sector + i, &mut buf[i as usize * 512..(i as usize + 1) * 512]) {
                 return None;
@@ -395,7 +403,8 @@ impl Ext2Fs {
 
         let raw_size = core::mem::size_of::<RawInode>();
         let mut buf = [0u8; 1024];
-        let needed_sectors = (offset_in_sector + raw_size + 511) / 512;
+        let inode_read_size = core::cmp::max(raw_size, self.inode_size as usize);
+        let needed_sectors = (offset_in_sector + inode_read_size + 511) / 512;
         for i in 0..needed_sectors as u64 {
             if !crate::block_cache::bc_read(self.dev_id, sector + i, &mut buf[i as usize * 512..(i as usize + 1) * 512]) {
                 return false;
@@ -505,6 +514,9 @@ impl FileSystem for Ext2Fs {
         }
         let new_size = offset + written;
         if new_size > raw.size_low as u64 {
+            if new_size > u32::MAX as u64 {
+                return None;
+            }
             raw.size_low = new_size as u32;
         }
         self.write_inode_raw(inode, &raw);
@@ -643,6 +655,9 @@ impl FileSystem for Ext2Fs {
     }
 
     fn chown(&self, inode: u64, uid: u32, gid: u32) -> bool {
+        if uid > u16::MAX as u32 || gid > u16::MAX as u32 {
+            return false;
+        }
         let mut raw = match self.read_inode_raw(inode) {
             Some(r) => r,
             None => return false,

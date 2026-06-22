@@ -126,6 +126,7 @@ fn parse_response(buf: &[u8]) -> Option<[u8; 4]> {
     }
 
     let mut off = 12usize;
+    let mut depth = 0usize;
 
     for _ in 0..qdcount {
         while off < buf.len() {
@@ -144,17 +145,29 @@ fn parse_response(buf: &[u8]) -> Option<[u8; 4]> {
     }
 
     for _ in 0..ancount {
-        while off < buf.len() {
+        depth = 0;
+        while off < buf.len() && depth < 16 {
             let b = buf[off];
             if b == 0 {
                 off += 1;
                 break;
             }
             if b & 0xC0 == 0xC0 {
-                off += 2;
-                break;
+                if depth > 0 {
+                    return None;
+                }
+                let ptr = (u16::from_be_bytes([buf[off] & 0x3F, buf[off + 1]])) as usize;
+                if ptr >= buf.len() {
+                    return None;
+                }
+                off = ptr;
+                depth += 1;
+                continue;
             }
             off += 1 + b as usize;
+            if off >= buf.len() {
+                return None;
+            }
         }
         if off + 10 > buf.len() {
             return None;

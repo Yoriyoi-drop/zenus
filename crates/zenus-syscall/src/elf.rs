@@ -98,7 +98,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
                 return None;
             }
 
-            let page_off = if i == 0 { (phdr.p_vaddr & 0xFFF) as usize } else { 0 };
+            let page_off = (phdr.p_vaddr & 0xFFF) as usize;
             let file_start = file_off + i * paging::PAGE_SIZE;
             let copy_start = if i == 0 { 0 } else { file_start.saturating_sub(page_off) };
             let copy_size = if file_sz > copy_start {
@@ -110,7 +110,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
             };
 
             if copy_size > 0 {
-                let src_offset = file_start.saturating_sub(page_off);
+                let src_offset = file_off + i * paging::PAGE_SIZE;
                 let dst = (hhdm + frame_phys.as_u64() + page_off as u64) as *mut u8;
                 if src_offset + copy_size <= data.len() {
                     unsafe {
@@ -131,7 +131,8 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
     let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
 
     let stack_pages = 16;
-    for i in 0..stack_pages {
+    // Leave the bottom page unmapped as a guard page for stack overflow detection
+    for i in 1..stack_pages {
         let stack_virt = stack_top - ((stack_pages - i) as u64) * paging::PAGE_SIZE as u64;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {
@@ -245,7 +246,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
             };
 
             if copy_size > 0 {
-                let read_off = file_off + (i as u64) * paging::PAGE_SIZE as u64 - page_off as u64;
+                let read_off = file_off + (i as u64) * paging::PAGE_SIZE as u64;
                 let dst = (hhdm + frame_phys.as_u64() + page_off as u64) as *mut u8;
                 let mut read_buf = alloc::vec::Vec::with_capacity(copy_size);
                 read_buf.resize(copy_size, 0);
@@ -271,7 +272,8 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
     let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
 
     let stack_pages = 16;
-    for i in 0..stack_pages {
+    // Leave the bottom page unmapped as a guard page for stack overflow detection
+    for i in 1..stack_pages {
         let stack_virt = stack_top - ((stack_pages - i) as u64) * paging::PAGE_SIZE as u64;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {

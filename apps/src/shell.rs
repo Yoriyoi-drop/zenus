@@ -747,10 +747,7 @@ impl Shell {
     fn cmd_tcp_status(&mut self) {
         self.serial.write_str("TCP connections:\r\n");
         self.serial.write_str("  #   State     Local     Remote    Port\r\n");
-        for conn in 0..16 {
-            if zenus_net::tcp::connection_count() == 0 {
-                break;
-            }
+        for conn in 0..zenus_net::tcp::MAX_CONNS {
             let name = zenus_net::tcp::state_name(conn);
             if name != "NONE" {
                 self.serial.write_str("  ");

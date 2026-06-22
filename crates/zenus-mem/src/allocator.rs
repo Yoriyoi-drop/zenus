@@ -2,7 +2,9 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
 use zenus_console::serial::SerialPort;
-use zenus_sync::irq_guard::IrqGuard;
+use zenus_sync::spinlock::SpinLock;
+
+static HEAP_LOCK: SpinLock<()> = SpinLock::new(());
 
 const HEAP_SIZE: usize = 1024 * 1024 * 4;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
@@ -55,7 +57,7 @@ impl FreeListAllocator {
     }
 
     fn alloc_mut(&self, layout: Layout) -> *mut u8 {
-        let _irq = IrqGuard::new();
+        let _lock = HEAP_LOCK.lock();
         self.ensure_initialized();
 
         let size = layout.size().max(1);
@@ -119,13 +121,23 @@ impl FreeListAllocator {
     }
 
     fn dealloc_mut(&self, ptr: *mut u8, _layout: Layout) {
-        let _irq = IrqGuard::new();
+        let _lock = HEAP_LOCK.lock();
         self.ensure_initialized();
 
         if ptr.is_null() { return; }
 
-        let pad = unsafe { *((ptr as *const u16).sub(1)) } as usize;
+        let pad = if core::mem::size_of::<u16>() + 1 <= 16 {
+            unsafe { *((ptr as *const u16).sub(1)) } as usize
+        } else {
+            0
+        };
         let block = (ptr as usize - HEADER_SIZE - pad) as *mut BlockHeader;
+
+        unsafe {
+            if (*block).magic == MAGIC_FREE {
+                return;
+            }
+        }
 
         let block_size;
         let block_start;

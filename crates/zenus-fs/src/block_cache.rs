@@ -119,9 +119,17 @@ impl BlockCache {
                     None => return false,
                 };
                 self.flush_entry(idx);
+                if buf.len() < SECTOR_SIZE {
+                    let mut sector_buf = [0u8; SECTOR_SIZE];
+                    block_device_read(dev_id as usize, block, &mut sector_buf);
+                    self.entries[idx].data = sector_buf;
+                } else {
+                    self.entries[idx].data = [0; SECTOR_SIZE];
+                }
                 self.entries[idx].dev_id = dev_id;
                 self.entries[idx].block = block;
                 self.entries[idx].valid = true;
+                self.entries[idx].dirty = false;
                 idx
             }
         };

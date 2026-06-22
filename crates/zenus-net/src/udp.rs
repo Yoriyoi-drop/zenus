@@ -7,6 +7,29 @@ pub struct UdpHeader {
     pub checksum: u16,
 }
 
+fn checksum(src_ip: [u8; 4], dst_ip: [u8; 4], segment: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    sum += u32::from(u16::from_be_bytes([src_ip[0], src_ip[1]]));
+    sum += u32::from(u16::from_be_bytes([src_ip[2], src_ip[3]]));
+    sum += u32::from(u16::from_be_bytes([dst_ip[0], dst_ip[1]]));
+    sum += u32::from(u16::from_be_bytes([dst_ip[2], dst_ip[3]]));
+    sum += 0x0011;
+    let udp_len = segment.len() as u16;
+    sum += u32::from(udp_len);
+    let mut i = 0;
+    while i + 1 < segment.len() {
+        sum += u32::from(u16::from_be_bytes([segment[i], segment[i + 1]]));
+        i += 2;
+    }
+    if i < segment.len() {
+        sum += u32::from(segment[i]) << 8;
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
 pub fn parse(packet: &[u8]) -> Option<(UdpHeader, &[u8])> {
     if packet.len() < 8 {
         return None;
@@ -39,7 +62,7 @@ pub fn send(iface_idx: usize, src_port: u16, dst_port: u16, src_ip: [u8; 4], dst
 
 pub fn handle_receive(
     iface_idx: usize,
-    src_ip: [u8; 4], _dst_ip: [u8; 4],
+    src_ip: [u8; 4], dst_ip: [u8; 4],
     packet: &[u8],
 ) -> bool {
     if packet.len() < 8 {
@@ -50,6 +73,10 @@ pub fn handle_receive(
         Some(h) => h,
         None => return false,
     };
+
+    if hdr.checksum != 0 && checksum(src_ip, dst_ip, packet) != 0 {
+        return false;
+    }
 
     if hdr.dst_port == 7 {
         let total_len = 8 + payload.len();

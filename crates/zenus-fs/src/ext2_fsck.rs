@@ -238,11 +238,25 @@ pub fn fsck(dev_id: u8) -> FsckReport {
             add_msg(&mut report, FsckSeverity::Error, 29, "inode_table spans beyond device");
         }
 
-        let mut buf = [0u8; 512];
+        let mut buf = [0u8; 4096];
+        let sectors = (block_size as usize + 511) / 512;
         let bitmap_sector = bgd.block_bitmap as u64 * block_size / 512;
-        if bc_read(dev_id, bitmap_sector, &mut buf) {
+        let mut ok = true;
+        if block_size as usize <= buf.len() {
+            for i in 0..sectors {
+                let off = i * 512;
+                if off + 512 > buf.len() { break; }
+                if !bc_read(dev_id, bitmap_sector + i as u64, &mut buf[off..off + 512]) {
+                    ok = false;
+                    break;
+                }
+            }
+        } else {
+            ok = false;
+        }
+        if ok {
             let mut set_bits = 0u64;
-            let max_bits = core::cmp::min(this_group_blocks, 4096);
+            let max_bits = core::cmp::min(this_group_blocks, block_size * 8);
             for i in 0..max_bits {
                 if buf[(i / 8) as usize] & (1 << (i % 8)) != 0 {
                     set_bits += 1;

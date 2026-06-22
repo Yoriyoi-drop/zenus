@@ -1,5 +1,6 @@
 use x86_64::instructions::port::Port;
 use zenus_console::serial::SerialPort;
+use zenus_sync::spinlock::SpinLock;
 
 const PRIMARY_IO: u16 = 0x1F0;
 const PRIMARY_CTRL: u16 = 0x3F6;
@@ -18,6 +19,8 @@ const STATUS_ERR: u8 = 0x01;
 
 const SECTOR_SIZE: usize = 512;
 
+static ATA_CHANNEL_LOCKS: [SpinLock<()>; 2] = [SpinLock::new(()), SpinLock::new(())];
+
 #[derive(Clone, Copy)]
 pub struct AtaDevice {
     io_base: u16,
@@ -28,8 +31,8 @@ pub struct AtaDevice {
 }
 
 pub const MAX_ATA_DEVICES: usize = 4;
-static mut ATA_DEVICES: [Option<AtaDevice>; MAX_ATA_DEVICES] = [None; MAX_ATA_DEVICES];
-static mut ATA_COUNT: usize = 0;
+static ATA_DEVICES: zenus_sync::spinlock::SpinLock<[Option<AtaDevice>; MAX_ATA_DEVICES]> = zenus_sync::spinlock::SpinLock::new([None; MAX_ATA_DEVICES]);
+static ATA_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 fn ata_wait_busy(io_base: u16) -> bool {
     for _ in 0..100000 {
@@ -143,32 +146,21 @@ pub fn init() {
         (SECONDARY_IO, SECONDARY_CTRL, "secondary"),
     ];
 
-    for &(io, ctrl, name) in &channels {
+    for &(io, ctrl, _name) in &channels {
         for drive in 0..2 {
-            let label = if drive == 0 { "master" } else { "slave" };
+            let _label = if drive == 0 { "master" } else { "slave" };
             if let Some(dev) = identify_drive(io, ctrl, drive) {
-                let idx = unsafe { ATA_COUNT };
+                let mut guard = ATA_DEVICES.lock();
+                let idx = ATA_COUNT.load(core::sync::atomic::Ordering::Relaxed);
                 if idx < MAX_ATA_DEVICES {
-                    unsafe {
-                        ATA_DEVICES[idx] = Some(dev);
-                        ATA_COUNT += 1;
-                    }
-                    let dev_ref = unsafe { ATA_DEVICES[idx].as_ref().unwrap() };
-                    s.write_str("  ATA ");
-                    s.write_str(label);
-                    s.write_str(" (");
-                    s.write_str(name);
-                    s.write_str("): ");
-                    s.write_str(model_str(&dev_ref.model));
-                    s.write_str(" - ");
-                    s.write_u64(dev_ref.lba_sectors);
-                    s.write_str(" sectors\n");
+                    guard[idx] = Some(dev);
+                    ATA_COUNT.store(idx + 1, core::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
     }
 
-    let count = unsafe { ATA_COUNT };
+    let count = ATA_COUNT.load(core::sync::atomic::Ordering::Relaxed);
     if count > 0 {
         s.write_str("[OK] ATA: ");
         s.write_u64(count as u64);
@@ -179,11 +171,16 @@ pub fn init() {
 }
 
 pub fn device_count() -> usize {
-    unsafe { ATA_COUNT }
+    ATA_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+fn get_device_copy(dev_idx: usize) -> Option<AtaDevice> {
+    let guard = ATA_DEVICES.lock();
+    guard.get(dev_idx).and_then(|d| *d)
 }
 
 pub fn read_sectors(dev_idx: usize, lba: u64, count: u16, buf: &mut [u8]) -> bool {
-    let dev = match unsafe { ATA_DEVICES.get(dev_idx).and_then(|d| d.as_ref()) } {
+    let dev = match get_device_copy(dev_idx) {
         Some(d) => d,
         None => return false,
     };
@@ -196,6 +193,8 @@ pub fn read_sectors(dev_idx: usize, lba: u64, count: u16, buf: &mut [u8]) -> boo
     }
 
     let io_base = dev.io_base;
+    let channel = if io_base == PRIMARY_IO { 0 } else { 1 };
+    let _lock = ATA_CHANNEL_LOCKS[channel].lock();
 
     for sector in 0..count as u64 {
         let current_lba = lba + sector;
@@ -230,7 +229,7 @@ pub fn read_sectors(dev_idx: usize, lba: u64, count: u16, buf: &mut [u8]) -> boo
 }
 
 pub fn write_sectors(dev_idx: usize, lba: u64, count: u16, buf: &[u8]) -> bool {
-    let dev = match unsafe { ATA_DEVICES.get(dev_idx).and_then(|d| d.as_ref()) } {
+    let dev = match get_device_copy(dev_idx) {
         Some(d) => d,
         None => return false,
     };
@@ -243,6 +242,8 @@ pub fn write_sectors(dev_idx: usize, lba: u64, count: u16, buf: &[u8]) -> bool {
     }
 
     let io_base = dev.io_base;
+    let channel = if io_base == PRIMARY_IO { 0 } else { 1 };
+    let _lock = ATA_CHANNEL_LOCKS[channel].lock();
 
     for sector in 0..count as u64 {
         let current_lba = lba + sector;
@@ -280,6 +281,6 @@ pub fn write_sectors(dev_idx: usize, lba: u64, count: u16, buf: &[u8]) -> bool {
     ata_wait_busy(io_base)
 }
 
-pub fn get_device(dev_idx: usize) -> Option<&'static AtaDevice> {
-    unsafe { ATA_DEVICES.get(dev_idx).and_then(|d| d.as_ref()) }
+pub fn get_device(dev_idx: usize) -> Option<AtaDevice> {
+    get_device_copy(dev_idx)
 }

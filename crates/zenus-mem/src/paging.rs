@@ -20,20 +20,20 @@ pub fn init(hhdm_offset: u64) {
         );
     }
 
-    HHDM_OFFSET.store(hhdm_offset, Ordering::Relaxed);
+    HHDM_OFFSET.store(hhdm_offset, Ordering::Release);
 
     let cr3_raw = get_level4_addr_raw();
     let cr3_phys = cr3_raw & !0xFFF;
-    LEVEL4_PHYS.store(cr3_phys, Ordering::Relaxed);
-    KERNEL_CR3.store(cr3_raw, Ordering::Relaxed);
+    LEVEL4_PHYS.store(cr3_phys, Ordering::Release);
+    KERNEL_CR3.store(cr3_raw, Ordering::Release);
 }
 
 pub fn hhdm_offset() -> u64 {
-    HHDM_OFFSET.load(Ordering::Relaxed)
+    HHDM_OFFSET.load(Ordering::Acquire)
 }
 
 pub fn kernel_cr3() -> u64 {
-    KERNEL_CR3.load(Ordering::Relaxed)
+    KERNEL_CR3.load(Ordering::Acquire)
 }
 
 pub fn get_level4_addr() -> VirtAddr {
@@ -58,9 +58,9 @@ fn with_mapper<F, R>(f: F) -> R
 where
     F: FnOnce(&mut OffsetPageTable) -> R,
 {
-    let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
     let offset = VirtAddr::new(hhdm);
-    let level4_phys = LEVEL4_PHYS.load(Ordering::Relaxed);
+    let level4_phys = LEVEL4_PHYS.load(Ordering::Acquire);
     let level4_virt = (level4_phys + hhdm) as *mut PageTable;
     let mut mapper = unsafe { OffsetPageTable::new(&mut *level4_virt, offset) };
     f(&mut mapper)
@@ -87,13 +87,15 @@ pub fn map_page<A: FrameAllocator<Size4KiB>>(
 pub fn unmap_page(virt: VirtAddr) {
     with_mapper(|mapper| {
         let page = Page::<Size4KiB>::containing_address(virt);
-        let (_, flush) = mapper.unmap(page).unwrap();
+        let (frame, flush) = mapper.unmap(page).unwrap();
         flush.flush();
+        let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+        allocator.free_frame(frame.start_address());
     })
 }
 
 pub fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool) -> bool {
-    let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
     let offset = VirtAddr::new(hhdm);
     let cr3_phys = cr3_phys_raw & !0xFFF;
     let pt_virt = (cr3_phys + hhdm) as *mut PageTable;
@@ -119,7 +121,7 @@ pub fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool
 }
 
 pub fn virt_to_phys_raw(cr3_raw: u64, virt: u64) -> Option<u64> {
-    let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
     let cr3_phys = cr3_raw & !0xFFF;
     let levels = [(4usize, 39), (3, 30), (2, 21), (1, 12)];
     unsafe {
@@ -146,8 +148,8 @@ pub fn virt_to_phys_raw(cr3_raw: u64, virt: u64) -> Option<u64> {
 }
 
 pub fn create_address_space() -> Option<u64> {
-    let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
-    let cr3_phys = LEVEL4_PHYS.load(Ordering::Relaxed);
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+    let cr3_phys = LEVEL4_PHYS.load(Ordering::Acquire);
 
     let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
     let new_frame = allocator.alloc_frame()?;

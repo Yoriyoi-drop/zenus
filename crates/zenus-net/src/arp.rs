@@ -38,25 +38,28 @@ pub fn add_static(ip: [u8; 4], mac: [u8; 6]) {
 }
 fn arp_insert(ip: [u8; 4], mac: [u8; 6]) {
     unsafe {
+        if ip == ARP_GATEWAY {
+            return;
+        }
         for i in 0..ARP_CACHE_SIZE {
             if !ARP_CACHE[i].valid {
                 ARP_CACHE[i] = ArpEntry { ip, mac, valid: true };
                 return;
             }
             if ARP_CACHE[i].ip == ip {
-                ARP_CACHE[i].mac = mac;
-                ARP_CACHE[i].valid = true;
+                if ARP_CACHE[i].mac != mac {
+                    return;
+                }
                 return;
             }
         }
-        // All slots full: evict a non-gateway entry if possible
+        // All slots full: evict oldest non-gateway entry
         for i in 1..ARP_CACHE_SIZE {
             if ARP_CACHE[i].ip != ARP_GATEWAY {
                 ARP_CACHE[i] = ArpEntry { ip, mac, valid: true };
                 return;
             }
         }
-        ARP_CACHE[1] = ArpEntry { ip, mac, valid: true };
     }
 }
 

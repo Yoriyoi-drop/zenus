@@ -106,7 +106,8 @@ impl FrameAllocator {
 
         for reg_idx in 0..self.region_count {
             let reg = self.regions[reg_idx];
-            let start_aligned = (core::cmp::max(reg.base, self.next_free) + 0xFFF) & !0xFFF;
+            let max_base = core::cmp::max(reg.base, self.next_free);
+            let start_aligned = max_base.checked_add(0xFFF)? & !0xFFF;
             let end = reg.base + reg.length;
 
             if start_aligned + frame_size <= end {
@@ -122,11 +123,6 @@ impl FrameAllocator {
         if self.free_count < FREE_STACK_SIZE {
             self.free_stack[self.free_count] = addr.as_u64();
             self.free_count += 1;
-        } else {
-            // Free stack full — try to move next_free back to reuse this frame
-            if addr.as_u64() < self.next_free {
-                self.next_free = addr.as_u64();
-            }
         }
         self.used_memory = self.used_memory.saturating_sub(PAGE_SIZE as u64);
     }

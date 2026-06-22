@@ -96,12 +96,14 @@ impl FileSystem for DevFs {
         if inode >= BLOCK_INODE_BASE {
             let idx = (inode - BLOCK_INODE_BASE) as usize;
             unsafe {
-                if let Some((_, ops)) = &BLOCK_DEVS[idx] {
-                    let lba = offset / 512;
-                    if (ops.read)(lba, buf) {
-                        return Some(buf.len() as u64);
+                if idx < BLOCK_DEVS.len() {
+                    if let Some((_, ops)) = &BLOCK_DEVS[idx] {
+                        let lba = offset / 512;
+                        if (ops.read)(lba, buf) {
+                            return Some(buf.len() as u64);
+                        }
+                        return None;
                     }
-                    return None;
                 }
             }
         }
@@ -127,10 +129,12 @@ impl FileSystem for DevFs {
             _ if inode >= BLOCK_INODE_BASE => {
                 let idx = (inode - BLOCK_INODE_BASE) as usize;
                 unsafe {
-                    if let Some((_, ops)) = &BLOCK_DEVS[idx] {
-                        let lba = offset / 512;
-                        (ops.write)(lba, buf);
-                        return Some(buf.len() as u64);
+                    if idx < BLOCK_DEVS.len() {
+                        if let Some((_, ops)) = &BLOCK_DEVS[idx] {
+                            let lba = offset / 512;
+                            (ops.write)(lba, buf);
+                            return Some(buf.len() as u64);
+                        }
                     }
                 }
                 None
@@ -144,9 +148,30 @@ impl FileSystem for DevFs {
             return &[];
         }
 
-        // Static entries are 'static, block entries need special handling
-        // Return only static entries for directory listing
-        STATIC_ENTRIES
+        unsafe {
+            let total = STATIC_ENTRIES.len() + BLOCK_DEV_COUNT;
+            if total <= 4 {
+                return STATIC_ENTRIES;
+            }
+            static mut ALL_ENTRIES: [DirEntry; 12] = [DirEntry {
+                name: "", file_type: FileType::None, inode: 0,
+            }; 12];
+            for i in 0..STATIC_ENTRIES.len() {
+                ALL_ENTRIES[i] = STATIC_ENTRIES[i];
+            }
+            for i in 0..BLOCK_DEV_COUNT {
+                let idx = STATIC_ENTRIES.len() + i;
+                if idx >= ALL_ENTRIES.len() { break; }
+                if let Some((name, _)) = &BLOCK_DEVS[i] {
+                    ALL_ENTRIES[idx] = DirEntry {
+                        name,
+                        file_type: FileType::BlockDevice,
+                        inode: BLOCK_INODE_BASE + i as u64,
+                    };
+                }
+            }
+            &ALL_ENTRIES[..core::cmp::min(total, ALL_ENTRIES.len())]
+        }
     }
 
     fn stat(&self, inode: u64) -> FileStat {
@@ -162,8 +187,10 @@ impl FileSystem for DevFs {
             _ if inode >= BLOCK_INODE_BASE => {
                 let idx = (inode - BLOCK_INODE_BASE) as usize;
                 unsafe {
-                    if let Some((_, ops)) = &BLOCK_DEVS[idx] {
-                        return FileStat { size: ops.size, file_type: FileType::BlockDevice, inode, blocks: ops.size / 512, uid: 0, gid: 0, mode: 0o660 };
+                    if idx < BLOCK_DEVS.len() {
+                        if let Some((_, ops)) = &BLOCK_DEVS[idx] {
+                            return FileStat { size: ops.size, file_type: FileType::BlockDevice, inode, blocks: ops.size / 512, uid: 0, gid: 0, mode: 0o660 };
+                        }
                     }
                 }
                 FileStat { size: 0, file_type: FileType::BlockDevice, inode, blocks: 0, uid: 0, gid: 0, mode: 0o660 }

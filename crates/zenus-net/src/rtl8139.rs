@@ -1,3 +1,4 @@
+use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::instructions::port::Port;
 use zenus_console::serial::SerialPort;
 use crate::ethernet;
@@ -48,6 +49,7 @@ const TX_DESC_COUNT: usize = 4;
 const RX_BUF_PAGES: usize = 8;
 const RX_BUF_BYTES: usize = RX_BUF_PAGES * 0x1000;
 
+static RTL_IRQ_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static mut RTL_IFACE: Option<Rtl8139> = None;
 static NIC_IO_BASE: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
@@ -67,6 +69,7 @@ pub struct Rtl8139 {
     tx_cur: usize,
     link_up: bool,
     irq_line: u8,
+    tx_bounce: [u8; 1792],
 }
 
 impl Rtl8139 {
@@ -128,6 +131,7 @@ impl Rtl8139 {
             tx_cur: 0,
             link_up: false,
             irq_line,
+            tx_bounce: [0u8; 1792],
         })
     }
 
@@ -317,7 +321,8 @@ impl Rtl8139 {
         let tsd_addr = RTL_TSD0 + (self.tx_cur as u16 * 4);
         let tsad_addr = RTL_TSAD0 + (self.tx_cur as u16 * 4);
 
-        let virt_addr = data.as_ptr() as u64;
+        self.tx_bounce[..data.len()].copy_from_slice(data);
+        let virt_addr = self.tx_bounce.as_ptr() as u64;
         let phys_addr = Self::virt_to_phys(virt_addr);
         if phys_addr == 0 || phys_addr > 0xFFFF_FFFFu64 {
             return false;
@@ -431,8 +436,11 @@ impl Rtl8139 {
     }
 
     pub fn handle_irq() {
+    if RTL_IRQ_IN_PROGRESS.swap(true, Ordering::AcqRel) {
+        return;
+    }
     let io_base = NIC_IO_BASE.load(core::sync::atomic::Ordering::Relaxed);
-    if io_base == 0 { return; }
+    if io_base == 0 { RTL_IRQ_IN_PROGRESS.store(false, Ordering::Release); return; }
     unsafe {
         let mut isr_port = x86_64::instructions::port::Port::<u16>::new(io_base + RTL_ISR);
         let isr = isr_port.read();
@@ -445,9 +453,13 @@ impl Rtl8139 {
             }
         }
     }
+    RTL_IRQ_IN_PROGRESS.store(false, Ordering::Release);
 }
 
 pub fn poll(&mut self) {
+        if RTL_IRQ_IN_PROGRESS.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let isr = self.read16(RTL_ISR);
         if isr != 0 {
             self.write16(RTL_ISR, isr);
@@ -455,6 +467,7 @@ pub fn poll(&mut self) {
                 self.process_rx();
             }
         }
+        RTL_IRQ_IN_PROGRESS.store(false, Ordering::Release);
     }
 
     fn process_rx(&mut self) {
@@ -489,7 +502,10 @@ pub fn poll(&mut self) {
             }
 
             self.rx_cur = ((self.rx_cur as u16) + 4 + ((pkt_len as u16 + 3) & !3)) % RX_BUF_SIZE as u16;
-            self.write16(RTL_CAPR, self.rx_cur.wrapping_sub(0x10));
+            let capr_val = self.rx_cur.wrapping_sub(0x10);
+            if capr_val <= self.rx_cur || self.rx_cur >= 0x10 {
+                self.write16(RTL_CAPR, capr_val);
+            }
 
             self.handle_packet(&packet[..copy_len]);
         }

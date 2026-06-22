@@ -332,9 +332,7 @@ pub fn close(fd: usize, iface_idx: usize) -> bool {
         s.state = SocketState::Free;
         match kind {
             SocketKind::Tcp { conn } => {
-                let result = tcp::close(conn, iface_idx);
-                tcp::close_conn(conn);
-                result
+                tcp::close(conn, iface_idx)
             }
             SocketKind::Udp(_) => true,
         }

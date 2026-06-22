@@ -19,7 +19,7 @@ const TCP_FLAG_RST: u8 = 0x04;
 const TCP_FLAG_PSH: u8 = 0x08;
 const TCP_FLAG_ACK: u8 = 0x10;
 
-const MAX_CONNS: usize = 16;
+pub const MAX_CONNS: usize = 16;
 const MAX_RETRIES: u8 = 5;
 const RETRY_INTERVAL: u8 = 10;
 
@@ -47,6 +47,14 @@ struct Tcb {
 
 static mut TCP_CONNS: [Option<Tcb>; MAX_CONNS] = [None; MAX_CONNS];
 static mut NEXT_CONN_ID: usize = 0;
+
+fn seq_before(a: u32, b: u32) -> bool {
+    ((a.wrapping_sub(b)) as i32) < 0
+}
+
+fn seq_before_eq(a: u32, b: u32) -> bool {
+    a == b || seq_before(a, b)
+}
 
 fn find_slot() -> Option<usize> {
     unsafe {
@@ -141,7 +149,7 @@ pub fn listen(port: u16) -> Option<usize> {
             send_una: 0,
             send_nxt: 0,
             recv_nxt: 0,
-            recv_window: 65535,
+            recv_window: 4096,
             listening: true,
             rx_data: [0; 4096],
             rx_data_len: 0,
@@ -191,7 +199,7 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
             send_una: isn,
             send_nxt: isn + 1,
             recv_nxt: 0,
-            recv_window: 65535,
+            recv_window: 4096,
             listening: false,
             rx_data: [0; 4096],
             rx_data_len: 0,
@@ -297,7 +305,8 @@ pub fn handle_receive(
         Some(idx) => idx,
         None => {
             if (flags & TCP_FLAG_RST) == 0 && (flags & TCP_FLAG_SYN) == 0 {
-                let mut rst = build_segment(dst_port, src_port, 0, seq + payload.len() as u32 + if (flags & TCP_FLAG_FIN) != 0 { 1 } else { 0 }, TCP_FLAG_RST | TCP_FLAG_ACK, 0, &[]);
+                let rst_seq = if (flags & TCP_FLAG_ACK) != 0 { ack } else { 0 };
+                let mut rst = build_segment(dst_port, src_port, rst_seq, seq + payload.len() as u32 + if (flags & TCP_FLAG_FIN) != 0 { 1 } else { 0 }, TCP_FLAG_RST | TCP_FLAG_ACK, 0, &[]);
                 let csum = checksum(dst_ip, src_ip, &rst[..20]);
                 rst[16] = (csum >> 8) as u8;
                 rst[17] = (csum & 0xFF) as u8;
@@ -349,7 +358,7 @@ pub fn handle_receive(
                             send_una: isn,
                             send_nxt: isn + 1,
                             recv_nxt: seq + 1,
-                            recv_window: 65535,
+                            recv_window: 4096,
                             listening: false,
                             rx_data: [0; 4096],
                             rx_data_len: 0,
@@ -465,9 +474,18 @@ pub fn handle_receive(
 
             TCP_ESTABLISHED | TCP_CLOSE_WAIT => {
                 if (flags & TCP_FLAG_ACK) != 0 {
-                    if ack > tcb.send_una && ack <= tcb.send_nxt {
+                    if seq_before(tcb.send_una, ack) && seq_before_eq(ack, tcb.send_nxt) {
+                        let acked_bytes = ack.wrapping_sub(tcb.send_una);
                         tcb.send_una = ack;
-                        if tcb.send_una >= tcb.send_nxt {
+                        // Remove acknowledged data from tx buffer
+                        if acked_bytes as usize <= tcb.tx_data_len {
+                            let acked = acked_bytes as usize;
+                            if acked < tcb.tx_data_len {
+                                tcb.tx_data.copy_within(acked..tcb.tx_data_len, 0);
+                            }
+                            tcb.tx_data_len -= acked;
+                        }
+                        if !seq_before(tcb.send_una, tcb.send_nxt) {
                             tcb.retry_count = 0;
                             tcb.retry_ticks = 0;
                         }
@@ -513,23 +531,21 @@ pub fn handle_receive(
                 }
 
                 if (flags & TCP_FLAG_FIN) != 0 {
-                    tcb.recv_nxt = seq + payload.len() as u32 + 1;
-                    let mut fin_ack = build_segment(
+                    tcb.recv_nxt = tcb.recv_nxt.wrapping_add(1);
+                    if tcb.state == TCP_ESTABLISHED {
+                        tcb.state = TCP_CLOSE_WAIT;
+                    }
+                    let mut ack_seg = build_segment(
                         dst_port, src_port,
                         tcb.send_nxt, tcb.recv_nxt,
-                        TCP_FLAG_ACK | TCP_FLAG_FIN,
+                        TCP_FLAG_ACK,
                         tcb.recv_window,
                         &[],
                     );
-                    let csum = checksum(dst_ip, src_ip, &fin_ack[..20]);
-                    fin_ack[16] = (csum >> 8) as u8;
-                    fin_ack[17] = (csum & 0xFF) as u8;
-                    if ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &fin_ack[..20]) {
-                        tcb.send_nxt += 1;
-                        if tcb.state == TCP_ESTABLISHED {
-                            tcb.state = TCP_CLOSE_WAIT;
-                        }
-                    }
+                    let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
+                    ack_seg[16] = (csum >> 8) as u8;
+                    ack_seg[17] = (csum & 0xFF) as u8;
+                    ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
                 }
             }
 
@@ -646,7 +662,7 @@ pub fn poll_retransmit(iface_idx: usize) {
                 TCP_SYN_SENT | TCP_SYN_RECEIVED | TCP_ESTABLISHED | TCP_CLOSE_WAIT | TCP_LAST_ACK | TCP_FIN_WAIT1 | TCP_CLOSING => {}
                 _ => continue,
             }
-            if tcb.send_una >= tcb.send_nxt {
+            if !seq_before(tcb.send_una, tcb.send_nxt) {
                 tcb.retry_count = 0;
                 tcb.retry_ticks = 0;
                 continue;
@@ -681,7 +697,7 @@ pub fn poll_retransmit(iface_idx: usize) {
             } else if tcb.state == TCP_LAST_ACK || tcb.state == TCP_FIN_WAIT1 || tcb.state == TCP_CLOSING {
                 let mut seg = build_segment(
                     src_port, dst_port,
-                    send_nxt, tcb.recv_nxt,
+                    send_una, tcb.recv_nxt,
                     TCP_FLAG_FIN | TCP_FLAG_ACK,
                     tcb.recv_window,
                     &[],
@@ -766,10 +782,6 @@ pub fn flush_tx(conn: usize, iface_idx: usize) -> bool {
         let result = ipv4::send(iface_idx, tcb.remote_ip, ipv4::PROTO_TCP, &seg[..seg_len]);
         if result {
             tcb.send_nxt += payload_len as u32;
-            if payload_len < tcb.tx_data_len {
-                tcb.tx_data.copy_within(payload_len..tcb.tx_data_len, 0);
-            }
-            tcb.tx_data_len -= payload_len;
 
             if tcb.tx_data_len > 0 {
                 tcb.retry_count = MAX_RETRIES;

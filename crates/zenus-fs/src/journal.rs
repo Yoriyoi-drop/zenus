@@ -7,6 +7,8 @@ const JNL_STATE_EMPTY: u32 = 0;
 const JNL_STATE_ACTIVE: u32 = 1;
 const JNL_STATE_COMMITTED: u32 = 2;
 
+const MAX_TARGET_BLOCKS: usize = 123;
+
 #[repr(C, packed)]
 struct JournalHeader {
     magic: u32,
@@ -14,7 +16,7 @@ struct JournalHeader {
     num_entries: u32,
     state: u32,
     reserved: u32,
-    targets: [u32; MAX_ENTRIES],
+    targets: [u32; MAX_TARGET_BLOCKS],
 }
 
 static mut JNL_DEV_ID: u8 = 0xFF;
@@ -88,6 +90,9 @@ pub fn journal_write(target_block: u64, data: &[u8]) -> bool {
         return false;
     }
 
+    if target_block > u32::MAX as u64 {
+        return false;
+    }
     hdr.targets[idx] = target_block as u32;
     hdr.num_entries += 1;
     if !write_header(&hdr) {
@@ -106,16 +111,11 @@ pub fn journal_commit() -> bool {
 
     let hdr = read_header();
     let hdr = match hdr {
-        Some(mut h) => {
-            h.state = JNL_STATE_COMMITTED;
-            if !write_header(&h) {
-                return false;
-            }
-            h
-        }
+        Some(h) => h,
         None => return false,
     };
 
+    // Phase 1: Write journal data blocks to their targets
     let max_commit_entries = core::cmp::min(hdr.num_entries as usize, MAX_ENTRIES);
     for i in 0..max_commit_entries {
         let target = hdr.targets[i] as u64;
@@ -135,6 +135,21 @@ pub fn journal_commit() -> bool {
     }
     bc_flush();
 
+    // Phase 2: Mark committed in header (after data is written)
+    let hdr = read_header();
+    let hdr = match hdr {
+        Some(mut h) => {
+            h.state = JNL_STATE_COMMITTED;
+            if !write_header(&h) {
+                return false;
+            }
+            h
+        }
+        None => return false,
+    };
+    bc_flush();
+
+    // Phase 3: Clear journal (after commit is durable)
     let hdr = read_header();
     let hdr = match hdr {
         Some(mut h) => {
