@@ -93,6 +93,13 @@ pub fn init_ap() {
 }
 
 pub fn set_tss_stack(stack_ptr: VirtAddr) {
-    let tss = unsafe { &mut *TSS.as_mut_ptr() };
-    tss.privilege_stack_table[0] = stack_ptr;
+    let cpu = crate::smp::current_cpu();
+    let idx = (cpu as usize).min(MAX_CPUS - 1);
+    if idx == 0 {
+        let tss = unsafe { &mut *TSS.as_mut_ptr() };
+        tss.privilege_stack_table[0] = stack_ptr;
+    } else {
+        let tss = unsafe { &mut *AP_TSS[idx].as_mut_ptr() };
+        tss.privilege_stack_table[0] = stack_ptr;
+    }
 }

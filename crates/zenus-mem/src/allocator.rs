@@ -76,8 +76,8 @@ impl FreeListAllocator {
                 let needed = pad + size;
 
                 if needed <= block_size {
-                    let pad_ptr = (aligned_data as *mut u16).sub(1);
-                    *pad_ptr = pad.min(u16::MAX as usize) as u16;
+                    let pad_ptr = (aligned_data as *mut usize).sub(1);
+                    *pad_ptr = pad;
 
                     let remaining = block_size - needed;
                     if remaining >= HEADER_SIZE + MIN_BLOCK {
@@ -132,10 +132,7 @@ impl FreeListAllocator {
 
         if ptr.is_null() { return; }
 
-        let pad = unsafe { *((ptr as *const u16).sub(1)) as usize };
-        if pad > 4096 {
-            return; // sanity check: padding shouldn't exceed page size
-        }
+        let pad = unsafe { *((ptr as *const usize).sub(1)) as usize };
         let block = (ptr as usize - HEADER_SIZE - pad) as *mut BlockHeader;
 
         unsafe {

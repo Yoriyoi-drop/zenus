@@ -94,11 +94,15 @@ impl FileSystem for DevFs {
             unsafe {
                 if idx < BLOCK_DEVS.len() {
                     if let Some((_, ops)) = &BLOCK_DEVS[idx] {
-                        let lba = offset / 512;
-                        if (ops.read)(lba, buf) {
-                            return Some(buf.len() as u64);
+                        let sector = offset / 512;
+                        let off_in_sector = (offset % 512) as usize;
+                        let mut sector_buf = [0u8; 512];
+                        if !(ops.read)(sector, &mut sector_buf) {
+                            return None;
                         }
-                        return None;
+                        let copy_len = core::cmp::min(buf.len(), 512 - off_in_sector);
+                        buf[..copy_len].copy_from_slice(&sector_buf[off_in_sector..off_in_sector + copy_len]);
+                        return Some(copy_len as u64);
                     }
                 }
             }
@@ -127,9 +131,20 @@ impl FileSystem for DevFs {
                 unsafe {
                     if idx < BLOCK_DEVS.len() {
                         if let Some((_, ops)) = &BLOCK_DEVS[idx] {
-                            let lba = offset / 512;
-                            (ops.write)(lba, buf);
-                            return Some(buf.len() as u64);
+                            let sector = offset / 512;
+                            let off_in_sector = (offset % 512) as usize;
+                            let mut sector_buf = [0u8; 512];
+                            if off_in_sector != 0 || buf.len() < 512 {
+                                if !(ops.read)(sector, &mut sector_buf) {
+                                    sector_buf = [0; 512];
+                                }
+                            }
+                            let copy_len = core::cmp::min(buf.len(), 512 - off_in_sector);
+                            sector_buf[off_in_sector..off_in_sector + copy_len].copy_from_slice(&buf[..copy_len]);
+                            if !(ops.write)(sector, &sector_buf) {
+                                return None;
+                            }
+                            return Some(copy_len as u64);
                         }
                     }
                 }

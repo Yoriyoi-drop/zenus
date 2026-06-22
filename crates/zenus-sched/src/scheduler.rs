@@ -653,20 +653,32 @@ pub struct TerminatedStack {
     pub size: usize,
 }
 
-static mut TERMINATED_STACKS: [Option<TerminatedStack>; 64] = [None; 64];
-static mut TERMINATED_STACK_COUNT: usize = 0;
+struct TerminatedStackList {
+    stacks: [Option<TerminatedStack>; 64],
+    count: usize,
+}
+
+const EMPTY_TERM_STACK: Option<TerminatedStack> = None;
+const fn empty_term_array() -> [Option<TerminatedStack>; 64] {
+    [EMPTY_TERM_STACK; 64]
+}
+
+static TERMINATED_STACKS: zenus_sync::spinlock::SpinLock<TerminatedStackList> =
+    zenus_sync::spinlock::SpinLock::new(TerminatedStackList {
+        stacks: empty_term_array(),
+        count: 0,
+    });
 
 pub fn reap_terminated_stacks() {
-    unsafe {
-        for i in 0..TERMINATED_STACK_COUNT {
-            if let Some(ts) = TERMINATED_STACKS[i].take() {
-                if let Ok(layout) = core::alloc::Layout::from_size_align(ts.size, 16) {
-                    alloc::alloc::dealloc(ts.base as *mut u8, layout);
-                }
+    let mut list = TERMINATED_STACKS.lock();
+    for i in 0..list.count {
+        if let Some(ts) = list.stacks[i].take() {
+            if let Ok(layout) = core::alloc::Layout::from_size_align(ts.size, 16) {
+                alloc::alloc::dealloc(ts.base as *mut u8, layout);
             }
         }
-        TERMINATED_STACK_COUNT = 0;
     }
+    list.count = 0;
 }
 
 pub fn task_exit() {
@@ -684,15 +696,15 @@ pub fn task_exit() {
     };
     if let (Some(sa), Some(ss), Some(tc)) = (stack_alloc, stack_size, task_cpu) {
         if sa != 0 && ss > 0 {
-            unsafe {
-                if TERMINATED_STACK_COUNT < 64 {
-                    TERMINATED_STACKS[TERMINATED_STACK_COUNT] = Some(TerminatedStack {
-                        base: sa,
-                        size: ss as usize,
-                    });
-                    TERMINATED_STACK_COUNT += 1;
-                }
+            let mut list = TERMINATED_STACKS.lock();
+            if list.count < 64 {
+                list.stacks[list.count] = Some(TerminatedStack {
+                    base: sa,
+                    size: ss as usize,
+                });
+                list.count += 1;
             }
+            drop(list);
         }
         CPU_TASK_COUNT[tc as usize].fetch_sub(1, Ordering::SeqCst);
     }

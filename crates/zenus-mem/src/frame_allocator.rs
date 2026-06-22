@@ -106,8 +106,8 @@ impl FrameAllocator {
 
         for reg_idx in 0..self.region_count {
             let reg = self.regions[reg_idx];
-            let max_base = core::cmp::max(reg.base, self.next_free);
-            let start_aligned = max_base.checked_add(0xFFF)? & !0xFFF;
+            let start = core::cmp::max(reg.base, self.next_free);
+            let start_aligned = (start + 0xFFF) & !0xFFF;
             let end = reg.base + reg.length;
 
             if start_aligned + frame_size <= end {
@@ -116,6 +116,20 @@ impl FrameAllocator {
                 return Some(PhysAddr::new(start_aligned));
             }
         }
+
+        // Fallback: scan regions from base (for frames freed back as regions)
+        for reg_idx in 0..self.region_count {
+            let reg = self.regions[reg_idx];
+            let start_aligned = (reg.base + 0xFFF) & !0xFFF;
+            let end = reg.base + reg.length;
+            if start_aligned + frame_size <= end && start_aligned < self.next_free {
+                // Found a frame before next_free that we skipped before
+                self.regions[reg_idx].base = start_aligned + frame_size;
+                self.used_memory += frame_size;
+                return Some(PhysAddr::new(start_aligned));
+            }
+        }
+
         None
     }
 
@@ -123,6 +137,15 @@ impl FrameAllocator {
         if self.free_count < FREE_STACK_SIZE {
             self.free_stack[self.free_count] = addr.as_u64();
             self.free_count += 1;
+        } else if self.region_count < MAX_REGIONS {
+            self.regions[self.region_count] = MemRegion {
+                base: addr.as_u64(),
+                length: PAGE_SIZE as u64,
+            };
+            self.region_count += 1;
+            if self.next_free > addr.as_u64() {
+                self.next_free = addr.as_u64();
+            }
         } else {
             let mut s = zenus_console::serial::SerialPort::new(0x3F8);
             s.write_str("[WARN] Frame free stack overflow! Frame lost.\n");

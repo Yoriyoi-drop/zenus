@@ -92,19 +92,85 @@ fn current_task() -> u64 {
     scheduler::current_task_id()
 }
 
+fn copy_user_to_kernel(user_ptr: u64, len: usize) -> Option<alloc::vec::Vec<u8>> {
+    if len == 0 { return Some(alloc::vec::Vec::new()); }
+    if !validate_user_range(user_ptr, len as u64) { return None; }
+    let mut buf = alloc::vec::Vec::with_capacity(len);
+    buf.resize(len, 0);
+    // Copy per-page with re-validation to minimize TOCTOU window
+    let mut copied = 0;
+    while copied < len {
+        let current = user_ptr + copied as u64;
+        let remaining = len - copied;
+        let chunk = remaining.min(4096 - (current & 0xFFF) as usize);
+        let cr3: u64;
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags)); }
+        if zenus_mem::paging::virt_to_phys_raw(cr3, current).is_none() {
+            return None;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                current as *const u8,
+                buf.as_mut_ptr().add(copied),
+                chunk,
+            );
+        }
+        copied += chunk;
+    }
+    Some(buf)
+}
+
+fn copy_kernel_to_user(kernel_buf: &[u8], user_ptr: u64) -> bool {
+    if kernel_buf.is_empty() { return true; }
+    if !validate_user_range(user_ptr, kernel_buf.len() as u64) { return false; }
+    let mut copied = 0;
+    while copied < kernel_buf.len() {
+        let current = user_ptr + copied as u64;
+        let remaining = kernel_buf.len() - copied;
+        let chunk = remaining.min(4096 - (current & 0xFFF) as usize);
+        let cr3: u64;
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags)); }
+        if zenus_mem::paging::virt_to_phys_raw(cr3, current).is_none() {
+            return false;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                kernel_buf.as_ptr().add(copied),
+                current as *mut u8,
+                chunk,
+            );
+        }
+        copied += chunk;
+    }
+    true
+}
+
 fn sys_read(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if !validate_user_range(buf, count) { return -1i64 as u64; }
-    let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count as usize) };
-    match fd_read(fd, slice) {
-        Some(n) => n,
+    if count > 1048576 { return -1i64 as u64; }
+    let mut kernel_buf = match copy_user_to_kernel(buf, 0) {
+        Some(b) => b,
+        None => return -1i64 as u64,
+    };
+    kernel_buf.resize(count as usize, 0);
+    match fd_read(fd, &mut kernel_buf) {
+        Some(n) => {
+            if copy_kernel_to_user(&kernel_buf[..n as usize], buf) {
+                n
+            } else {
+                -1i64 as u64
+            }
+        }
         None => -1i64 as u64,
     }
 }
 
 fn sys_write(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if !validate_user_range(buf, count) { return -1i64 as u64; }
-    let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count as usize) };
-    match fd_write(fd, slice) {
+    if count > 1048576 { return -1i64 as u64; }
+    let kernel_buf = match copy_user_to_kernel(buf, count as usize) {
+        Some(b) => b,
+        None => return -1i64 as u64,
+    };
+    match fd_write(fd, &kernel_buf) {
         Some(n) => n,
         None => -1i64 as u64,
     }
