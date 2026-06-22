@@ -1,5 +1,6 @@
 use zenus_mem::paging;
 use zenus_fs::vfs;
+use x86_64::PhysAddr;
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const MAX_ELF_PAGES: usize = 65536;
@@ -68,6 +69,13 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         core::slice::from_raw_parts(data.as_ptr().add(phoff) as *const Elf64Phdr, phnum)
     };
 
+    let hhdm = paging::hhdm_offset();
+    if hhdm == 0 {
+        return None;
+    }
+
+    let mut frames: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
     let mut max_addr: u64 = 0;
 
     for phdr in phdrs {
@@ -76,6 +84,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         let end = phdr.p_vaddr.checked_add(phdr.p_memsz)?;
         let end = (end + 0xFFF) & !0xFFF;
         if end > 0x0000_8000_0000_0000 || vaddr > 0x0000_8000_0000_0000 {
+            free_unmapped_frames_raw(&frames, cr3);
             return None;
         }
         if end > max_addr { max_addr = end; }
@@ -83,25 +92,34 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         let file_off = phdr.p_offset as usize;
         let file_sz = phdr.p_filesz as usize;
         let pages = ((end - vaddr) / paging::PAGE_SIZE as u64) as usize;
-        if pages > MAX_ELF_PAGES { return None; }
+        if pages > MAX_ELF_PAGES {
+            free_unmapped_frames_raw(&frames, cr3);
+            return None;
+        }
 
         for i in 0..pages {
             let page_virt = vaddr + (i as u64) * paging::PAGE_SIZE as u64;
             let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
             let frame_phys = match allocator.alloc_frame() {
                 Some(p) => p,
-                None => return None,
+                None => {
+                    drop(allocator);
+                    free_unmapped_frames_raw(&frames, cr3);
+                    return None;
+                }
             };
             drop(allocator);
+            frames.push(frame_phys.as_u64());
 
-            let hhdm = paging::hhdm_offset();
             unsafe {
                 core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
             }
 
             if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), (phdr.p_flags & PF_W) != 0, (phdr.p_flags & PF_X) != 0) {
+                free_unmapped_frames_raw(&frames, cr3);
                 return None;
             }
+            frames.pop();
 
             let page_off = (phdr.p_vaddr & 0xFFF) as usize;
             let file_start = file_off + i * paging::PAGE_SIZE;
@@ -136,24 +154,29 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
     let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
 
     let stack_pages = 16;
-    // Leave the bottom page unmapped as a guard page for stack overflow detection
     for i in 1..stack_pages {
         let stack_virt = stack_top - ((stack_pages - i) as u64) * paging::PAGE_SIZE as u64;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {
             Some(p) => p,
-            None => return None,
+            None => {
+                drop(allocator);
+                free_unmapped_frames_raw(&frames, cr3);
+                return None;
+            }
         };
         drop(allocator);
+        frames.push(frame_phys.as_u64());
 
-        let hhdm = paging::hhdm_offset();
         unsafe {
             core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
         }
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
+            free_unmapped_frames_raw(&frames, cr3);
             return None;
         }
+        frames.pop();
     }
 
     Some(LoadedElf {
@@ -175,6 +198,13 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
     let pages_needed = ((data.len() + page_size as usize - 1) / page_size as usize).max(1);
 
     let hhdm = paging::hhdm_offset();
+    if hhdm == 0 {
+        dbg.write_str("[FLAT] FATAL: HHDM offset is 0\n");
+        return None;
+    }
+
+    let mut frames: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
     for i in 0..pages_needed {
         let page_virt = vaddr + (i as u64) * page_size;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
@@ -182,11 +212,15 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
             Some(p) => p,
             None => {
                 dbg.write_str("[FLAT] alloc failed\n");
+                drop(allocator);
+                free_unmapped_frames_raw(&frames, cr3);
                 return None;
             }
         };
         drop(allocator);
-        dbg.write_str("[FLAT] frame=0x");
+        frames.push(frame_phys.as_u64());
+
+        dbg.write_str("[FLAT] frame=");
         dbg.write_hex(frame_phys.as_u64());
         dbg.write_str("\n");
 
@@ -197,8 +231,10 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         let writable = false;
         if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), writable, true) {
             dbg.write_str("[FLAT] map failed\n");
+            free_unmapped_frames_raw(&frames, cr3);
             return None;
         }
+        frames.pop();
         dbg.write_str("[FLAT] mapped\n");
 
         let copy_start = i * page_size as usize;
@@ -216,6 +252,9 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
     dbg.write_str("[FLAT] code ok\n");
 
     let heap_base = 0x6000_0000_0000u64;
+    let heap_slide = zenus_arch::random::get_random_page_aligned(0, 32 * 1024 * 1024);
+    let heap_base = heap_base.saturating_add(heap_slide);
+
     let stack_max = 0x0000_7FFF_FFFF_F000u64;
     let stack_min = stack_max.saturating_sub(8u64 * 1024 * 1024 * 1024);
     let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
@@ -227,9 +266,15 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {
             Some(p) => p,
-            None => return None,
+            None => {
+                dbg.write_str("[FLAT] stack alloc failed\n");
+                drop(allocator);
+                free_unmapped_frames_raw(&frames, cr3);
+                return None;
+            }
         };
         drop(allocator);
+        frames.push(frame_phys.as_u64());
 
         unsafe {
             core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, page_size as usize);
@@ -237,8 +282,10 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
             dbg.write_str("[FLAT] stack map failed\n");
+            free_unmapped_frames_raw(&frames, cr3);
             return None;
         }
+        frames.pop();
     }
     dbg.write_str("[FLAT] done\n");
 
@@ -248,6 +295,17 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         heap_base,
         stack_top,
     })
+}
+
+fn free_unmapped_frames_raw(frames: &[u64], cr3: u64) {
+    let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
+    for &phys in frames {
+        allocator.free_frame(PhysAddr::new(phys));
+    }
+    drop(allocator);
+    if cr3 != 0 {
+        paging::destroy_address_space(cr3);
+    }
 }
 
 pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
@@ -282,6 +340,11 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         core::slice::from_raw_parts(phdr_buf.as_ptr() as *const Elf64Phdr, phnum)
     };
 
+    let hhdm = paging::hhdm_offset();
+    if hhdm == 0 { return None; }
+
+    let mut frames: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
     let mut max_addr: u64 = 0;
 
     for phdr in phdrs {
@@ -290,6 +353,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         let end = phdr.p_vaddr.checked_add(phdr.p_memsz)?;
         let end = (end + 0xFFF) & !0xFFF;
         if end > 0x0000_8000_0000_0000 || vaddr > 0x0000_8000_0000_0000 {
+            free_unmapped_frames_raw(&frames, cr3);
             return None;
         }
         if end > max_addr { max_addr = end; }
@@ -297,25 +361,34 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         let file_off = phdr.p_offset;
         let file_sz = phdr.p_filesz;
         let pages = ((end - vaddr) / paging::PAGE_SIZE as u64) as usize;
-        if pages > MAX_ELF_PAGES { return None; }
+        if pages > MAX_ELF_PAGES {
+            free_unmapped_frames_raw(&frames, cr3);
+            return None;
+        }
 
         for i in 0..pages {
             let page_virt = vaddr + (i as u64) * paging::PAGE_SIZE as u64;
             let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
             let frame_phys = match allocator.alloc_frame() {
                 Some(p) => p,
-                None => return None,
+                None => {
+                    drop(allocator);
+                    free_unmapped_frames_raw(&frames, cr3);
+                    return None;
+                }
             };
             drop(allocator);
+            frames.push(frame_phys.as_u64());
 
-            let hhdm = paging::hhdm_offset();
             unsafe {
                 core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
             }
 
             if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), (phdr.p_flags & PF_W) != 0, (phdr.p_flags & PF_X) != 0) {
+                free_unmapped_frames_raw(&frames, cr3);
                 return None;
             }
+            frames.pop();
 
             let page_off = if i == 0 { (phdr.p_vaddr & 0xFFF) as usize } else { 0 };
             let copy_size = if i == 0 {
@@ -345,6 +418,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
                 let mut read_buf = alloc::vec::Vec::with_capacity(copy_size);
                 read_buf.resize(copy_size, 0);
                 if node.fs.read(node.inode, read_off, &mut read_buf).is_none() {
+                    free_unmapped_frames_raw(&frames, cr3);
                     return None;
                 }
                 unsafe {
@@ -356,34 +430,37 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
 
     let heap_base = if max_addr < 0x6000_0000_0000 { 0x6000_0000_0000 } else { max_addr + 0x10000 };
 
-    // ASLR: randomize heap base upward by up to 32MB (page-aligned)
     let heap_slide = zenus_arch::random::get_random_page_aligned(0, 32 * 1024 * 1024);
     let heap_base = heap_base.saturating_add(heap_slide);
 
-    // ASLR: randomize stack top downward by up to 8GB (page-aligned)
     let stack_max = 0x0000_7FFF_FFFF_F000u64;
     let stack_min = stack_max.saturating_sub(8u64 * 1024 * 1024 * 1024);
     let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
 
     let stack_pages = 16;
-    // Leave the bottom page unmapped as a guard page for stack overflow detection
     for i in 1..stack_pages {
         let stack_virt = stack_top - ((stack_pages - i) as u64) * paging::PAGE_SIZE as u64;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {
             Some(p) => p,
-            None => return None,
+            None => {
+                drop(allocator);
+                free_unmapped_frames_raw(&frames, cr3);
+                return None;
+            }
         };
         drop(allocator);
+        frames.push(frame_phys.as_u64());
 
-        let hhdm = paging::hhdm_offset();
         unsafe {
             core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
         }
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
+            free_unmapped_frames_raw(&frames, cr3);
             return None;
         }
+        frames.pop();
     }
 
     Some(LoadedElf {

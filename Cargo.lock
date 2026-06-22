@@ -130,6 +130,7 @@ dependencies = [
 name = "zenus-syscall"
 version = "0.1.0"
 dependencies = [
+ "x86_64",
  "zenus-arch",
  "zenus-console",
  "zenus-fs",

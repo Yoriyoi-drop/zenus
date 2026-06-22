@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+x86_64 = { workspace = true }
 zenus-arch = { path = "../zenus-arch" }
 zenus-console = { path = "../zenus-console" }
 zenus-fs = { path = "../zenus-fs" }

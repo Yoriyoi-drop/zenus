@@ -28,6 +28,7 @@ pub fn spawn_user() -> u64 {
         Some(elf) => elf,
         None => {
             log("[USER] Failed to load ELF binary\n");
+            paging::destroy_address_space(user_cr3);
             return 0;
         }
     };
