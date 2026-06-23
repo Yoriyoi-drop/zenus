@@ -16,3 +16,5 @@ pub mod ata;
 pub mod rtc;
 pub mod user;
 pub mod random;
+pub mod crash;
+pub mod watchdog;

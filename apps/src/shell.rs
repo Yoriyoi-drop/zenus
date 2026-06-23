@@ -54,6 +54,10 @@ impl Shell {
                 zenus_net::nic::net_poll();
                 Self::echo_server_poll();
             }
+            if yield_count % 50 == 0 {
+                zenus_arch::watchdog::watchdog_pet();
+                zenus_sched::init::service_supervise();
+            }
             self.write_str(PROMPT);
             let line = match self.read_line() {
                 Some(l) => l,
@@ -171,6 +175,25 @@ impl Shell {
             "id" => self.cmd_id(),
             "whoami" => self.cmd_whoami(),
             "chmod" => self.cmd_chmod(&parts[1..count]),
+            // Phase 3 commands
+            "init-start" => self.cmd_init_start(),
+            "init-shutdown" => self.cmd_init_shutdown(),
+            "service-list" => self.cmd_service_list(),
+            "service-start" => self.cmd_service_start(&parts[1..count]),
+            "service-stop" => self.cmd_service_stop(&parts[1..count]),
+            "service-restart" => self.cmd_service_restart(&parts[1..count]),
+            "sysctl" => self.cmd_sysctl(&parts[1..count]),
+            "pkg-install" => self.cmd_pkg_install(&parts[1..count]),
+            "pkg-list" => self.cmd_pkg_list(),
+            "pkg-remove" => self.cmd_pkg_remove(&parts[1..count]),
+            "pkg-info" => self.cmd_pkg_info(&parts[1..count]),
+            "watchdog-pet" => self.cmd_watchdog_pet(),
+            "watchdog-status" => self.cmd_watchdog_status(),
+            "crashdump" => self.cmd_crashdump(),
+            "lockdep-status" => self.cmd_lockdep_status(),
+            "syslog" => self.cmd_syslog(&parts[1..count]),
+            "ssh-start" => self.cmd_ssh_start(),
+            "ssh-status" => self.cmd_ssh_status(),
             _ => {
                 self.write_str("Unknown command: ");
                 self.write_str(cmd);
@@ -186,6 +209,26 @@ impl Shell {
         self.write_str("  ls     - List directory\r\n");
         self.write_str("  ls -l  - List with permissions, owner, size\r\n");
         self.write_str("  chmod <mode> <file> - Change file permissions (octal)\r\n");
+        self.write_str("Phase 3 Server Commands:\r\n");
+        self.write_str("  init-start      - Start init system & services\r\n");
+        self.write_str("  init-shutdown   - Shutdown all services\r\n");
+        self.write_str("  service-list    - List registered services\r\n");
+        self.write_str("  service-start <name> - Start a service\r\n");
+        self.write_str("  service-stop <name>  - Stop a service\r\n");
+        self.write_str("  service-restart <name> - Restart a service\r\n");
+        self.write_str("  sysctl [name]   - Show/set kernel parameters\r\n");
+        self.write_str("  sysctl <name>=<val> - Set kernel parameter\r\n");
+        self.write_str("  pkg-install <path> - Install .zpk package\r\n");
+        self.write_str("  pkg-list        - List installed packages\r\n");
+        self.write_str("  pkg-remove <name> - Remove package\r\n");
+        self.write_str("  pkg-info <name> - Show package info\r\n");
+        self.write_str("  watchdog-pet    - Pet the watchdog timer\r\n");
+        self.write_str("  watchdog-status - Show watchdog status\r\n");
+        self.write_str("  crashdump       - Show crash dump info\r\n");
+        self.write_str("  lockdep-status  - Show lockdep status\r\n");
+        self.write_str("  syslog [n]      - Show last N syslog entries\r\n");
+        self.write_str("  ssh-start       - Start SSH server service\r\n");
+        self.write_str("  ssh-status      - Show SSH server status\r\n");
         self.write_str("  cat    - Show file contents\r\n");
         self.write_str("  clear  - Clear screen\r\n");
         self.write_str("  timer  - Show APIC timer tick count\r\n");
@@ -570,6 +613,453 @@ impl Shell {
 
     fn cmd_whoami(&mut self) {
         self.write_str("root\r\n");
+    }
+
+    // --- Phase 3 commands ---
+
+    fn cmd_init_start(&mut self) {
+        if zenus_sched::init::init_system_start() {
+            self.write_str("[ OK ] Init system started\r\n");
+        } else {
+            self.write_str("[INFO] Init system already running\r\n");
+        }
+    }
+
+    fn cmd_init_shutdown(&mut self) {
+        self.write_str("Shutting down init system...\r\n");
+        zenus_sched::init::init_shutdown();
+    }
+
+    fn cmd_service_list(&mut self) {
+        let services = zenus_sched::init::service_list();
+        if services.is_empty() {
+            self.write_str("No services registered\r\n");
+            return;
+        }
+        self.write_str("Service          State     PID   Restarts\r\n");
+        self.write_str("----------------------------------------\r\n");
+        for (name, state, pid, restarts) in services {
+            self.write_str(name);
+            // Pad name
+            let name_len = name.len();
+            for _ in name_len..16 {
+                self.write_byte(b' ');
+            }
+            let state_str = match state {
+                zenus_sched::init::ServiceState::Running => "Running",
+                zenus_sched::init::ServiceState::Stopped => "Stopped",
+                zenus_sched::init::ServiceState::Crashed => "Crashed",
+                zenus_sched::init::ServiceState::Disabled => "Disabled",
+            };
+            self.write_str(" ");
+            self.write_str(state_str);
+            // Pad state
+            let state_len = state_str.len();
+            for _ in state_len..10 {
+                self.write_byte(b' ');
+            }
+            self.serial.write_u64(pid);
+            self.write_str("   ");
+            self.serial.write_u64(restarts as u64);
+            self.write_str("\r\n");
+        }
+    }
+
+    fn cmd_service_start(&mut self, args: &[&str]) {
+        let name = match args.iter().find(|a| !a.is_empty()) {
+            Some(n) => n,
+            None => {
+                self.write_str("Usage: service-start <name>\r\n");
+                return;
+            }
+        };
+        if zenus_sched::init::service_start(name) {
+            self.write_str("Started: ");
+            self.write_str(name);
+            self.write_str("\r\n");
+        } else {
+            self.write_str("Failed to start: ");
+            self.write_str(name);
+            self.write_str("\r\n");
+        }
+    }
+
+    fn cmd_service_stop(&mut self, args: &[&str]) {
+        let name = match args.iter().find(|a| !a.is_empty()) {
+            Some(n) => n,
+            None => {
+                self.write_str("Usage: service-stop <name>\r\n");
+                return;
+            }
+        };
+        if zenus_sched::init::service_stop(name) {
+            self.write_str("Stopped: ");
+            self.write_str(name);
+            self.write_str("\r\n");
+        } else {
+            self.write_str("Failed to stop: ");
+            self.write_str(name);
+            self.write_str("\r\n");
+        }
+    }
+
+    fn cmd_service_restart(&mut self, args: &[&str]) {
+        let name = match args.iter().find(|a| !a.is_empty()) {
+            Some(n) => n,
+            None => {
+                self.write_str("Usage: service-restart <name>\r\n");
+                return;
+            }
+        };
+        if zenus_sched::init::service_restart(name) {
+            self.write_str("Restarted: ");
+            self.write_str(name);
+            self.write_str("\r\n");
+        } else {
+            self.write_str("Failed to restart: ");
+            self.write_str(name);
+            self.write_str("\r\n");
+        }
+    }
+
+    fn cmd_sysctl(&mut self, args: &[&str]) {
+        if args.len() < 1 {
+            // List all sysctls
+            let list = zenus_fs::sysctl::sysctl_list();
+            self.write_str("Sysctl parameters:\r\n");
+            for entry in list {
+                self.write_str("  ");
+                self.write_str(entry.name);
+                self.write_str(" = ");
+                match &entry.value {
+                    zenus_fs::sysctl::SysctlValue::IntVal(v) => {
+                        self.serial.write_i64(*v);
+                    }
+                    zenus_fs::sysctl::SysctlValue::UintVal(v) => {
+                        self.serial.write_u64(*v);
+                    }
+                    zenus_fs::sysctl::SysctlValue::BoolVal(v) => {
+                        self.write_str(if *v { "true" } else { "false" });
+                    }
+                    zenus_fs::sysctl::SysctlValue::StrVal(v) => {
+                        self.write_str(v);
+                    }
+                }
+                if entry.read_only {
+                    self.write_str(" (read-only)");
+                }
+                self.write_str("\r\n");
+            }
+            return;
+        }
+
+        let arg = args[0];
+        if let Some(eq_pos) = arg.find('=') {
+            let name = &arg[..eq_pos];
+            let val_str = &arg[eq_pos + 1..];
+            let idx = match zenus_fs::sysctl::sysctl_find(name) {
+                Some(i) => i,
+                None => {
+                    self.write_str("sysctl: not found: ");
+                    self.write_str(name);
+                    self.write_str("\r\n");
+                    return;
+                }
+            };
+            let entry = match zenus_fs::sysctl::sysctl_get(idx) {
+                Some(e) => e,
+                None => {
+                    self.write_str("sysctl: error reading: ");
+                    self.write_str(name);
+                    self.write_str("\r\n");
+                    return;
+                }
+            };
+            let value = match entry.value {
+                zenus_fs::sysctl::SysctlValue::IntVal(_) => {
+                    let v: i64 = match val_str.parse() {
+                        Ok(n) => n,
+                        Err(_) => { self.write_str("sysctl: invalid integer\r\n"); return; }
+                    };
+                    zenus_fs::sysctl::SysctlValue::IntVal(v)
+                }
+                zenus_fs::sysctl::SysctlValue::UintVal(_) => {
+                    let v: u64 = match val_str.parse() {
+                        Ok(n) => n,
+                        Err(_) => { self.write_str("sysctl: invalid unsigned integer\r\n"); return; }
+                    };
+                    zenus_fs::sysctl::SysctlValue::UintVal(v)
+                }
+                zenus_fs::sysctl::SysctlValue::BoolVal(_) => {
+                    let v = val_str == "1" || val_str == "true" || val_str == "yes";
+                    zenus_fs::sysctl::SysctlValue::BoolVal(v)
+                }
+                zenus_fs::sysctl::SysctlValue::StrVal(_) => {
+                    self.write_str("sysctl: string values cannot be set via shell\r\n");
+                    return;
+                }
+            };
+            if zenus_fs::sysctl::sysctl_set(idx, value) {
+                self.write_str("sysctl: ");
+                self.write_str(name);
+                self.write_str(" = ");
+                self.write_str(val_str);
+                self.write_str("\r\n");
+            } else {
+                self.write_str("sysctl: failed to set: ");
+                self.write_str(name);
+                self.write_str("\r\n");
+            }
+        } else {
+            let idx = match zenus_fs::sysctl::sysctl_find(arg) {
+                Some(i) => i,
+                None => {
+                    self.write_str("sysctl: not found: ");
+                    self.write_str(arg);
+                    self.write_str("\r\n");
+                    return;
+                }
+            };
+            let entry = match zenus_fs::sysctl::sysctl_get(idx) {
+                Some(e) => e,
+                None => {
+                    self.write_str("sysctl: error reading\r\n");
+                    return;
+                }
+            };
+            self.write_str(entry.name);
+            self.write_str(" = ");
+            match &entry.value {
+                zenus_fs::sysctl::SysctlValue::IntVal(v) => self.serial.write_i64(*v),
+                zenus_fs::sysctl::SysctlValue::UintVal(v) => self.serial.write_u64(*v),
+                zenus_fs::sysctl::SysctlValue::BoolVal(v) => self.write_str(if *v { "true" } else { "false" }),
+                zenus_fs::sysctl::SysctlValue::StrVal(v) => self.write_str(v),
+            }
+            if entry.read_only {
+                self.write_str(" (read-only)");
+            }
+            self.write_str("\r\n");
+        }
+    }
+
+    fn cmd_pkg_install(&mut self, args: &[&str]) {
+        let path = match args.iter().find(|a| !a.is_empty()) {
+            Some(p) => p,
+            None => {
+                self.write_str("Usage: pkg-install <path>\r\n");
+                return;
+            }
+        };
+        let node = match zenus_fs::vfs::open(path) {
+            Some(n) => n,
+            None => {
+                self.write_str("pkg-install: file not found: ");
+                self.write_str(path);
+                self.write_str("\r\n");
+                return;
+            }
+        };
+        let stat = node.fs.stat(node.inode);
+        let size = stat.size as usize;
+        if size == 0 || size > 65536 {
+            self.write_str("pkg-install: invalid file size\r\n");
+            return;
+        }
+        let mut buf = alloc::vec![0u8; size];
+        if node.fs.read(node.inode, 0, &mut buf).is_none() {
+            self.write_str("pkg-install: read failed\r\n");
+            return;
+        }
+        if zenus_fs::pkg::pkg_install(&buf, 0) {
+            self.write_str("pkg-install: installed successfully\r\n");
+        } else {
+            self.write_str("pkg-install: installation failed (invalid .zpk?)\r\n");
+        }
+    }
+
+    fn cmd_pkg_list(&mut self) {
+        let pkgs = zenus_fs::pkg::pkg_list();
+        if pkgs.is_empty() {
+            self.write_str("No packages installed\r\n");
+            return;
+        }
+        self.write_str("Installed packages:\r\n");
+        for pkg in pkgs {
+            self.write_str("  ");
+            self.write_str(&pkg.name);
+            self.write_str(" v");
+            self.write_str(&pkg.version);
+            self.write_str(" (");
+            self.serial.write_u64(pkg.file_count as u64);
+            self.write_str(" files)\r\n");
+        }
+    }
+
+    fn cmd_pkg_remove(&mut self, args: &[&str]) {
+        let name = match args.iter().find(|a| !a.is_empty()) {
+            Some(n) => n,
+            None => {
+                self.write_str("Usage: pkg-remove <name>\r\n");
+                return;
+            }
+        };
+        if zenus_fs::pkg::pkg_remove(name) {
+            self.write_str("Removed: ");
+            self.write_str(name);
+            self.write_str("\r\n");
+        } else {
+            self.write_str("Package not found: ");
+            self.write_str(name);
+            self.write_str("\r\n");
+        }
+    }
+
+    fn cmd_pkg_info(&mut self, args: &[&str]) {
+        let name = match args.iter().find(|a| !a.is_empty()) {
+            Some(n) => n,
+            None => {
+                self.write_str("Usage: pkg-info <name>\r\n");
+                return;
+            }
+        };
+        match zenus_fs::pkg::pkg_info(name) {
+            Some(info) => {
+                self.write_str("Package: ");
+                self.write_str(&info.name);
+                self.write_str("\r\nVersion: ");
+                self.write_str(&info.version);
+                self.write_str("\r\nFiles: ");
+                self.serial.write_u64(info.file_count as u64);
+                self.write_str("\r\n");
+                for f in &info.files {
+                    self.write_str("  ");
+                    self.write_str(f);
+                    self.write_str("\r\n");
+                }
+            }
+            None => {
+                self.write_str("Package not found: ");
+                self.write_str(name);
+                self.write_str("\r\n");
+            }
+        }
+    }
+
+    fn cmd_watchdog_pet(&mut self) {
+        zenus_arch::watchdog::watchdog_pet();
+        self.write_str("Watchdog petted\r\n");
+    }
+
+    fn cmd_watchdog_status(&mut self) {
+        let active = zenus_arch::watchdog::watchdog_is_active();
+        let remaining = zenus_arch::watchdog::watchdog_get_remaining();
+        let timeout = zenus_arch::watchdog::watchdog_get_timeout();
+        if active {
+            self.write_str("Watchdog: ACTIVE\r\n");
+        } else {
+            self.write_str("Watchdog: INACTIVE\r\n");
+        }
+        self.write_str("Timeout: ");
+        self.serial.write_u64(timeout as u64);
+        self.write_str("s\r\nRemaining: ");
+        self.serial.write_u64(remaining as u64);
+        self.write_str("s\r\n");
+    }
+
+    fn cmd_crashdump(&mut self) {
+        match zenus_arch::crash::crash_dump_get() {
+            Some(dump) => {
+                self.write_str("Crash dump available:\r\n");
+                zenus_arch::crash::crash_dump_print(dump);
+            }
+            None => {
+                self.write_str("No crash dump recorded\r\n");
+            }
+        }
+    }
+
+    fn cmd_lockdep_status(&mut self) {
+        let status = zenus_sync::lockdep::lockdep_status();
+        self.write_str("Lockdep status:\r\n");
+        self.write_str("  Classes: ");
+        self.serial.write_u64(status.class_count as u64);
+        self.write_str("\r\n  Edges: ");
+        self.serial.write_u64(status.edge_count as u64);
+        self.write_str("\r\n  Violations: ");
+        self.serial.write_u64(status.violations);
+        self.write_str("\r\n");
+        if status.class_count > 0 {
+            self.write_str("  Lock classes:\r\n");
+            for i in 0..status.class_count {
+                self.write_str("    [");
+                self.serial.write_u64(i as u64);
+                self.write_str("] ");
+                self.write_str(status.classes[i]);
+                self.write_str("\r\n");
+            }
+        }
+        if status.edge_count > 0 {
+            self.write_str("  Dependencies:\r\n");
+            for i in 0..status.edge_count {
+                let (from, to) = status.edges[i];
+                self.write_str("    ");
+                self.write_str(status.classes[from]);
+                self.write_str(" -> ");
+                self.write_str(status.classes[to]);
+                self.write_str("\r\n");
+            }
+        }
+        if !zenus_sync::lockdep::lockdep_is_enabled() {
+            self.write_str("  Lockdep is DISABLED\r\n");
+        }
+    }
+
+    fn cmd_syslog(&mut self, args: &[&str]) {
+        let count = args.first().and_then(|a| a.parse::<usize>().ok()).unwrap_or(20);
+        let total = zenus_console::syslog::syslog_get_count();
+        if total == 0 {
+            self.write_str("(no syslog entries)\r\n");
+            return;
+        }
+        let start = total.saturating_sub(count);
+        self.write_str("Syslog (last ");
+        self.serial.write_u64(count.min(total) as u64);
+        self.write_str(" of ");
+        self.serial.write_u64(total as u64);
+        self.write_str("):\r\n");
+        for i in start..total {
+            if let Some(entry) = zenus_console::syslog::syslog_get(i) {
+                use core::fmt::Write;
+                let mut serial = SerialPort::new(0x3F8);
+                let _ = write!(serial, "[{}] {}", entry.level.prefix(), zenus_console::syslog::syslog_msg_str(&entry));
+                self.write_str("\r\n");
+            }
+        }
+    }
+
+    fn cmd_ssh_start(&mut self) {
+        if zenus_net::ssh::SshServer::is_running() {
+            self.write_str("SSH server is already running\r\n");
+            return;
+        }
+        // SSH server is a registered service; start it via init
+        if zenus_sched::init::service_start("ssh") {
+            self.write_str("SSH server started\r\n");
+        } else {
+            self.write_str("Failed to start SSH server\r\n");
+        }
+    }
+
+    fn cmd_ssh_status(&mut self) {
+        if zenus_net::ssh::SshServer::is_running() {
+            let conns = zenus_net::ssh::SshServer::connection_count();
+            self.write_str("SSH server: RUNNING\r\n");
+            self.write_str("Connections: ");
+            self.serial.write_u64(conns as u64);
+            self.write_str("\r\n");
+        } else {
+            self.write_str("SSH server: STOPPED\r\n");
+        }
     }
 
     fn cmd_chmod(&mut self, args: &[&str]) {

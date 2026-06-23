@@ -9,6 +9,7 @@ members = [
     "crates/zenus-fs",
     "crates/zenus-net",
     "crates/zenus-syscall",
+    "crates/zenus-virtio",
 ]
 resolver = "2"
 

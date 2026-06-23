@@ -2,3 +2,4 @@
 
 pub mod spinlock;
 pub mod irq_guard;
+pub mod lockdep;

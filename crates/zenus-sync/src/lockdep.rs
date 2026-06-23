@@ -1,5 +1,18 @@
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use zenus_sync::spinlock::SpinLock;
+use core::sync::atomic::{AtomicBool, Ordering};
+use crate::spinlock::SpinLock;
+
+fn lockdep_serial(msg: &str) {
+    for &b in msg.as_bytes() {
+        unsafe {
+            loop {
+                let mut lsr: u8;
+                core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16, options(nostack, preserves_flags));
+                if lsr & 0x20 != 0 { break; }
+            }
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nostack, preserves_flags));
+        }
+    }
+}
 
 const MAX_LOCKS: usize = 64;
 const MAX_DEPTH: usize = 8;
@@ -93,27 +106,28 @@ pub fn lockdep_acquire(lock_id: usize, caller: &'static str) -> bool {
         if held == lock_id {
             return true;
         }
-        let already_recorded = state.edges[..state.edge_count]
+        let ec = state.edge_count;
+        let already_recorded = state.edges[..ec]
             .iter()
             .any(|e| e.from == held && e.to == lock_id);
-        if !already_recorded && state.edge_count < MAX_EDGES {
-            state.edges[state.edge_count] = LockEdge { from: held, to: lock_id };
-            state.edge_count += 1;
+        if !already_recorded && ec < MAX_EDGES {
+            state.edges[ec] = LockEdge { from: held, to: lock_id };
+            state.edge_count = ec + 1;
         }
 
-        let reverse = state.edges[..state.edge_count]
+        let ec2 = state.edge_count;
+        let reverse = state.edges[..ec2]
             .iter()
             .any(|e| e.from == lock_id && e.to == held);
         if reverse {
             state.violations += 1;
-            let serial = crate::serial::SerialPort::new(0x3F8);
-            serial.write_str("[LOCKDEP] Potential deadlock: ");
-            serial.write_str(state.classes[lock_id].name);
-            serial.write_str(" -> ");
-            serial.write_str(state.classes[held].name);
-            serial.write_str(" (caller: ");
-            serial.write_str(caller);
-            serial.write_str(")\n");
+            lockdep_serial("[LOCKDEP] Potential deadlock: ");
+            lockdep_serial(state.classes[lock_id].name);
+            lockdep_serial(" -> ");
+            lockdep_serial(state.classes[held].name);
+            lockdep_serial(" (caller: ");
+            lockdep_serial(caller);
+            lockdep_serial(")\n");
             return false;
         }
     }

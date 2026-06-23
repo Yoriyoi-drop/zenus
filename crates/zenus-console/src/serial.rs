@@ -76,6 +76,15 @@ impl SerialPort {
         }
     }
 
+    pub fn write_i64(&self, val: i64) {
+        if val < 0 {
+            self.write_byte_serial(b'-');
+            self.write_u64(val.wrapping_neg() as u64);
+        } else {
+            self.write_u64(val as u64);
+        }
+    }
+
     pub fn write_u64(&self, val: u64) {
         let mut buf = [0u8; 20];
         let mut i = 0;

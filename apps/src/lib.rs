@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::panic::PanicInfo;
 
 use zenus_arch::cpu;
@@ -68,6 +70,22 @@ fn panic(info: &PanicInfo) -> ! {
 fn shell_task() {
     let mut sh = shell::Shell::new();
     sh.run();
+}
+
+fn ssh_service_task() {
+    if !zenus_net::ssh::SshServer::start(1, 22) {
+        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Warn, "[SSH] Failed to start SSH server (no network?)");
+        return;
+    }
+    zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[SSH] SSH server task started on port 22");
+    loop {
+        // SSH server poll uses the static SSH_SERVER
+        zenus_net::nic::net_poll();
+        zenus_arch::watchdog::watchdog_pet();
+        for _ in 0..10 {
+            zenus_sched::scheduler::yield_now();
+        }
+    }
 }
 
 #[no_mangle]
@@ -258,7 +276,10 @@ pub extern "C" fn entry() -> ! {
     // 10. PCI bus scan
     zenus_arch::pci::init();
 
-    // 10a. Initialize ATA/IDE drives (disk storage)
+    // 10a. Initialize virtio devices (virtio-net, virtio-blk, etc.)
+    unsafe { zenus_virtio::init(); }
+
+    // 10b. Initialize ATA/IDE drives (disk storage)
     zenus_arch::ata::init();
     // Register ATA drives as block devices in devfs
     {
@@ -286,7 +307,23 @@ pub extern "C" fn entry() -> ! {
         }
     }
 
-    // 10b. Try to mount ext2 filesystem on first ATA drive
+        // 10b. Initialize crash dump subsystem
+        zenus_arch::crash::crash_dump_init();
+        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Crash dump initialized");
+
+        // 10c. Initialize syslog (4096-entry structured logging)
+        zenus_console::syslog::syslog_init();
+        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Syslog initialized");
+
+        // 10d. Initialize sysctl kernel parameter interface
+        zenus_fs::sysctl::sysctl_init();
+        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Sysctl initialized");
+
+        // 10e. Initialize package manager database
+        zenus_fs::pkg::pkg_init();
+        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Package manager initialized");
+
+        // 10f. Try to mount ext2 filesystem on first ATA drive
     if zenus_arch::ata::device_count() > 0 {
         both!(serial, hhdm_offset, "[EXT2] Trying to mount /mnt...\n");
         zenus_fs::vfs::create_dir("/mnt");
@@ -295,6 +332,16 @@ pub extern "C" fn entry() -> ! {
             both!(serial, hhdm_offset, "[OK] ext2 filesystem mounted at /mnt\n");
         } else {
             both!(serial, hhdm_offset, "[EXT2] No ext2 filesystem found on /dev/sda\n");
+        }
+    }
+    // Try to mount ext2 on first virtio block device (vd0)
+    if zenus_fs::devfs::block_device_count() > zenus_arch::ata::device_count() {
+        both!(serial, hhdm_offset, "[VIRTIO-BLK] Trying to mount /virtio...\n");
+        zenus_fs::vfs::create_dir("/virtio");
+        let ata_count = zenus_arch::ata::device_count();
+        if let Some(ext2_fs) = zenus_fs::ext2::Ext2Fs::mount(ata_count) {
+            zenus_fs::vfs::mount("/virtio", ext2_fs);
+            both!(serial, hhdm_offset, "[OK] ext2 on virtio-blk mounted at /virtio\n");
         }
     }
 
@@ -316,6 +363,24 @@ pub extern "C" fn entry() -> ! {
         // 11a. Start TCP echo server on port 7
         if let Some(_idx) = zenus_net::tcp::listen(7) {
             both!(serial, hhdm_offset, "[OK] TCP echo server on port 7\n");
+        }
+
+        // 11b. Initialize lockdep for deadlock detection
+        zenus_sync::lockdep::lockdep_init();
+        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Lockdep initialized");
+
+        // 11c. Initialize software watchdog
+        zenus_arch::watchdog::watchdog_init(zenus_arch::watchdog::WatchdogType::Software, 30);
+        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Watchdog initialized (30s timeout)");
+
+        // 11d. Register SSH server as a system service
+        if zenus_sched::init::service_register("ssh", ssh_service_task, 16384, 0, 0, true) {
+            zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] SSH server registered as service");
+        }
+
+        // 11e. Try to execute /initrd/init/startup.sh as the init script
+        if zenus_sched::init::initrd_execute() {
+            both!(serial, hhdm_offset, "[INITRD] Startup script executed\n");
         }
 
         // 11b. Initialize journal on device 0 at blocks 3000-3015
@@ -341,9 +406,11 @@ pub extern "C" fn entry() -> ! {
 
         both!(serial, hhdm_offset, "[OK] Shell task spawned\n");
 
-        // 13a. Spawn user-mode demo task with proper isolation (timer NOT yet running)
-         let _cr3 = paging::create_address_space();
-        // let _user_tid = user::spawn_user();
+        // 12a. Start the init system — spawn all registered services
+        zenus_sched::init::init_system_start();
+
+        // 12b. Start service supervisor (periodic health checks)
+        // Supervisor runs in the idle loop via watchdog::watchdog_pet
 
         // Print banner BEFORE starting the APIC timer (VGA scroll uses function pointers
         // that may be corrupted if the timer interrupt fires during VGA operations).

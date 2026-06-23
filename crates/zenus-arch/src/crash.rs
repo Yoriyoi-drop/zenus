@@ -1,5 +1,4 @@
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::cpu;
 
 #[repr(C)]
 pub struct CpuRegisters {
@@ -61,29 +60,22 @@ pub fn crash_dump_save(msg: &str) -> &'static CrashDump {
     dump.magic.copy_from_slice(b"ZENUS_CRASH_DUMP");
 
     unsafe {
-        core::arch::asm!(
-            "mov {}, rax", "mov {}, rbx", "mov {}, rcx", "mov {}, rdx",
-            "mov {}, rsi", "mov {}, rdi", "mov {}, rbp",
-            "mov {}, r8",  "mov {}, r9",  "mov {}, r10", "mov {}, r11",
-            "mov {}, r12", "mov {}, r13", "mov {}, r14", "mov {}, r15",
-            "mov {}, rsp",
-            out(reg) dump.registers.rax,
-            out(reg) dump.registers.rbx,
-            out(reg) dump.registers.rcx,
-            out(reg) dump.registers.rdx,
-            out(reg) dump.registers.rsi,
-            out(reg) dump.registers.rdi,
-            out(reg) dump.registers.rbp,
-            out(reg) dump.registers.r8,
-            out(reg) dump.registers.r9,
-            out(reg) dump.registers.r10,
-            out(reg) dump.registers.r11,
-            out(reg) dump.registers.r12,
-            out(reg) dump.registers.r13,
-            out(reg) dump.registers.r14,
-            out(reg) dump.registers.r15,
-            out(reg) dump.registers.rsp,
-        );
+        core::arch::asm!("mov {}, rax", out(reg) dump.registers.rax);
+        core::arch::asm!("mov {}, rbx", out(reg) dump.registers.rbx);
+        core::arch::asm!("mov {}, rcx", out(reg) dump.registers.rcx);
+        core::arch::asm!("mov {}, rdx", out(reg) dump.registers.rdx);
+        core::arch::asm!("mov {}, rsi", out(reg) dump.registers.rsi);
+        core::arch::asm!("mov {}, rdi", out(reg) dump.registers.rdi);
+        core::arch::asm!("mov {}, rbp", out(reg) dump.registers.rbp);
+        core::arch::asm!("mov {}, r8",  out(reg) dump.registers.r8);
+        core::arch::asm!("mov {}, r9",  out(reg) dump.registers.r9);
+        core::arch::asm!("mov {}, r10", out(reg) dump.registers.r10);
+        core::arch::asm!("mov {}, r11", out(reg) dump.registers.r11);
+        core::arch::asm!("mov {}, r12", out(reg) dump.registers.r12);
+        core::arch::asm!("mov {}, r13", out(reg) dump.registers.r13);
+        core::arch::asm!("mov {}, r14", out(reg) dump.registers.r14);
+        core::arch::asm!("mov {}, r15", out(reg) dump.registers.r15);
+        core::arch::asm!("mov {}, rsp", out(reg) dump.registers.rsp);
     }
 
     dump.registers.rip = unsafe {
@@ -106,7 +98,7 @@ pub fn crash_dump_save(msg: &str) -> &'static CrashDump {
     dump.panic_message[..n].copy_from_slice(&msg_bytes[..n]);
     dump.panic_message[n] = 0;
 
-    dump.cr3 = x86_64::registers::control::Cr3::read().0.as_u64();
+    dump.cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
 
     dump.backtrace_count = capture_backtrace(&mut dump.backtrace);
 
@@ -116,7 +108,7 @@ pub fn crash_dump_save(msg: &str) -> &'static CrashDump {
 fn capture_backtrace(buf: &mut [u64; 16]) -> usize {
     let mut count = 0usize;
     unsafe {
-        let mut fp: *mut usize;
+        let mut fp: *mut u64;
         core::arch::asm!("mov {}, rbp", out(reg) fp);
         for _ in 0..16 {
             if fp.is_null() || (fp as usize) < 0xFFFFFFFF80000000 {
@@ -125,14 +117,14 @@ fn capture_backtrace(buf: &mut [u64; 16]) -> usize {
             let ret_addr = *fp.add(1);
             buf[count] = ret_addr;
             count += 1;
-            fp = *fp as *mut usize;
+            fp = core::ptr::read(fp as *mut *mut u64);
         }
     }
     count
 }
 
 pub fn crash_dump_print(dump: &CrashDump) {
-    let serial = crate::serial::SerialPort::new(0x3F8);
+    let serial = zenus_console::serial::SerialPort::new(0x3F8);
     serial.write_str("\n===== CRASH DUMP =====\n");
     serial.write_str("RAX: 0x"); serial.write_hex(dump.registers.rax);
     serial.write_str("  RBX: 0x"); serial.write_hex(dump.registers.rbx); serial.write_str("\n");

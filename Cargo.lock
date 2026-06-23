@@ -58,6 +58,7 @@ dependencies = [
  "zenus-sched",
  "zenus-sync",
  "zenus-syscall",
+ "zenus-virtio",
 ]
 
 [[package]]
@@ -108,6 +109,7 @@ dependencies = [
  "zenus-mem",
  "zenus-sched",
  "zenus-sync",
+ "zenus-virtio",
 ]
 
 [[package]]
@@ -139,5 +141,17 @@ dependencies = [
  "zenus-fs",
  "zenus-mem",
  "zenus-sched",
+ "zenus-sync",
+]
+
+[[package]]
+name = "zenus-virtio"
+version = "0.1.0"
+dependencies = [
+ "x86_64",
+ "zenus-arch",
+ "zenus-console",
+ "zenus-fs",
+ "zenus-mem",
  "zenus-sync",
 ]
