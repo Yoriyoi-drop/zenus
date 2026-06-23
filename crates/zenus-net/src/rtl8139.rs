@@ -334,7 +334,7 @@ impl Rtl8139 {
         self.write32(tsd_addr, data.len() as u32 & TSD_SIZE_MASK);
 
         // Wait for DMA to complete so caller's buffer (possibly stack) stays valid
-        for _ in 0..50000 {
+        for _ in 0..10000 {
             let tsd = self.read32(tsd_addr);
             if (tsd & TSD_TOK) != 0 {
                 break;
