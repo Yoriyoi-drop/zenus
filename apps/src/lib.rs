@@ -343,8 +343,8 @@ pub extern "C" fn entry() -> ! {
         both!(serial, hhdm_offset, "[OK] Shell task spawned\n");
 
         // 13a. Spawn user-mode demo task with proper isolation (timer NOT yet running)
-        let _cr3 = paging::create_address_space();
-        let _user_tid = user::spawn_user();
+         let _cr3 = paging::create_address_space();
+        // let _user_tid = user::spawn_user();
 
         // Print banner BEFORE starting the APIC timer (VGA scroll uses function pointers
         // that may be corrupted if the timer interrupt fires during VGA operations).

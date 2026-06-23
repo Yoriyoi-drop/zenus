@@ -642,13 +642,7 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         return 0;
     }
 
-    let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
-    let s = SerialPort::new(0x3F8);
-    s.write_str("[T");
-    s.write_u64(tick);
-    s.write_str(" rsp=");
-    s.write_hex(current_rsp);
-    s.write_str("]");
+    TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let count = TASK_COUNT.load(Ordering::Acquire);
     if count <= 1 {
@@ -672,12 +666,7 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         if let Some(ref idle_task) = tasks.tasks[0] {
             let base = idle_task.stack_alloc;
             let size = idle_task.stack_size;
-            s.write_str(" b=");
-            s.write_hex(base);
-            s.write_str(" s=");
-            s.write_u64(size as u64);
             if size > 0 && (current_rsp < base || current_rsp >= base + size) {
-                s.write_str(" BOOT-STK");
                 return 0;
             }
         }

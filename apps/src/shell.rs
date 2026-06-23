@@ -75,9 +75,11 @@ impl Shell {
 
         loop {
             let c = if self.serial.is_data_available() {
-                Some(self.serial.read_byte_serial())
+                let b = self.serial.read_byte_serial();
+                Some(b)
             } else if zenus_arch::keyboard::is_key_available() {
-                zenus_arch::keyboard::read_key()
+                let b = zenus_arch::keyboard::read_key().unwrap_or(0);
+                Some(b)
             } else {
                 None
             };
@@ -112,7 +114,9 @@ impl Shell {
             } else {
                 zenus_net::nic::net_poll();
                 Self::echo_server_poll();
-                zenus_sched::scheduler::check_yield();
+                if !zenus_arch::keyboard::is_key_available() {
+                    zenus_sched::scheduler::check_yield();
+                }
             }
         }
     }
