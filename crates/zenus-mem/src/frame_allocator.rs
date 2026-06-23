@@ -4,6 +4,7 @@ use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 
 use crate::paging::PAGE_SIZE;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 const FREE_STACK_SIZE: usize = 4096;
 
@@ -224,6 +225,19 @@ unsafe impl FrameAllocatorTrait<Size4KiB> for FrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         self.alloc_frame().map(|addr| PhysFrame::containing_address(addr))
     }
+}
+
+/// Reserve the physical pages that contain the kernel's boot stack (provided by
+/// the bootloader, not tracked in the memory map). This must be called after
+/// `global_init()` and before any frame allocator user that might get a stack page.
+pub fn reserve_boot_stack(hhdm_offset: u64) {
+    let rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags)); }
+    let rsp_phys = rsp.wrapping_sub(hhdm_offset);
+    // Round down to page boundary, then reserve 64 KiB (16 pages) below current RSP
+    let stack_page_base = (rsp_phys - 65536) & !0xFFF;
+    let mut fa = FRAME_ALLOCATOR.lock();
+    fa.reserve_region(stack_page_base, 65536 + PAGE_SIZE as u64);
 }
 
 pub fn global_init(memory_map: &[MemoryRegion]) {

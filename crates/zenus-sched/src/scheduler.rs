@@ -663,6 +663,18 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 
     let current_cr3_raw = zenus_mem::paging::get_level4_addr().as_u64();
     if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
+        // Guard: if the current task has a known stack range, verify current_rsp
+        // is within it. If not, we likely interrupted the boot path running on
+        // the boot stack (not a real task stack). Refuse to switch — returning 0
+        // makes the ISR restore the interrupted context and continue booting.
+        if current_task.stack_alloc != 0 && current_task.stack_size > 0 {
+            let margin = 256u64;
+            if current_rsp < current_task.stack_alloc + margin
+                || current_rsp >= current_task.stack_alloc + current_task.stack_size
+            {
+                return 0;
+            }
+        }
         current_task.rsp = current_rsp;
         current_task.cr3 = current_cr3_raw;
         // Determine if interrupted from Ring 3 by checking CS.RPL on the stack.
@@ -755,6 +767,23 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 }
 
 pub fn idle() -> ! {
+    // Switch to the idle task's own 4K stack before entering the
+    // idle loop. The boot path calls idle() on the boot stack, but
+    // yield_now() and schedule_tick() both save the current RSP into
+    // the idle task. Saving the boot-stack pointer corrupts the idle
+    // task's saved context, leading to #UD or page faults.
+    let target_rsp = {
+        let tasks = TASKS.lock();
+        let rsp = tasks.tasks[0]
+            .as_ref()
+            .filter(|t| t.stack_alloc != 0)
+            .map(|t| t.stack_alloc + t.stack_size - 2048);
+        drop(tasks);
+        rsp
+    };
+    if let Some(rsp) = target_rsp {
+        unsafe { core::arch::asm!("mov rsp, {}", in(reg) rsp, options(att_syntax)); }
+    }
     loop {
         x86_64::instructions::interrupts::enable();
         x86_64::instructions::hlt();

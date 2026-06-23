@@ -154,6 +154,8 @@ pub extern "C" fn entry() -> ! {
         s2.write_str(" MB total\n");
         paging::init(hhdm_offset);
     }
+    // Reserve boot stack pages so the frame allocator doesn't hand them out
+    frame_allocator::reserve_boot_stack(hhdm_offset);
     both!(serial, hhdm_offset, "[OK] Paging initialized\n");
 
     // 5. Set up interrupt handling
@@ -334,17 +336,22 @@ pub extern "C" fn entry() -> ! {
         // 12. Spawn shell as a real scheduler task FIRST (before timer starts)
         let _shell_tid = scheduler::create_task(shell_task, 65536);
 
-        // 13. Start APIC timer for preemptive multitasking
-        interrupts::apic::init_timer(48);
-        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'!', options(nostack, preserves_flags)); }
         both!(serial, hhdm_offset, "[OK] Shell task spawned\n");
 
-        // 13a. Spawn user-mode demo task with proper isolation
+        // 13a. Spawn user-mode demo task with proper isolation (timer NOT yet running)
         let _user_tid = user::spawn_user();
 
+        // Print banner BEFORE starting the APIC timer (VGA scroll uses function pointers
+        // that may be corrupted if the timer interrupt fires during VGA operations).
         both!(serial, hhdm_offset, "========================================\n");
         both!(serial, hhdm_offset, "  Zenus OS siap! Server mode aktif.\n");
         both!(serial, hhdm_offset, "========================================\n");
+
+        // 13. Start APIC timer for preemptive multitasking AFTER boot init is fully complete.
+        //     (If started earlier, timer interrupts can preempt the boot path, corrupting the
+        //      idle task's saved RSP in schedule_tick, leading to #UD or page faults.)
+        interrupts::apic::init_timer(48);
+        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'!', options(nostack, preserves_flags)); }
 
         // 14. Become idle — let the scheduler run the shell task
         scheduler::idle();
