@@ -242,80 +242,26 @@ pub fn virt_to_phys_raw(cr3_raw: u64, virt: u64) -> Option<u64> {
 }
 
 pub fn create_address_space() -> Option<u64> {
-    let rsp_val: u64;
-    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp_val, options(nostack, preserves_flags)); }
-    raw_str("[CS] ENTER RSP=");
-    raw_hex(rsp_val);
-    raw_str("\n");
-
     let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
-    raw_str("[CS] S1 hhdm=");
-    raw_hex(hhdm);
-    raw_str("\n");
-
     let cr3_phys = LEVEL4_PHYS.load(Ordering::Acquire);
-    raw_str("[CS] S2 cr3_phys=");
-    raw_hex(cr3_phys);
-    raw_str("\n");
 
-    raw_str("[CS] S3 locking...\n");
     let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
-    raw_str("[CS] S4 locked\n");
-
-    let new_frame = allocator.alloc_frame();
-    raw_str("[CS] S5 alloc_frame done\n");
-    let new_frame = match new_frame {
-        Some(f) => f,
-        None => {
-            raw_str("[CS] alloc_frame returned None\n");
-            return None;
-        }
-    };
-    raw_str("[CS] S6 frame=");
-    raw_hex(new_frame.as_u64());
-    raw_str("\n");
-
-    let rsp_mid: u64;
-    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp_mid, options(nostack, preserves_flags)); }
-    raw_str("[CS] MID RSP=");
-    raw_hex(rsp_mid);
-    raw_str("\n");
-
+    let new_frame = allocator.alloc_frame()?;
     drop(allocator);
-    raw_str("[CS] S7 dropped allocator\n");
 
     let src = (cr3_phys + hhdm) as *const PageTable;
     let dst = (new_frame.as_u64() + hhdm) as *mut PageTable;
-    raw_str("[CS] S8 src=");
-    raw_hex(src as u64);
-    raw_str(" dst=");
-    raw_hex(dst as u64);
-    raw_str("\n");
 
     unsafe {
-        raw_str("[CS] S9 copy_nonoverlapping...\n");
         core::ptr::copy_nonoverlapping(src, dst, 1);
-        raw_str("[CS] S10 copy done, zeroing entries...\n");
         let entries = core::slice::from_raw_parts_mut(dst as *mut u64, 512);
-        for i in 0..256 {
-            entries[i] = 0;
+        for entry in entries.iter_mut().take(256) {
+            *entry = 0;
         }
-        raw_str("[CS] S11 zeroing done\n");
     }
 
-    let rsp_end: u64;
-    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp_end, options(nostack, preserves_flags)); }
-    raw_str("[CS] END RSP=");
-    raw_hex(rsp_end);
-    raw_str("\n");
-
-    // Only preserve PCD (bit 4) and PWT (bit 3), which are cache-control bits.
     let flags = get_level4_addr_raw() & (0b11000u64);
-    let result = new_frame.as_u64() | flags;
-    raw_str("[CS] S12 result=");
-    raw_hex(result);
-    raw_str("\n");
-    Some(result)
+    Some(new_frame.as_u64() | flags)
 }
 
 /// Walk the user-space page table and free all mapped frames and page table pages.

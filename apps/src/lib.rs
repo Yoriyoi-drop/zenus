@@ -339,6 +339,7 @@ pub extern "C" fn entry() -> ! {
         both!(serial, hhdm_offset, "[OK] Shell task spawned\n");
 
         // 13a. Spawn user-mode demo task with proper isolation (timer NOT yet running)
+        let _cr3 = paging::create_address_space();
         let _user_tid = user::spawn_user();
 
         // Print banner BEFORE starting the APIC timer (VGA scroll uses function pointers
@@ -348,10 +349,8 @@ pub extern "C" fn entry() -> ! {
         both!(serial, hhdm_offset, "========================================\n");
 
         // 13. Start APIC timer for preemptive multitasking AFTER boot init is fully complete.
-        //     (If started earlier, timer interrupts can preempt the boot path, corrupting the
-        //      idle task's saved RSP in schedule_tick, leading to #UD or page faults.)
+        serial.write_str("[TMR] Timer starting, entering idle\n");
         interrupts::apic::init_timer(48);
-        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'!', options(nostack, preserves_flags)); }
 
         // 14. Become idle — let the scheduler run the shell task
         scheduler::idle();

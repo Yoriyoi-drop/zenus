@@ -60,6 +60,9 @@ impl Shell {
 
         loop {
             // Check if any byte available (non-blocking peek)
+            //debug
+            static mut DBG: u64 = 0;
+            unsafe { DBG += 1; if DBG < 5 { self.serial.write_str("[read_loop "); self.serial.write_u64(DBG); self.serial.write_str("]"); } }
             if self.serial.is_data_available() {
                 let c = self.serial.read_byte_serial();
                 match c {
@@ -89,6 +92,20 @@ impl Shell {
                     _ => {}
                 }
             } else {
+                //debug: check serial line status reg
+                let lsr = self.serial.read_lsr();
+                if lsr & 0x01 != 0 {
+                    self.serial.write_str("[DEBUG DATA_AVAILABLE]");
+                } else {
+                    // Check if FIFO has data via LSR bit 6 (TEMT)
+                    if lsr & 0x40 != 0 { /* TX empty, just a status check */ }
+                    // Periodically print LSR so we can see port state
+                    if unsafe { POS } > 0 && unsafe { POS } % 50 == 0 {
+                        self.serial.write_str("[LSR=");
+                        self.serial.write_hex(lsr as u64);
+                        self.serial.write_str("]");
+                    }
+                }
                 zenus_net::nic::net_poll();
                 Self::echo_server_poll();
                 zenus_sched::scheduler::check_yield();

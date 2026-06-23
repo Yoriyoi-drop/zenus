@@ -296,7 +296,24 @@ extern "x86-interrupt" fn page_fault_handler(
     s.write_str(" R15="); s.write_hex(r_r15);
 
     let stack = frame.stack_pointer.as_u64();
-    s.write_str("\n[STACK]\n");
+    s.write_str("\n[STACK ABOVE]\n");
+    let stack_valid = stack >= 0xFFFF800000000000 || (stack >= 0x1000 && stack < 0x800000000000);
+    if stack_valid {
+        for i in 0..16u64 {
+            let p = stack.wrapping_add(i * 8);
+            let val: u64 = unsafe { core::ptr::read_volatile(p as *const u64) };
+            s.write_hex(p);
+            s.write_str(": ");
+            s.write_hex(val);
+            if val < 0x1000 {
+                s.write_str(" <--- LOW ADDR");
+            } else if val >= 0xFFFF800000000000 {
+                s.write_str(" (kern)");
+            }
+            s.write_str("\n");
+        }
+    }
+    s.write_str("[STACK BELOW]\n");
     let stack_valid = stack >= 0xFFFF800000000000 || (stack >= 0x1000 && stack < 0x800000000000);
     if stack_valid {
         for i in 0..16u64 {

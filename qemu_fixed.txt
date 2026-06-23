@@ -1,0 +1,86 @@
+cargo build --package zenus --target x86_64-unknown-none 
+warning: unused imports: `AtomicU64` and `Ordering`
+ --> crates/zenus-mem/src/frame_allocator.rs:7:26
+  |
+7 | use core::sync::atomic::{AtomicU64, Ordering};
+  |                          ^^^^^^^^^  ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `zenus_console::serial::SerialPort`
+ --> crates/zenus-mem/src/paging.rs:2:5
+  |
+2 | use zenus_console::serial::SerialPort;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused macro definition: `raw_out`
+  --> crates/zenus-mem/src/paging.rs:98:14
+   |
+98 | macro_rules! raw_out {
+   |              ^^^^^^^
+   |
+   = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/zenus-mem/src/paging.rs:107:9
+    |
+107 |     let mut v = val;
+    |         ----^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `zenus-mem` (lib) generated 4 warnings (run `cargo fix --lib -p zenus-mem` to apply 3 suggestions)
+   Compiling zenus-arch v0.1.0 (/home/whale-d/zenus/crates/zenus-arch)
+   Compiling zenus-sched v0.1.0 (/home/whale-d/zenus/crates/zenus-sched)
+   Compiling zenus-net v0.1.0 (/home/whale-d/zenus/crates/zenus-net)
+   Compiling zenus-syscall v0.1.0 (/home/whale-d/zenus/crates/zenus-syscall)
+   Compiling zenus v0.1.0 (/home/whale-d/zenus/apps)
+warning: variable does not need to be mutable
+  --> apps/src/lib.rs:83:9
+   |
+83 |     let mut serial = SerialPort::new(0x3F8);
+   |         ----^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `USER_BINARY` is never used
+ --> apps/src/user.rs:5:7
+  |
+5 | const USER_BINARY: &[u8] = include_bytes!("../user.bin");
+  |       ^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `log` is never used
+ --> apps/src/user.rs:7:4
+  |
+7 | fn log(msg: &str) {
+  |    ^^^
+
+warning: function `spawn_user` is never used
+  --> apps/src/user.rs:12:8
+   |
+12 | pub fn spawn_user() -> u64 {
+   |        ^^^^^^^^^^
+
+warning: `zenus` (lib) generated 4 warnings (run `cargo fix --lib -p zenus` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.39s
+mkdir -p build
+ld.lld -T apps/src/linker.ld -o build/zenus \
+	--nmagic -n --gc-sections \
+	--whole-archive \
+	target/x86_64-unknown-none/debug/libzenus.a \
+	--no-whole-archive
+ld.lld: error: undefined symbol: TASKS
+>>> referenced by idt.rs:134 (crates/zenus-arch/src/interrupts/idt.rs:134)
+>>>               zenus_arch-cb7cbbc53e25f798.dfrv91urqg8bapvuf4ccfqa0w.18rnqeo.rcgu.o:(zenus_arch::interrupts::idt::gpf_handler) in archive target/x86_64-unknown-none/debug/libzenus.a
+>>> referenced by idt.rs:141 (crates/zenus-arch/src/interrupts/idt.rs:141)
+>>>               zenus_arch-cb7cbbc53e25f798.dfrv91urqg8bapvuf4ccfqa0w.18rnqeo.rcgu.o:(zenus_arch::interrupts::idt::gpf_handler) in archive target/x86_64-unknown-none/debug/libzenus.a
+>>> referenced by idt.rs:145 (crates/zenus-arch/src/interrupts/idt.rs:145)
+>>>               zenus_arch-cb7cbbc53e25f798.dfrv91urqg8bapvuf4ccfqa0w.18rnqeo.rcgu.o:(zenus_arch::interrupts::idt::gpf_handler) in archive target/x86_64-unknown-none/debug/libzenus.a
+>>> referenced 1 more times
+make: *** [Makefile:31: build/zenus] Galat 1

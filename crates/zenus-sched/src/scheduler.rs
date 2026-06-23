@@ -4,7 +4,9 @@ use zenus_sync::spinlock::SpinLock;
 use super::task::{Task, TaskInfo, TaskState, MAX_TASKS};
 use zenus_mem::allocator::ALLOCATOR;
 
-pub const TIME_SLICE: u64 = 50;
+static IDLE_RSP: AtomicU64 = AtomicU64::new(0);
+
+pub const TIME_SLICE: u64 = 1;
 const MAX_CPUS: usize = 8;
 
 static CURRENT_TASK: [AtomicU32; MAX_CPUS] = [
@@ -140,13 +142,6 @@ core::arch::global_asm!(
 core::arch::global_asm!(
     ".intel_syntax noprefix",
     ".globl apic_timer_isr_stub",
-    // APIC timer ISR entry (interrupt gate, IF=0 on entry)
-    // Saves 15 GP registers, calls schedule_tick(RSP)
-    // On return:
-    //   rax=0 → restore all regs, check RSP[8].RPL for Ring 0 vs Ring 3
-    //   rax≠0 → load new RSP from rax, then restore
-    // Ring 3 return: fix SS at RSP+32, use iretq (5-item frame)
-    // Ring 0 return: pop RAX, add rsp 8, popfq, jmp rax (3-item frame)
     "apic_timer_isr_stub:",
     "  push rax",
     "  push rcx",
@@ -166,9 +161,9 @@ core::arch::global_asm!(
     "  mov rdi, rsp",
     "  call schedule_tick",
     "  test rax, rax",
-    "  jz 1f",
+    "  jz timer_no_switch",
     "  mov rsp, rax",
-    "1:",
+    "timer_no_switch:",
     "  pop r15",
     "  pop r14",
     "  pop r13",
@@ -184,15 +179,14 @@ core::arch::global_asm!(
     "  pop rdx",
     "  pop rcx",
     "  pop rax",
-  "  test byte ptr [rsp + 8], 3",
-  "  jnz 3f",
-  "  pop rax",
-  "  add rsp, 8",
-  "  popfq",
-  "  jmp rax",
-    // KERNEL_GS_BASE set by schedule_tick() before return.
-    // Zero GS_BASE so user mode can't access kernel memory via GS.
-    "3:",
+    "  test byte ptr [rsp + 8], 3",
+    "  jnz timer_user_ret",
+    // Kernel return — use pop+popf+jmp to avoid iretq's 5-item frame
+    "  pop rax",
+    "  add rsp, 8",
+    "  popfq",
+    "  jmp rax",
+    "timer_user_ret:",
     "  xor eax, eax",
     "  xor edx, edx",
     "  mov ecx, 0xC0000101",
@@ -205,10 +199,10 @@ core::arch::global_asm!(
 pub fn init() {
     let mut tasks = TASKS.lock();
 
-    // Idle task: allocate a 4K kernel stack and construct a 3-item kernel frame
+    // Idle task: allocate a 16K kernel stack and construct a 3-item kernel frame
     // so the scheduler can switch to idle() with a valid RSP.
-    let (idle_stack_base, _idle_layout) = unsafe { alloc_stack(4096) };
-    let idle_stack_top = idle_stack_base.wrapping_add(4096);
+    let (idle_stack_base, _idle_layout) = unsafe { alloc_stack(16384) };
+    let idle_stack_top = idle_stack_base.wrapping_add(16384);
     let mut idle_sp = idle_stack_top as *mut u64;
     unsafe {
         idle_sp = idle_sp.sub(1);
@@ -221,14 +215,24 @@ pub fn init() {
             idle_sp = idle_sp.sub(1);
             idle_sp.write(0u64);                   // zeroed GP registers
         }
+        // Zero the rest of the stack to prevent stale data from being
+        // misinterpreted as interrupt frames or return addresses.
+        let clear_start = idle_stack_base as *mut u64;
+        let clear_end = idle_sp;
+        let mut clear_ptr = clear_end;
+        while clear_ptr > clear_start {
+            clear_ptr = clear_ptr.sub(1);
+            clear_ptr.write(0u64);
+        }
     }
     let idle_initial_rsp = idle_sp as u64;
 
     let mut idle_task = Task::new(0, idle_initial_rsp);
     idle_task.rsp = idle_initial_rsp;
     idle_task.stack_alloc = idle_stack_base;
-    idle_task.stack_size = 4096;
+    idle_task.stack_size = 16384;
     tasks.tasks[0] = Some(idle_task);
+    IDLE_RSP.store(idle_stack_top, Ordering::Release);
     TASK_COUNT.store(1, Ordering::Release);
 
     let s = SerialPort::new(0x3F8);
@@ -623,6 +627,8 @@ pub fn set_task_heap_brk(id: u64, brk: u64) {
     }
 }
 
+static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// Called from APIC timer ISR. Interrupts disabled (interrupt gate).
 /// Sends EOI, tries to acquire TASKS lock (returns 0 if contended),
 /// saves current RSP, finds next task on this CPU, returns its RSP.
@@ -635,6 +641,15 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     if (cpu as usize) >= MAX_CPUS {
         return 0;
     }
+
+    let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+    let s = SerialPort::new(0x3F8);
+    s.write_str("[T");
+    s.write_u64(tick);
+    s.write_str(" rsp=");
+    s.write_hex(current_rsp);
+    s.write_str("]");
+
     let count = TASK_COUNT.load(Ordering::Acquire);
     if count <= 1 {
         return 0;
@@ -650,6 +665,24 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         return 0;
     }
 
+    // Guard: if the current task is the idle task (slot 0) and the saved RSP
+    // is NOT within its own allocated stack, we are still on the boot stack
+    // during entry(). Do NOT overwrite idle_task.rsp with a boot-stack pointer.
+    if current == 0 {
+        if let Some(ref idle_task) = tasks.tasks[0] {
+            let base = idle_task.stack_alloc;
+            let size = idle_task.stack_size;
+            s.write_str(" b=");
+            s.write_hex(base);
+            s.write_str(" s=");
+            s.write_u64(size as u64);
+            if size > 0 && (current_rsp < base || current_rsp >= base + size) {
+                s.write_str(" BOOT-STK");
+                return 0;
+            }
+        }
+    }
+
     let expired = if let Some(ref mut task) = tasks.tasks[current as usize] {
         task.ticks_left = task.ticks_left.saturating_sub(1);
         task.ticks_left == 0
@@ -663,26 +696,8 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 
     let current_cr3_raw = zenus_mem::paging::get_level4_addr().as_u64();
     if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
-        // Guard: if the current task has a known stack range, verify current_rsp
-        // is within it. If not, we likely interrupted the boot path running on
-        // the boot stack (not a real task stack). Refuse to switch — returning 0
-        // makes the ISR restore the interrupted context and continue booting.
-        if current_task.stack_alloc != 0 && current_task.stack_size > 0 {
-            let margin = 256u64;
-            if current_rsp < current_task.stack_alloc + margin
-                || current_rsp >= current_task.stack_alloc + current_task.stack_size
-            {
-                return 0;
-            }
-        }
         current_task.rsp = current_rsp;
         current_task.cr3 = current_cr3_raw;
-        // Determine if interrupted from Ring 3 by checking CS.RPL on the stack.
-        // Stack layout at current_rsp (points to R15 after 15 pushes by ISR):
-        //   [current_rsp + 120] = RIP, [current_rsp + 128] = CS,
-        //   [current_rsp + 136] = RFLAGS, [current_rsp + 144] = user_RSP (if Ring 3→0)
-        // PerCpu.user_rsp can be stale if not inside a syscall;
-        // for Ring 3→0 interrupts, read user_RSP directly from the interrupt frame.
         let cs_on_stack = unsafe { core::ptr::read_volatile((current_rsp + 128) as *const u64) };
         if (cs_on_stack & 3) == 3 {
             current_task.user_rsp = unsafe { core::ptr::read_volatile((current_rsp + 144) as *const u64) };
@@ -702,18 +717,6 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         return 0;
     }
 
-    if let Some(ref next_task) = tasks.tasks[next as usize] {
-        if next_task.stack_alloc != 0 && next_task.stack_size > 0 {
-            let rsp = next_task.rsp;
-            let stack_bottom = next_task.stack_alloc;
-            let stack_top = stack_bottom + next_task.stack_size as u64;
-            let margin = 256u64;
-            if rsp < stack_bottom + margin || rsp >= stack_top {
-                return 0;
-            }
-        }
-    }
-
     if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
         current_task.state = TaskState::Ready;
         current_task.cr3 = current_cr3_raw;
@@ -726,7 +729,6 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
             nt.state = TaskState::Running;
             nt.ticks_left = TIME_SLICE;
 
-            // Restore next task's user_rsp into PerCpu
             if nt.user_rsp != 0 {
                 zenus_arch::cpu::set_percpu_user_rsp(cpu, nt.user_rsp);
             } else {
@@ -740,12 +742,10 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 
             CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
 
-            // Update per-CPU kernel stack for syscall entry
             if nt.kernel_rsp_top != 0 {
                 zenus_arch::cpu::set_percpu_kernel_rsp(cpu, nt.kernel_rsp_top);
             }
 
-            // Update TSS.RSP0 so interrupts from Ring 3 use correct kernel stack
             if nt.kernel_rsp_top != 0 {
                 zenus_arch::gdt::set_tss_stack(x86_64::VirtAddr::new(nt.kernel_rsp_top));
             }
@@ -755,8 +755,6 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         None => return 0,
     };
 
-    // Ensure KERNEL_GS_BASE points to this CPU's PerCpu struct before
-    // returning to the ISR stub which may iretq to Ring 3.
     unsafe {
         let percpu_addr = zenus_arch::cpu::percpu_virt_addr(cpu);
         zenus_arch::cpu::write_msr(0xC0000102, percpu_addr);
@@ -767,37 +765,20 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 }
 
 pub fn idle() -> ! {
-    // Switch to the idle task's own 4K stack before entering the
-    // idle loop. The boot path calls idle() on the boot stack, but
-    // yield_now() and schedule_tick() both save the current RSP into
-    // the idle task. Saving the boot-stack pointer corrupts the idle
-    // task's saved context, leading to #UD or page faults.
-    let target_rsp = {
-        let tasks = TASKS.lock();
-        let rsp = tasks.tasks[0]
-            .as_ref()
-            .filter(|t| t.stack_alloc != 0)
-            .map(|t| t.stack_alloc + t.stack_size - 2048);
-        drop(tasks);
-        rsp
-    };
-    if let Some(rsp) = target_rsp {
-        unsafe { core::arch::asm!("mov rsp, {}", in(reg) rsp, options(att_syntax)); }
-    }
+    // Reset RSP to the idle stack top on every loop iteration.
+    // This keeps RSP within the allocated region even if the timer
+    // ISR return does not fully restore RSP (observed 16-byte/tick drift).
     loop {
-        x86_64::instructions::interrupts::enable();
-        x86_64::instructions::hlt();
-        x86_64::instructions::interrupts::disable();
-        yield_now();
+        let rsp = IDLE_RSP.load(Ordering::Acquire);
+        unsafe {
+            core::arch::asm!("mov rsp, {}", "sti", "hlt", in(reg) rsp, options(nostack, preserves_flags));
+        }
     }
 }
 
 pub fn ap_idle() -> ! {
     loop {
-        x86_64::instructions::interrupts::enable();
-        x86_64::instructions::hlt();
-        x86_64::instructions::interrupts::disable();
-        yield_now();
+        unsafe { core::arch::asm!("sti", "hlt", options(nostack, preserves_flags)); }
     }
 }
 
