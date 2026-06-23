@@ -112,7 +112,11 @@ impl Shell {
                     _ => {}
                 }
             } else {
-                core::hint::spin_loop();
+                zenus_net::nic::net_poll();
+                Self::echo_server_poll();
+                if !zenus_arch::keyboard::is_key_available() {
+                    zenus_sched::scheduler::yield_now();
+                }
             }
         }
     }

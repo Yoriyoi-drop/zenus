@@ -2,13 +2,16 @@ use zenus_console::serial::SerialPort;
 use zenus_mem::paging;
 use zenus_sched::scheduler;
 
+#[allow(dead_code)]
 const USER_BINARY: &[u8] = include_bytes!("../user.bin");
 
+#[allow(dead_code)]
 fn log(msg: &str) {
     let s = SerialPort::new(0x3F8);
     s.write_str(msg);
 }
 
+#[allow(dead_code)]
 pub fn spawn_user() -> u64 {
     log("[USER] Loading user task with proper address space...\n");
 

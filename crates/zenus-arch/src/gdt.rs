@@ -13,8 +13,8 @@ pub const TSS_SEL: SegmentSelector = SegmentSelector::new(5, x86_64::PrivilegeLe
 pub const DF_IST_IDX: usize = 0;
 
 const MAX_CPUS: usize = 8;
-const AP_STACK_SIZE: usize = 4096 * 8;
-const AP_DF_STACK_SIZE: usize = 4096 * 4;
+const AP_STACK_SIZE: usize = 4096 * 64;
+const AP_DF_STACK_SIZE: usize = 4096 * 16;
 
 #[allow(static_mut_refs)]
 static mut TSS: MaybeUninit<TaskStateSegment> = MaybeUninit::uninit();
@@ -33,13 +33,13 @@ static mut AP_GDT: [MaybeUninit<GlobalDescriptorTable>; MAX_CPUS] = [const { May
 pub fn init() {
     let tss = unsafe { &mut *TSS.as_mut_ptr() };
     tss.privilege_stack_table[0] = {
-        const STACK_SIZE: usize = 4096 * 8;
+        const STACK_SIZE: usize = 4096 * 64;
         static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
         let top_addr = unsafe { STACK.as_ptr().add(STACK_SIZE) };
         VirtAddr::from_ptr(top_addr)
     };
     tss.interrupt_stack_table[DF_IST_IDX + 1] = {
-        const DF_STACK_SIZE: usize = 4096 * 4;
+        const DF_STACK_SIZE: usize = 4096 * 16;
         static mut DF_STACK: [u8; DF_STACK_SIZE] = [0; DF_STACK_SIZE];
         let top_addr = unsafe { DF_STACK.as_ptr().add(DF_STACK_SIZE) };
         VirtAddr::from_ptr(top_addr)

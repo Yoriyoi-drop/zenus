@@ -177,7 +177,7 @@ pub fn remove(path: &str) -> bool {
     }
 }
 
-fn parent_dir<'a>(path: &'a str) -> Option<&'a str> {
+pub(crate) fn parent_dir<'a>(path: &'a str) -> Option<&'a str> {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() { return None; }
     match trimmed.rfind('/') {
@@ -187,7 +187,7 @@ fn parent_dir<'a>(path: &'a str) -> Option<&'a str> {
     }
 }
 
-fn file_name<'a>(path: &'a str) -> &'a str {
+pub(crate) fn file_name<'a>(path: &'a str) -> &'a str {
     let trimmed = path.trim_end_matches('/');
     match trimmed.rfind('/') {
         Some(pos) => &trimmed[pos + 1..],

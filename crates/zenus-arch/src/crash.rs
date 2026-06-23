@@ -1,0 +1,196 @@
+use core::sync::atomic::{AtomicBool, Ordering};
+use crate::cpu;
+
+#[repr(C)]
+pub struct CpuRegisters {
+    pub rax: u64, rbx: u64, rcx: u64, rdx: u64,
+    pub rsi: u64, rdi: u64, rbp: u64, rsp: u64,
+    pub r8: u64, r9: u64, r10: u64, r11: u64,
+    pub r12: u64, r13: u64, r14: u64, r15: u64,
+    pub rip: u64, rflags: u64, cs: u64, ss: u64,
+}
+
+pub struct CrashDump {
+    pub magic: [u8; 16],
+    pub timestamp: u64,
+    pub registers: CpuRegisters,
+    pub task_id: u64,
+    pub cr3: u64,
+    pub panic_message: [u8; 256],
+    pub backtrace: [u64; 16],
+    pub backtrace_count: usize,
+}
+
+impl CrashDump {
+    pub const fn new() -> Self {
+        CrashDump {
+            magic: [0; 16],
+            timestamp: 0,
+            registers: CpuRegisters {
+                rax: 0, rbx: 0, rcx: 0, rdx: 0,
+                rsi: 0, rdi: 0, rbp: 0, rsp: 0,
+                r8: 0, r9: 0, r10: 0, r11: 0,
+                r12: 0, r13: 0, r14: 0, r15: 0,
+                rip: 0, rflags: 0, cs: 0, ss: 0,
+            },
+            task_id: 0,
+            cr3: 0,
+            panic_message: [0; 256],
+            backtrace: [0; 16],
+            backtrace_count: 0,
+        }
+    }
+}
+
+static mut CRASH_DUMP: CrashDump = CrashDump::new();
+static CRASH_SAVED: AtomicBool = AtomicBool::new(false);
+
+pub fn crash_dump_init() {
+    unsafe {
+        CRASH_DUMP.magic.copy_from_slice(b"ZENUS_CRASH_DUMP");
+    }
+}
+
+pub fn crash_dump_save(msg: &str) -> &'static CrashDump {
+    if CRASH_SAVED.load(Ordering::SeqCst) {
+        return unsafe { &CRASH_DUMP };
+    }
+    CRASH_SAVED.store(true, Ordering::SeqCst);
+
+    let dump = unsafe { &mut CRASH_DUMP };
+    dump.magic.copy_from_slice(b"ZENUS_CRASH_DUMP");
+
+    unsafe {
+        core::arch::asm!(
+            "mov {}, rax", "mov {}, rbx", "mov {}, rcx", "mov {}, rdx",
+            "mov {}, rsi", "mov {}, rdi", "mov {}, rbp",
+            "mov {}, r8",  "mov {}, r9",  "mov {}, r10", "mov {}, r11",
+            "mov {}, r12", "mov {}, r13", "mov {}, r14", "mov {}, r15",
+            "mov {}, rsp",
+            out(reg) dump.registers.rax,
+            out(reg) dump.registers.rbx,
+            out(reg) dump.registers.rcx,
+            out(reg) dump.registers.rdx,
+            out(reg) dump.registers.rsi,
+            out(reg) dump.registers.rdi,
+            out(reg) dump.registers.rbp,
+            out(reg) dump.registers.r8,
+            out(reg) dump.registers.r9,
+            out(reg) dump.registers.r10,
+            out(reg) dump.registers.r11,
+            out(reg) dump.registers.r12,
+            out(reg) dump.registers.r13,
+            out(reg) dump.registers.r14,
+            out(reg) dump.registers.r15,
+            out(reg) dump.registers.rsp,
+        );
+    }
+
+    dump.registers.rip = unsafe {
+        let mut rip: u64 = 0;
+        core::arch::asm!("lea {}, [rip]", out(reg) rip);
+        rip
+    };
+
+    dump.registers.rflags = unsafe {
+        let mut rflags: u64 = 0;
+        core::arch::asm!("pushfq; pop {}", out(reg) rflags);
+        rflags
+    };
+
+    dump.registers.cs = 0x08;
+    dump.registers.ss = 0x10;
+
+    let msg_bytes = msg.as_bytes();
+    let n = msg_bytes.len().min(255);
+    dump.panic_message[..n].copy_from_slice(&msg_bytes[..n]);
+    dump.panic_message[n] = 0;
+
+    dump.cr3 = x86_64::registers::control::Cr3::read().0.as_u64();
+
+    dump.backtrace_count = capture_backtrace(&mut dump.backtrace);
+
+    dump
+}
+
+fn capture_backtrace(buf: &mut [u64; 16]) -> usize {
+    let mut count = 0usize;
+    unsafe {
+        let mut fp: *mut usize;
+        core::arch::asm!("mov {}, rbp", out(reg) fp);
+        for _ in 0..16 {
+            if fp.is_null() || (fp as usize) < 0xFFFFFFFF80000000 {
+                break;
+            }
+            let ret_addr = *fp.add(1);
+            buf[count] = ret_addr;
+            count += 1;
+            fp = *fp as *mut usize;
+        }
+    }
+    count
+}
+
+pub fn crash_dump_print(dump: &CrashDump) {
+    let serial = crate::serial::SerialPort::new(0x3F8);
+    serial.write_str("\n===== CRASH DUMP =====\n");
+    serial.write_str("RAX: 0x"); serial.write_hex(dump.registers.rax);
+    serial.write_str("  RBX: 0x"); serial.write_hex(dump.registers.rbx); serial.write_str("\n");
+    serial.write_str("RCX: 0x"); serial.write_hex(dump.registers.rcx);
+    serial.write_str("  RDX: 0x"); serial.write_hex(dump.registers.rdx); serial.write_str("\n");
+    serial.write_str("RSI: 0x"); serial.write_hex(dump.registers.rsi);
+    serial.write_str("  RDI: 0x"); serial.write_hex(dump.registers.rdi); serial.write_str("\n");
+    serial.write_str("RBP: 0x"); serial.write_hex(dump.registers.rbp);
+    serial.write_str("  RSP: 0x"); serial.write_hex(dump.registers.rsp); serial.write_str("\n");
+    serial.write_str("R8:  0x"); serial.write_hex(dump.registers.r8);
+    serial.write_str("  R9:  0x"); serial.write_hex(dump.registers.r9); serial.write_str("\n");
+    serial.write_str("R10: 0x"); serial.write_hex(dump.registers.r10);
+    serial.write_str("  R11: 0x"); serial.write_hex(dump.registers.r11); serial.write_str("\n");
+    serial.write_str("R12: 0x"); serial.write_hex(dump.registers.r12);
+    serial.write_str("  R13: 0x"); serial.write_hex(dump.registers.r13); serial.write_str("\n");
+    serial.write_str("R14: 0x"); serial.write_hex(dump.registers.r14);
+    serial.write_str("  R15: 0x"); serial.write_hex(dump.registers.r15); serial.write_str("\n");
+    serial.write_str("RIP: 0x"); serial.write_hex(dump.registers.rip); serial.write_str("\n");
+    serial.write_str("RFLAGS: 0x"); serial.write_hex(dump.registers.rflags); serial.write_str("\n");
+    serial.write_str("CS: 0x"); serial.write_hex(dump.registers.cs as u64);
+    serial.write_str("  SS: 0x"); serial.write_hex(dump.registers.ss as u64); serial.write_str("\n");
+    serial.write_str("CR3: 0x"); serial.write_hex(dump.cr3); serial.write_str("\n");
+    serial.write_str("Task ID: "); serial.write_u64(dump.task_id); serial.write_str("\n");
+    serial.write_str("Message: ");
+    let end = dump.panic_message.iter().position(|&b| b == 0).unwrap_or(255);
+    if let Ok(msg) = core::str::from_utf8(&dump.panic_message[..end]) {
+        serial.write_str(msg);
+    }
+    serial.write_str("\n");
+    serial.write_str("Backtrace:\n");
+    for i in 0..dump.backtrace_count {
+        serial.write_str("  [");
+        serial.write_u64(i as u64);
+        serial.write_str("] 0x");
+        serial.write_hex(dump.backtrace[i]);
+        serial.write_str("\n");
+    }
+    serial.write_str("===== END CRASH DUMP =====\n");
+}
+
+pub fn crash_dump_get() -> Option<&'static CrashDump> {
+    if CRASH_SAVED.load(Ordering::SeqCst) {
+        Some(unsafe { &CRASH_DUMP })
+    } else {
+        None
+    }
+}
+
+pub fn crash_dump_save_to_disk(dev_id: usize, lba: u64) -> bool {
+    let dump = unsafe { &CRASH_DUMP };
+    let dump_bytes = unsafe {
+        core::slice::from_raw_parts(
+            dump as *const CrashDump as *const u8,
+            core::mem::size_of::<CrashDump>(),
+        )
+    };
+    let mut sectors = [0u8; 512];
+    let n = dump_bytes.len().min(512);
+    sectors[..n].copy_from_slice(&dump_bytes[..n]);
+    crate::ata::write_sectors(dev_id, lba, 1, &sectors)
+}

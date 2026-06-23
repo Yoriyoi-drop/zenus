@@ -5,7 +5,6 @@ const WIDTH: usize = 80;
 const HEIGHT: usize = 25;
 
 #[repr(u8)]
-#[allow(dead_code)]
 pub enum Color {
     Black = 0,
     Blue = 1,

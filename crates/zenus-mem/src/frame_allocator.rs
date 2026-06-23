@@ -4,9 +4,8 @@ use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 
 use crate::paging::PAGE_SIZE;
-use core::sync::atomic::{AtomicU64, Ordering};
 
-const FREE_STACK_SIZE: usize = 4096;
+const FREE_STACK_SIZE: usize = 65536;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

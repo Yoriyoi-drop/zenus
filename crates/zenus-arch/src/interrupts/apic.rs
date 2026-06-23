@@ -23,9 +23,7 @@ fn lapic_write(reg: u32, val: u32) {
 
 pub fn init_with_virt(virt: u64) {
     LAPIC_VIRT_BASE.store(virt, Ordering::Relaxed);
-    if !interrupts::are_enabled() {
-        remap_pic();
-    }
+    remap_pic();
 
     enable_lapic();
 }
@@ -55,7 +53,7 @@ fn enable_lapic() {
     s.write_hex(svr2 as u64);
     s.write_str("\n");
     lapic_write(0x80, 0);              // TPR = 0: allow all interrupt priorities
-    lapic_write(0x60, 0x0100FF);       // LINT0: masked (bit 16), vector 0xFF
+    lapic_write(0x350, 0x0100FF);      // LINT0: masked (bit 16), vector 0xFF
 }
 
 pub fn eoi() {
@@ -69,13 +67,13 @@ pub extern "C" fn apic_timer_eoi() {
 
 pub fn init_timer(vector: u8) {
     lapic_write(0x3E0, 0xB);          // divide by 1
-    lapic_write(0x380, 5_000_000);    // count = 5M, ~50ms at 100MHz bus
+    lapic_write(0x380, 10_000_000);   // count = 10M, ~100ms at 100MHz bus
     lapic_write(0x320, vector as u32 | 0x20000); // periodic mode
 }
 
 pub fn init_timer_ap(vector: u8) {
     lapic_write(0x3E0, 0xB);
-    lapic_write(0x380, 5_000_000);
+    lapic_write(0x380, 10_000_000);
     lapic_write(0x320, vector as u32 | 0x20000);
 }
 

@@ -7,7 +7,6 @@ struct LogBuf {
     pos: usize,
 }
 
-#[allow(dead_code)]
 impl LogBuf {
     fn new() -> Self {
         LogBuf { buf: [0u8; 256], pos: 0 }

@@ -13,7 +13,7 @@ ISO := $(BUILD_DIR)/zenus.iso
 IMG := $(BUILD_DIR)/zenus.hdd
 LD := ld.lld
 
-.PHONY: all clean run-qemu run-qemu-gdb run-bios run-uefi iso img test test-quiet
+.PHONY: all clean run run-qemu run-qemu-gdb run-bios run-uefi iso img test test-quiet
 
 all: $(KERNEL)
 
@@ -79,18 +79,20 @@ img: $(KERNEL) $(INITRD)
 	losetup -d $(LOOP)
 	$(LIMINE_DIR)/limine bios-install $(IMG)
 
+run: run-qemu
+
 run-bios: $(ISO)
-	qemu-system-x86_64 -serial stdio -m 2G -cdrom $(ISO) -no-reboot \
+	qemu-system-x86_64 -serial mon:stdio -m 2G -cdrom $(ISO) -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 run-uefi: $(ISO)
-	qemu-system-x86_64 -serial stdio -m 2G -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -no-reboot \
+	qemu-system-x86_64 -serial mon:stdio -m 2G -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 run-qemu: run-bios
 
 run-qemu-gdb: $(ISO)
-	qemu-system-x86_64 -serial stdio -m 2G -cdrom $(ISO) -s -S -no-reboot \
+	qemu-system-x86_64 -serial mon:stdio -m 2G -cdrom $(ISO) -s -S -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 # Test build — enables testing feature for unit tests
@@ -123,11 +125,11 @@ test-iso: $(BUILD_DIR)/zenus-test $(INITRD)
 	$(LIMINE_DIR)/limine bios-install $(BUILD_DIR)/zenus-test.iso
 
 test: test-iso
-	qemu-system-x86_64 -serial stdio -m 2G -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
+	qemu-system-x86_64 -serial mon:stdio -m 2G -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
 		-drive file=ext2_test.img,format=raw,if=ide 2>&1
 
 test-quiet: test-iso
-	qemu-system-x86_64 -serial stdio -m 2G -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
+	qemu-system-x86_64 -serial mon:stdio -m 2G -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
 		-drive file=ext2_test.img,format=raw,if=ide 2>&1 | grep -a "\[TEST\]"
 
 clean:

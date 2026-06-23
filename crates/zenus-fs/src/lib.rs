@@ -1,6 +1,5 @@
 #![no_std]
 #![allow(static_mut_refs)]
-#![allow(dead_code)]
 
 extern crate alloc;
 
@@ -13,3 +12,5 @@ pub mod ext2;
 pub mod ext2_fsck;
 pub mod journal;
 pub mod io_scheduler;
+pub mod pkg;
+pub mod sysctl;

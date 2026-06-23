@@ -9,3 +9,5 @@ zenus-console = { path = "../zenus-console" }
 zenus-mem = { path = "../zenus-mem" }
 zenus-sync = { path = "../zenus-sync" }
 zenus-arch = { path = "../zenus-arch" }
+zenus-fs = { path = "../zenus-fs" }
+zenus-sched = { path = "../zenus-sched" }

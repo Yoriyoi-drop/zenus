@@ -1,7 +1,7 @@
 use crate::devfs::{block_device_read, block_device_write};
 use zenus_sync::spinlock::SpinLock;
 
-const CACHE_SIZE: usize = 64;
+const CACHE_SIZE: usize = 512;
 const SECTOR_SIZE: usize = 512;
 
 #[derive(Clone, Copy)]

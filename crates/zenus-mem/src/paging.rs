@@ -1,5 +1,4 @@
 use core::sync::atomic::{AtomicU64, Ordering};
-use zenus_console::serial::SerialPort;
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
     OffsetPageTable, page_table::PageTable,
@@ -95,16 +94,10 @@ pub fn unmap_page(virt: VirtAddr) {
     })
 }
 
-macro_rules! raw_out {
-    ($byte:expr) => {
-        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") $byte, options(nostack, preserves_flags)) }
-    };
-}
-
 fn raw_hex(val: u64) {
     unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'0', options(nostack, preserves_flags)); }
     unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'x', options(nostack, preserves_flags)); }
-    let mut v = val;
+    let v = val;
     let mut i = 16;
     while i > 0 {
         i -= 1;

@@ -1,6 +1,5 @@
 #![no_std]
 #![allow(static_mut_refs)]
-#![allow(dead_code)]
 
 pub mod nic;
 pub mod ethernet;
@@ -15,3 +14,4 @@ pub mod dhcp;
 pub mod dhcp_server;
 pub mod dns;
 pub mod route;
+pub mod ssh;

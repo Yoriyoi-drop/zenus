@@ -61,9 +61,8 @@ fn panic(info: &PanicInfo) -> ! {
         serial.write_u64(loc.line() as u64);
         serial.write_str("\n");
     }
-    loop {
-        x86_64::instructions::hlt();
-    }
+    serial.write_str("[PANIC] Attempting reboot...\n");
+    zenus_arch::acpi::reboot_via_keyboard();
 }
 
 fn shell_task() {
@@ -80,7 +79,7 @@ pub extern "C" fn entry() -> ! {
     SerialPort::init();
     zenus_console::log::dmesg_init();
     zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "Zenus boot started");
-    let mut serial = SerialPort::new(0x3F8);
+    let serial = SerialPort::new(0x3F8);
     serial.write_str("\n");
     serial.write_str("========================================\n");
     serial.write_str("         Zenus OS v0.1.0               \n");

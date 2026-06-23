@@ -1,7 +1,6 @@
 #![no_std]
 #![feature(abi_x86_interrupt)]
 #![allow(static_mut_refs)]
-#![allow(dead_code)]
 #![allow(bad_asm_style)]
 extern crate alloc;
 

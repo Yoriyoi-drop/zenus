@@ -4,3 +4,4 @@
 pub mod serial;
 pub mod vga;
 pub mod log;
+pub mod syslog;
