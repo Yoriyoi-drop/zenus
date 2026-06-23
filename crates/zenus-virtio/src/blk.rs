@@ -53,8 +53,7 @@ pub struct VirtioBlk {
     dev_idx: usize,
 }
 
-static mut VIRTIO_BLKS: [Option<VirtioBlk>; 4] = [None; 4];
-static mut BLK_COUNT: usize = 0;
+static mut VIRTIO_BLK: Option<VirtioBlk> = None;
 static BLK_LOCK: SpinLock<()> = SpinLock::new(());
 
 impl VirtioBlk {
@@ -89,10 +88,7 @@ impl VirtioBlk {
 
         transport.set_device_status(transport.device_status() | 4);
 
-        let dev_idx = unsafe { BLK_COUNT };
-        if dev_idx < 4 {
-            unsafe { BLK_COUNT += 1; }
-        }
+        let dev_idx = 0;
 
         let name = format!("vd{}", dev_idx);
         let name_str = Box::leak(name.into_boxed_str());
@@ -235,30 +231,30 @@ impl VirtioBlk {
     }
 }
 
-fn blk_rw(lba: u64, buf: &mut [u8], is_write: bool) -> bool {
+fn blk_read0(lba: u64, buf: &mut [u8]) -> bool {
     let _lock = BLK_LOCK.lock();
     unsafe {
-        if BLK_COUNT == 0 { return false; }
-        let blk = VIRTIO_BLKS[0].as_mut().unwrap();
-        if is_write {
-            blk.write_sectors(lba, (buf.len() / 512) as u16, buf)
-        } else {
-            blk.read_sectors(lba, (buf.len() / 512) as u16, buf)
-        }
+        let blk = match VIRTIO_BLK.as_mut() {
+            Some(b) => b,
+            None => return false,
+        };
+        blk.read_sectors(lba, (buf.len() / 512) as u16, buf)
     }
 }
 
-fn blk_read0(lba: u64, buf: &mut [u8]) -> bool { blk_rw(lba, buf, false) }
-fn blk_write0(lba: u64, buf: &[u8]) -> bool { blk_rw(lba, unsafe { &mut *(buf as *const [u8] as *mut [u8]) }, true) }
+fn blk_write0(lba: u64, buf: &[u8]) -> bool {
+    let _lock = BLK_LOCK.lock();
+    unsafe {
+        let blk = match VIRTIO_BLK.as_mut() {
+            Some(b) => b,
+            None => return false,
+        };
+        blk.write_sectors(lba, (buf.len() / 512) as u16, buf)
+    }
+}
 
 pub unsafe fn probe_and_init(trans: VirtioPciTransport) -> Option<&'static mut VirtioBlk> {
     let blk = VirtioBlk::new(trans)?;
-    let idx = BLK_COUNT;
-    if idx <= VIRTIO_BLKS.len() {
-        let slot = if idx > 0 { idx - 1 } else { 0 };
-        VIRTIO_BLKS[slot] = Some(blk);
-        VIRTIO_BLKS[slot].as_mut()
-    } else {
-        None
-    }
+    VIRTIO_BLK = Some(blk);
+    VIRTIO_BLK.as_mut()
 }

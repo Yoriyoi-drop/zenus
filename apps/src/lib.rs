@@ -33,7 +33,6 @@ use zenus_fs::vfs::FileSystem as _;
 use zenus_mem::paging;
 
 mod shell;
-mod user;
 use zenus_mem::frame_allocator;
 use zenus_mem::frame_allocator::MemoryRegion;
 use zenus_sched::scheduler;
@@ -338,7 +337,7 @@ pub extern "C" fn entry() -> ! {
     if zenus_fs::devfs::block_device_count() > zenus_arch::ata::device_count() {
         both!(serial, hhdm_offset, "[VIRTIO-BLK] Trying to mount /virtio...\n");
         zenus_fs::vfs::create_dir("/virtio");
-        let ata_count = zenus_arch::ata::device_count();
+        let ata_count = zenus_arch::ata::device_count() as u8;
         if let Some(ext2_fs) = zenus_fs::ext2::Ext2Fs::mount(ata_count) {
             zenus_fs::vfs::mount("/virtio", ext2_fs);
             both!(serial, hhdm_offset, "[OK] ext2 on virtio-blk mounted at /virtio\n");

@@ -66,7 +66,7 @@ pub fn init() {
         found_nic = true;
     }
 
-    if let Some(virtio) = VirtioNet::with_nic(|v| v) {
+    if let Some(virtio) = VirtioNet::nic_ref() {
         let iface = NetworkInterface {
             nic_type: NicType::Virtio,
             mac: virtio.mac,

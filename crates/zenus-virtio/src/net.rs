@@ -246,6 +246,14 @@ impl VirtioNet {
         let _guard = NET_LOCK.lock();
         unsafe { VIRTIO_NET.as_mut().map(f) }
     }
+
+    pub fn is_present() -> bool {
+        unsafe { VIRTIO_NET.is_some() }
+    }
+
+    pub fn nic_ref() -> Option<&'static mut Self> {
+        unsafe { VIRTIO_NET.as_mut() }
+    }
 }
 
 pub unsafe fn probe_and_init(trans: VirtioPciTransport) -> Option<&'static mut VirtioNet> {

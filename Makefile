@@ -17,12 +17,8 @@ LD := ld.lld
 
 all: $(KERNEL)
 
-# Build user-space binary
-apps/user.bin: apps/src/user.s
-	nasm -f bin -o $@ $<
-
-# Build kernel staticlib (depends on user binary)
-target/$(TARGET)/$(PROFILE_DIR)/libzenus.a: apps/src/lib.rs apps/user.bin $(shell find crates -name '*.rs')
+# Build kernel staticlib
+target/$(TARGET)/$(PROFILE_DIR)/libzenus.a: apps/src/lib.rs $(shell find crates -name '*.rs')
 	$(CARGO) build --package zenus --target $(TARGET) $(CARGO_FLAGS)
 
 # Link kernel with custom linker script
@@ -34,8 +30,8 @@ $(KERNEL): target/$(TARGET)/$(PROFILE_DIR)/libzenus.a apps/src/linker.ld
 		target/$(TARGET)/$(PROFILE_DIR)/libzenus.a \
 		--no-whole-archive
 
-# Build initrd (depends on user binary)
-$(INITRD): mkinitrd.sh apps/user.bin
+# Build initrd
+$(INITRD): mkinitrd.sh
 	bash mkinitrd.sh $(INITRD)
 
 # ISO image (BIOS + UEFI) — ISO depends on kernel + initrd
@@ -134,5 +130,5 @@ test-quiet: test-iso
 
 clean:
 	rm -rf $(BUILD_DIR) $(ISO_DIR)
-	rm -f initrd.tar apps/user.bin
+	rm -f initrd.tar
 	$(CARGO) clean
