@@ -270,7 +270,7 @@ impl Rtl8139 {
     pub fn reset(&self) {
         self.write8(RTL_CR, CR_RST);
 
-        for _ in 0..50000 {
+        for _ in 0..5000 {
             unsafe { Port::<u8>::new(0x80).read(); }
         }
 

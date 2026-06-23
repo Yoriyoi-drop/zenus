@@ -35,7 +35,7 @@ static ATA_DEVICES: zenus_sync::spinlock::SpinLock<[Option<AtaDevice>; MAX_ATA_D
 static ATA_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 fn ata_wait_busy(io_base: u16) -> bool {
-    for _ in 0..100000 {
+    for _ in 0..10000 {
         let status: u8 = unsafe { Port::new(io_base + 7).read() };
         if status & STATUS_BSY == 0 {
             return true;
@@ -45,7 +45,7 @@ fn ata_wait_busy(io_base: u16) -> bool {
 }
 
 fn ata_wait_drq(io_base: u16) -> bool {
-    for _ in 0..100000 {
+    for _ in 0..10000 {
         let status: u8 = unsafe { Port::new(io_base + 7).read() };
         if status & STATUS_BSY == 0 {
             if status & STATUS_ERR != 0 {
@@ -54,7 +54,6 @@ fn ata_wait_drq(io_base: u16) -> bool {
             if status & STATUS_DRQ != 0 {
                 return true;
             }
-            // BSY clear, ERR clear, DRQ clear — command still in progress or no data
         }
     }
     false

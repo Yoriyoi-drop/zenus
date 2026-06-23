@@ -69,13 +69,13 @@ pub extern "C" fn apic_timer_eoi() {
 
 pub fn init_timer(vector: u8) {
     lapic_write(0x3E0, 0xB);          // divide by 1
-    lapic_write(0x380, 10_000_000);   // count = 10M, ~100ms at 100MHz bus
+    lapic_write(0x380, 5_000_000);    // count = 5M, ~50ms at 100MHz bus
     lapic_write(0x320, vector as u32 | 0x20000); // periodic mode
 }
 
 pub fn init_timer_ap(vector: u8) {
     lapic_write(0x3E0, 0xB);
-    lapic_write(0x380, 10_000_000);
+    lapic_write(0x380, 5_000_000);
     lapic_write(0x320, vector as u32 | 0x20000);
 }
 
