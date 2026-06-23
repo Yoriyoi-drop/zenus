@@ -26,6 +26,12 @@ pub extern "x86-interrupt" fn interrupt_timer(_frame: InterruptStackFrame) {
     crate::interrupts::pit::tick();
 }
 
+#[no_mangle]
+pub extern "x86-interrupt" fn interrupt_keyboard(_frame: InterruptStackFrame) {
+    crate::keyboard::handle_irq1();
+    crate::interrupts::apic::eoi();
+}
+
 pub fn get_timer_tick() -> u64 {
     crate::interrupts::pit::get_ticks()
 }

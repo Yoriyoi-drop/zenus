@@ -75,6 +75,15 @@ pub fn init() {
     }
 
     let s = zenus_console::serial::SerialPort::new(0x3F8);
+
+    // Route IRQ1 through IOAPIC for APIC mode
+    if crate::interrupts::ioapic::is_initialized() {
+        let vector = 33u8;
+        let apic_id = crate::interrupts::apic::current_apic_id() as u8;
+        crate::interrupts::ioapic::route_irq(1, vector, apic_id);
+        s.write_str("[IOAPIC] Keyboard IRQ1 -> vector 33\n");
+    }
+
     s.write_str("[OK] PS/2 Keyboard initialized\n");
 }
 

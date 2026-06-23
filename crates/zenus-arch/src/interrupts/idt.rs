@@ -39,6 +39,7 @@ pub fn init() {
 
     // IRQ 0-15 mapped to vectors 32-47
     idt[32].set_handler_fn(super::handler::interrupt_timer);
+    idt[33].set_handler_fn(super::handler::interrupt_keyboard);
     idt[39].set_handler_fn(super::handler::interrupt_spurious);
 
     // NIC interrupt (vector 43 = IRQ 11)

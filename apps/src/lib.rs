@@ -185,6 +185,10 @@ pub extern "C" fn entry() -> ! {
     x86_64::instructions::interrupts::enable();
     both!(serial, hhdm_offset, "[OK] Interrupts enabled\n");
 
+    // 7b. Initialize PS/2 keyboard driver
+    zenus_arch::keyboard::init();
+    both!(serial, hhdm_offset, "[OK] PS/2 Keyboard driver initialized\n");
+
     // 8. Initialize scheduler
     scheduler::init();
 
