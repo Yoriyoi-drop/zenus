@@ -3,6 +3,7 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::instructions::interrupts;
 
+#[repr(C)]
 pub struct SpinLock<T> {
     locked: AtomicBool,
     data: UnsafeCell<T>,

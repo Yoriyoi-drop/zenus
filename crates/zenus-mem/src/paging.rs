@@ -1,4 +1,5 @@
 use core::sync::atomic::{AtomicU64, Ordering};
+use zenus_console::serial::SerialPort;
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
     OffsetPageTable, page_table::PageTable,
@@ -94,16 +95,95 @@ pub fn unmap_page(virt: VirtAddr) {
     })
 }
 
-pub fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool, executable: bool) -> bool {
+macro_rules! raw_out {
+    ($byte:expr) => {
+        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") $byte, options(nostack, preserves_flags)) }
+    };
+}
+
+fn raw_hex(val: u64) {
+    unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'0', options(nostack, preserves_flags)); }
+    unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'x', options(nostack, preserves_flags)); }
+    let mut v = val;
+    let mut i = 16;
+    while i > 0 {
+        i -= 1;
+        let nibble = ((v >> (i * 4)) & 0xF) as u8;
+        let ch = b"0123456789ABCDEF"[nibble as usize];
+        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") ch, options(nostack, preserves_flags)); }
+    }
+}
+
+fn raw_str(s: &str) {
+    let p = s.as_ptr();
+    let len = s.len();
+    let mut i = 0;
+    while i < len {
+        let byte = unsafe { *p.add(i) };
+        if byte == b'\n' {
+            unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'\r', options(nostack, preserves_flags)); }
+        }
+        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") byte, options(nostack, preserves_flags)); }
+        i += 1;
+    }
+}
+
+#[inline(never)]
+#[no_mangle]
+pub extern "C" fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool, executable: bool) -> bool {
+    raw_str("[MAP] start\n");
+
     let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+    raw_str("[MAP] hhdm=");
+    raw_hex(hhdm);
+    raw_str("\n");
+
+    raw_str("[MAP] cr3_raw=");
+    raw_hex(cr3_phys_raw);
+    raw_str(" hhdm=");
+    raw_hex(hhdm);
+    raw_str("\n");
+
     let offset = VirtAddr::new(hhdm);
     let cr3_phys = cr3_phys_raw & !0xFFF;
+    raw_str("[MAP] cr3_phys=");
+    raw_hex(cr3_phys);
+    raw_str("\n");
+
     let pt_virt = (cr3_phys + hhdm) as *mut PageTable;
+    raw_str("[MAP] pt_virt=");
+    raw_hex(pt_virt as u64);
+    raw_str("\n");
+
+    raw_str("[MAP] a\n");
     let mut mapper = unsafe { OffsetPageTable::new(&mut *pt_virt, offset) };
+    raw_str("[MAP] b\n");
 
-    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
+    raw_str("[MAP] c\n");
+    let va = match VirtAddr::try_new(virt) {
+        Ok(v) => v,
+        Err(_) => {
+            raw_str("[MAP] ERROR: VirtAddr::try_new failed for virt=");
+            raw_hex(virt);
+            raw_str("\n");
+            return false;
+        }
+    };
+    raw_str("[MAP] d\n");
+    let page = Page::<Size4KiB>::containing_address(va);
+    raw_str("[MAP] e\n");
+
+    raw_str("[MAP] f\n");
+    raw_hex(virt);
+    raw_str(" phys=");
+    raw_hex(phys);
+    raw_str("\n");
+
+    raw_str("[MAP] g\n");
     let frame = PhysFrame::containing_address(PhysAddr::new(phys));
+    raw_str("[MAP] h\n");
 
+    raw_str("[MAP] i\n");
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if writable {
         flags |= PageTableFlags::WRITABLE;
@@ -112,16 +192,25 @@ pub fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool
         flags |= PageTableFlags::NO_EXECUTE;
     }
 
+    raw_str("[MAP] j\n");
     let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+    raw_str("[MAP] k\n");
 
+    raw_str("[MAP] l\n");
     let result = unsafe { mapper.map_to(page, frame, flags, &mut *allocator) };
+    raw_str("[MAP] m\n");
 
     match result {
         Ok(flush) => {
+            raw_str("[MAP] n\n");
             flush.flush();
-            true
+            raw_str("[MAP] o\n");
+            return true;
         }
-        Err(_) => false,
+        Err(_) => {
+            raw_str("[MAP] err\n");
+            false
+        },
     }
 }
 
@@ -153,30 +242,80 @@ pub fn virt_to_phys_raw(cr3_raw: u64, virt: u64) -> Option<u64> {
 }
 
 pub fn create_address_space() -> Option<u64> {
-    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
-    let cr3_phys = LEVEL4_PHYS.load(Ordering::Acquire);
+    let rsp_val: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp_val, options(nostack, preserves_flags)); }
+    raw_str("[CS] ENTER RSP=");
+    raw_hex(rsp_val);
+    raw_str("\n");
 
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+    raw_str("[CS] S1 hhdm=");
+    raw_hex(hhdm);
+    raw_str("\n");
+
+    let cr3_phys = LEVEL4_PHYS.load(Ordering::Acquire);
+    raw_str("[CS] S2 cr3_phys=");
+    raw_hex(cr3_phys);
+    raw_str("\n");
+
+    raw_str("[CS] S3 locking...\n");
     let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
-    let new_frame = allocator.alloc_frame()?;
+    raw_str("[CS] S4 locked\n");
+
+    let new_frame = allocator.alloc_frame();
+    raw_str("[CS] S5 alloc_frame done\n");
+    let new_frame = match new_frame {
+        Some(f) => f,
+        None => {
+            raw_str("[CS] alloc_frame returned None\n");
+            return None;
+        }
+    };
+    raw_str("[CS] S6 frame=");
+    raw_hex(new_frame.as_u64());
+    raw_str("\n");
+
+    let rsp_mid: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp_mid, options(nostack, preserves_flags)); }
+    raw_str("[CS] MID RSP=");
+    raw_hex(rsp_mid);
+    raw_str("\n");
+
     drop(allocator);
+    raw_str("[CS] S7 dropped allocator\n");
 
     let src = (cr3_phys + hhdm) as *const PageTable;
     let dst = (new_frame.as_u64() + hhdm) as *mut PageTable;
+    raw_str("[CS] S8 src=");
+    raw_hex(src as u64);
+    raw_str(" dst=");
+    raw_hex(dst as u64);
+    raw_str("\n");
 
     unsafe {
+        raw_str("[CS] S9 copy_nonoverlapping...\n");
         core::ptr::copy_nonoverlapping(src, dst, 1);
+        raw_str("[CS] S10 copy done, zeroing entries...\n");
         let entries = core::slice::from_raw_parts_mut(dst as *mut u64, 512);
         for i in 0..256 {
             entries[i] = 0;
         }
+        raw_str("[CS] S11 zeroing done\n");
     }
 
+    let rsp_end: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp_end, options(nostack, preserves_flags)); }
+    raw_str("[CS] END RSP=");
+    raw_hex(rsp_end);
+    raw_str("\n");
+
     // Only preserve PCD (bit 4) and PWT (bit 3), which are cache-control bits.
-    // Explicitly zero out PCIDE (bit 11), ignored bits 5-10, and bits 0-2.
-    // This prevents caching attributes meant for kernel CR3 from leaking
-    // into user address-space page walks.
     let flags = get_level4_addr_raw() & (0b11000u64);
-    Some(new_frame.as_u64() | flags)
+    let result = new_frame.as_u64() | flags;
+    raw_str("[CS] S12 result=");
+    raw_hex(result);
+    raw_str("\n");
+    Some(result)
 }
 
 /// Walk the user-space page table and free all mapped frames and page table pages.

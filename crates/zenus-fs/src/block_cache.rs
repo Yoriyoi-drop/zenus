@@ -181,20 +181,21 @@ pub fn bc_stats() -> (u64, u64) {
 #[cfg(feature = "testing")]
 pub mod tests {
     use super::*;
+    use alloc::boxed::Box;
 
     fn assert_eq(a: u64, b: u64, msg: &'static str) -> Result<(), &'static str> {
         if a == b { Ok(()) } else { Err(msg) }
     }
 
     pub fn test_new_cache_empty() -> Result<(), &'static str> {
-        let cache = BlockCache::new();
+        let cache = Box::new(BlockCache::new());
         assert_eq(cache.hits, 0, "hits should be 0")?;
         assert_eq(cache.misses, 0, "misses should be 0")?;
         Ok(())
     }
 
     pub fn test_evict_on_empty_returns_index_0() -> Result<(), &'static str> {
-        let mut cache = BlockCache::new();
+        let mut cache = Box::new(BlockCache::new());
         let idx = cache.evict_one();
         if idx != Some(0) {
             return Err("evict_one on empty cache should return Some(0)");
@@ -203,7 +204,7 @@ pub mod tests {
     }
 
     pub fn test_find_entry_empty_returns_none() -> Result<(), &'static str> {
-        let mut cache = BlockCache::new();
+        let mut cache = Box::new(BlockCache::new());
         if cache.find_entry(0, 0).is_some() {
             return Err("find_entry on empty cache should be None");
         }
@@ -211,7 +212,7 @@ pub mod tests {
     }
 
     pub fn test_stats_empty() -> Result<(), &'static str> {
-        let cache = BlockCache::new();
+        let cache = Box::new(BlockCache::new());
         let (h, m) = cache.stats();
         assert_eq(h, 0, "stats hits should be 0")?;
         assert_eq(m, 0, "stats misses should be 0")?;
@@ -219,10 +220,8 @@ pub mod tests {
     }
 
     pub fn test_lru_counter_increments_on_evict() -> Result<(), &'static str> {
-        let cache = BlockCache::new();
+        let cache = Box::new(BlockCache::new());
         assert_eq(cache.lru_counter, 0, "initial lru_counter = 0")?;
-        // evict_one doesn't increment, it just reads counters
-        // lru_counter only increments on actual read/write hits
         Ok(())
     }
 

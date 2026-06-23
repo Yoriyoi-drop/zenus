@@ -195,34 +195,82 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
 
 /// Load a flat binary (raw .bin) at a fixed virtual address.
 /// Used for simple user-mode programs that don't have ELF headers.
+macro_rules! wout {
+    ($byte:expr) => {
+        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") $byte, options(nostack, preserves_flags)) }
+    };
+}
+
+fn wr_hex(v: u64) {
+    wout!(b'0');
+    wout!(b'x');
+    let mut i = 16;
+    while i > 0 {
+        i -= 1;
+        let nibble = ((v >> (i * 4)) & 0xF) as u8;
+        wout!(b"0123456789ABCDEF"[nibble as usize]);
+    }
+}
+
+fn wr_str(s: &str) {
+    let p = s.as_ptr();
+    let len = s.len();
+    let mut i = 0;
+    while i < len {
+        let byte = unsafe { *p.add(i) };
+        if byte == b'\n' {
+            wout!(b'\r');
+        }
+        wout!(byte);
+        i += 1;
+    }
+}
+
 pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> {
     // Validate entry is a canonical user-space virtual address, not a physical address
     if entry < 0x1000 || entry >= 0x0000_8000_0000_0000 {
         return None;
     }
-    let dbg = zenus_console::serial::SerialPort::new(0x3F8);
-    dbg.write_str("[FLAT] start\n");
+    wr_str("[FLAT] start\n");
 
+    let rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags)); }
+    wr_str("[FLAT] RSP=");
+    wr_hex(rsp);
+    wr_str("\n");
+
+    wout!(b'D'); wout!(b'1'); wout!(b'\r'); wout!(b'\n');
     let page_size = paging::PAGE_SIZE as u64;
+    wout!(b'D'); wout!(b'2'); wout!(b'\r'); wout!(b'\n');
     let vaddr = entry & !0xFFF;
+    wout!(b'D'); wout!(b'3'); wout!(b'\r'); wout!(b'\n');
     let pages_needed = ((data.len() + page_size as usize - 1) / page_size as usize).max(1);
+    wout!(b'D'); wout!(b'4'); wout!(b'\r'); wout!(b'\n');
 
     let hhdm = paging::hhdm_offset();
+    wout!(b'D'); wout!(b'5'); wout!(b'\r'); wout!(b'\n');
     if hhdm == 0 {
-        dbg.write_str("[FLAT] FATAL: HHDM offset is 0\n");
+        wr_str("[FLAT] FATAL: HHDM offset is 0\n");
         return None;
     }
+    wout!(b'D'); wout!(b'6'); wout!(b'\r'); wout!(b'\n');
 
-    let mut frame_buf: [u64; 64] = [0; 64];
+    let mut frame_buf = alloc::boxed::Box::new([0u64; 64]);
+    wout!(b'D'); wout!(b'7'); wout!(b'\r'); wout!(b'\n');
     let mut frame_count: usize = 0;
+    wout!(b'D'); wout!(b'8'); wout!(b'\r'); wout!(b'\n');
 
     for i in 0..pages_needed {
+        wout!(b'L'); wr_hex(i as u64); wout!(b'\r'); wout!(b'\n');
+        wout!(b'i'); wr_hex(i as u64); wout!(b'\r'); wout!(b'\n');
+        wout!(b'p'); wr_hex(page_size); wout!(b'\r'); wout!(b'\n');
         let page_virt = vaddr + (i as u64) * page_size;
+        wout!(b'A'); wout!(b'\r'); wout!(b'\n');
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {
             Some(p) => p,
             None => {
-                dbg.write_str("[FLAT] alloc failed\n");
+                wr_str("[FLAT] alloc failed\n");
                 drop(allocator);
                 free_frames_raw(&frame_buf[..frame_count]);
                 return None;
@@ -232,22 +280,30 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         frame_buf[frame_count] = frame_phys.as_u64();
         frame_count += 1;
 
-        dbg.write_str("[FLAT] frame=");
-        dbg.write_hex(frame_phys.as_u64());
-        dbg.write_str("\n");
+        wr_str("[FLAT] frame=");
+        wr_hex(frame_phys.as_u64());
+        wr_str("\n");
 
         unsafe {
             core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, page_size as usize);
         }
 
         let writable = true;
-        if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), writable, true) {
-            dbg.write_str("[FLAT] map failed\n");
+        let map_result = paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), writable, true);
+        wr_str("[FLAT] map_result=");
+        if map_result {
+            wr_str("true");
+        } else {
+            wr_str("false");
+        }
+        wr_str("\n");
+        if !map_result {
+            wr_str("[FLAT] map failed\n");
             free_frames_raw(&frame_buf[..frame_count]);
             return None;
         }
         frame_count -= 1;
-        dbg.write_str("[FLAT] mapped\n");
+        wr_str("[FLAT] mapped\n");
 
         let copy_start = i * page_size as usize;
         let copy_end = core::cmp::min(copy_start + page_size as usize, data.len());
@@ -261,7 +317,7 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
             }
         }
     }
-    dbg.write_str("[FLAT] code ok\n");
+    wr_str("[FLAT] code ok\n");
 
     let heap_base = 0x6000_0000_0000u64;
     let heap_slide = zenus_arch::random::get_random_page_aligned(0, 32 * 1024 * 1024);
@@ -272,14 +328,14 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
     let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
 
     let stack_pages = 16;
-    dbg.write_str("[FLAT] stack...\n");
+    wr_str("[FLAT] stack...\n");
     for i in 0..stack_pages {
         let stack_virt = stack_top - ((stack_pages - i) as u64) * page_size;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {
             Some(p) => p,
             None => {
-                dbg.write_str("[FLAT] stack alloc failed\n");
+                wr_str("[FLAT] stack alloc failed\n");
                 drop(allocator);
                 free_frames_raw(&frame_buf[..frame_count]);
                 return None;
@@ -294,13 +350,13 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         }
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
-            dbg.write_str("[FLAT] stack map failed\n");
+            wr_str("[FLAT] stack map failed\n");
             free_frames_raw(&frame_buf[..frame_count]);
             return None;
         }
         frame_count -= 1;
     }
-    dbg.write_str("[FLAT] done\n");
+    wr_str("[FLAT] done\n");
 
     Some(LoadedElf {
         entry,

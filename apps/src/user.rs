@@ -24,6 +24,8 @@ pub fn spawn_user() -> u64 {
     s.write_hex(user_cr3);
     s.write_str("\n");
 
+    log("[USER] Calling load_flat_binary...\n");
+
     let loaded = match zenus_syscall::elf::load_flat_binary(USER_BINARY, 0x400000, user_cr3) {
         Some(elf) => elf,
         None => {
