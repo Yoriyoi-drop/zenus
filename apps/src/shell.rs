@@ -31,7 +31,7 @@ impl Shell {
     }
 
     fn write_str(&mut self, s: &str) {
-        self.serial.write_str_noirq(s);
+        self.serial.write_str(s);
         zenus_console::vga::write_str(s, self.hhdm_offset);
     }
 
@@ -121,7 +121,9 @@ impl Shell {
                             }
                         }
                     }
-                    _ => {}
+                    _ => {
+                        zenus_sched::scheduler::yield_now();
+                    }
                 }
             } else {
                 idle_count += 1;

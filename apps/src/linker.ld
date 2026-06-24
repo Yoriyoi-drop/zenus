@@ -21,6 +21,8 @@ SECTIONS {
 
     .rodata : ALIGN(4K) {
         *(.rodata .rodata.*)
+        *(.got)
+        *(.got.plt)
         . = ALIGN(4K);
     } :rodata
 

@@ -67,7 +67,10 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 fn shell_task() {
+    let s = zenus_console::serial::SerialPort::new(0x3F8);
+    s.write_str("[SH] IN SHELL_TASK\n");
     let mut sh = shell::Shell::new();
+    s.write_str("[SH] Shell created\n");
     sh.run();
 }
 
