@@ -37,9 +37,20 @@ pub fn current_apic_id() -> u32 {
 }
 
 fn enable_lapic() {
+    let s = zenus_console::serial::SerialPort::new(0x3F8);
+
+    // Ensure xAPIC mode (not x2APIC): set EN bit 10, clear EXTD bit 11
+    let base_raw = unsafe { crate::cpu::read_msr(0x1B) };
+    if (base_raw & (1 << 11)) != 0 {
+        s.write_str("[APIC] Switching from x2APIC to xAPIC mode\n");
+    }
+    if (base_raw & (1 << 10)) == 0 {
+        s.write_str("[APIC] Enabling APIC (IA32_APIC_BASE.EN)\n");
+    }
+    unsafe { crate::cpu::write_msr(0x1B, (base_raw | (1 << 10)) & !(1 << 11)); }
+
     let val = lapic_read(0xF0);
     let apic_id = lapic_read(0x20) >> 24;
-    let s = zenus_console::serial::SerialPort::new(0x3F8);
     s.write_str("[APIC] SVR=0x");
     s.write_hex(val as u64);
     s.write_str(" APIC ID=0x");
