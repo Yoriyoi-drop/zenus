@@ -62,6 +62,10 @@ fn enable_lapic() {
     lapic_write(0x380, 0);             // Timer initial count = 0 (no fire)
 }
 
+pub fn lapic_read_reg(reg: u32) -> u32 {
+    lapic_read(reg)
+}
+
 pub fn eoi() {
     lapic_write(0xB0, 0);
 }

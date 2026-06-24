@@ -630,7 +630,7 @@ pub fn check_yield() {
 }
 
 fn find_next_ready(tasks: &TaskArray, current: u32, cpu: u32) -> u32 {
-    for i in 0..MAX_TASKS as u32 {
+    for i in 1..MAX_TASKS as u32 {
         let idx = (current + i) % MAX_TASKS as u32;
         if let Some(ref task) = tasks.tasks[idx as usize] {
             if task.is_active() && task.cpu == cpu { return idx; }
@@ -807,6 +807,8 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     }
 
     TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Direct port write without lock to verify timer fires
+    unsafe { core::arch::asm!("out 0xE9, al", in("al") b'T'); }
 
     zenus_arch::watchdog::watchdog_tick();
     zenus_arch::watchdog::watchdog_pet();
@@ -910,6 +912,10 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         }
         None => return 0,
     };
+
+    if new_rsp != current_rsp {
+        zenus_console::serial::SerialPort::new(0x3F8).write_str("[SWITCH]\n");
+    }
 
     unsafe {
         let percpu_addr = zenus_arch::cpu::percpu_virt_addr(cpu);

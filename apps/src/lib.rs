@@ -432,8 +432,8 @@ pub extern "C" fn entry() -> ! {
         both!(serial, hhdm_offset, "========================================\n");
 
         // 13. Start APIC timer for preemptive multitasking AFTER boot init is fully complete.
-        serial.write_str("[TMR] Timer starting, entering idle\n");
         interrupts::apic::init_timer(48);
+        serial.write_str("[TMR] Timer started, entering idle\n");
 
         // 14. Become idle — let the scheduler run the shell task
         scheduler::idle();
