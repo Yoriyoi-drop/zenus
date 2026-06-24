@@ -378,7 +378,7 @@ pub extern "C" fn entry() -> ! {
         zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Watchdog initialized (30s timeout)");
 
         // 11d. Register SSH server as a system service
-        if zenus_sched::init::service_register("ssh", ssh_service_task, 16384, 0, 0, true) {
+        if zenus_sched::init::service_register("ssh", ssh_service_task, 65536, 0, 0, true) {
             zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] SSH server registered as service");
         }
 
