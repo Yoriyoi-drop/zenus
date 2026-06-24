@@ -391,19 +391,21 @@ pub extern "C" fn entry() -> ! {
             zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] SSH server registered as service");
         }
 
-        // 11e. Try to execute /initrd/init/startup.sh as the init script
+        // 11f. Try to execute /initrd/init/startup.sh as the init script
         if zenus_sched::init::initrd_execute() {
             both!(serial, hhdm_offset, "[INITRD] Startup script executed\n");
         }
 
         // 11b. Initialize journal on device 0 at blocks 3000-3015
-        if !zenus_fs::journal::journal_replay(0, 3000) {
-            both!(serial, hhdm_offset, "[WARN] Journal replay failed\n");
-        }
-        if zenus_fs::journal::journal_init(0, 3000, 16) {
-            both!(serial, hhdm_offset, "[OK] Journal initialized (blocks 3000-3015)\n");
-        } else {
-            both!(serial, hhdm_offset, "[WARN] Journal init failed\n");
+        if zenus_arch::ata::device_count() > 0 {
+            if !zenus_fs::journal::journal_replay(0, 3000) {
+                both!(serial, hhdm_offset, "[WARN] Journal replay failed\n");
+            }
+            if zenus_fs::journal::journal_init(0, 3000, 16) {
+                both!(serial, hhdm_offset, "[OK] Journal initialized (blocks 3000-3015)\n");
+            } else {
+                both!(serial, hhdm_offset, "[WARN] Journal init failed\n");
+            }
         }
 
         // 11. Detect CPUs via Limine MP response

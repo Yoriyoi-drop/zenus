@@ -13,6 +13,7 @@ const CMD_WRITE: u8 = 0x30;
 const CMD_FLUSH: u8 = 0xE7;
 
 const STATUS_BSY: u8 = 0x80;
+#[allow(dead_code)]
 const STATUS_DRDY: u8 = 0x40;
 const STATUS_DRQ: u8 = 0x08;
 const STATUS_ERR: u8 = 0x01;
@@ -24,6 +25,7 @@ static ATA_CHANNEL_LOCKS: [SpinLock<()>; 2] = [SpinLock::new(()), SpinLock::new(
 #[derive(Clone, Copy)]
 pub struct AtaDevice {
     io_base: u16,
+    #[allow(dead_code)]
     ctrl_base: u16,
     drive: u8,
     pub lba_sectors: u64,
@@ -131,6 +133,7 @@ fn extract_model(data: &[u16; 256]) -> [u8; 40] {
     model
 }
 
+#[allow(dead_code)]
 fn model_str(model: &[u8; 40]) -> &str {
     let end = model.iter().rposition(|&b| b != 0 && b != ' ' as u8)
         .map(|i| i + 1)

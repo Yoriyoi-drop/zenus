@@ -41,10 +41,6 @@ impl SerialPort {
         val
     }
 
-    fn is_transmit_empty(&self) -> bool {
-        self.read_byte(self.port + 5) & 0x20 != 0
-    }
-
     fn tx_ready(&self) -> bool {
         self.read_byte(self.port + 5) & 0x20 != 0
     }

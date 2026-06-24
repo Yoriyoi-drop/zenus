@@ -2,6 +2,7 @@ use x86_64::instructions::port::Port;
 use crate::limine;
 
 const KBD_CMD: u16 = 0x64;
+#[allow(dead_code)]
 const KBD_DATA: u16 = 0x60;
 
 const KBD_RESET_CPU: u8 = 0xFE;

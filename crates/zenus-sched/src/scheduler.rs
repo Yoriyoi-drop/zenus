@@ -462,19 +462,6 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
         }
         let initial_rsp = sp as u64;
 
-        {
-            let sd = SerialPort::new(0x3F8);
-            sd.write_str("[CREATE] entry=0x");
-            sd.write_hex(entry as u64);
-            sd.write_str(" rsp=0x");
-            sd.write_hex(initial_rsp);
-            sd.write_str(" stack=0x");
-            sd.write_hex(stack_base);
-            sd.write_str(" id=0x");
-            sd.write_hex(id);
-            sd.write_str("\n");
-        }
-
         let mut task = Task::new(id, initial_rsp);
         task.rsp = initial_rsp;
         task.stack_alloc = stack_base;
@@ -809,17 +796,6 @@ static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Called from APIC timer ISR. Interrupts disabled (interrupt gate).
 /// Sends EOI, tries to acquire TASKS lock (returns 0 if contended),
 /// saves current RSP, finds next task on this CPU, returns its RSP.
-fn raw_putc(c: u8) {
-    loop {
-        let mut lsr: u8;
-        unsafe { core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16, options(nostack, preserves_flags)); }
-        if lsr & 0x20 != 0 {
-            unsafe { core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") c, options(nostack, preserves_flags)); }
-            return;
-        }
-    }
-}
-
 #[no_mangle]
 pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     extern "C" { fn apic_timer_eoi(); }
@@ -835,48 +811,38 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     zenus_arch::watchdog::watchdog_tick();
     zenus_arch::watchdog::watchdog_pet();
 
+    // Guard: if running on the boot stack (not yet in the idle task),
+    // skip context switching. This prevents the timer from trying to
+    // save/restore the idle task's RSP while it's still on the boot stack.
+    if cpu == 0 {
+        let current = CURRENT_TASK[0].load(Ordering::Relaxed);
+        if current == 0 {
+            let tasks = TASKS.lock();
+            if let Some(ref idle_task) = tasks.tasks[0] {
+                let base = idle_task.stack_alloc;
+                let size = idle_task.stack_size;
+                if size > 0 && (current_rsp < base || current_rsp >= base.wrapping_add(size as u64)) {
+                    drop(tasks);
+                    return 0;
+                }
+            }
+            drop(tasks);
+        }
+    }
+
     let count = TASK_COUNT.load(Ordering::Acquire);
     if count <= 1 {
-        raw_putc(b'A');  // early return: TASK_COUNT <= 1
         return 0;
     }
 
     let current = CURRENT_TASK[cpu as usize].load(Ordering::Relaxed);
     let mut tasks = match TASKS.try_lock() {
         Some(t) => t,
-        None => { raw_putc(b'B'); return 0; },  // try_lock failed
+        None => return 0,
     };
 
     if tasks.tasks[current as usize].is_none() {
-        raw_putc(b'C');  // current task is None
         return 0;
-    }
-
-    // Guard: if the current task is the idle task (slot 0) and the saved RSP
-    // is NOT within its own allocated stack, we are still on the boot stack
-    // during entry(). Do NOT overwrite idle_task.rsp with a boot-stack pointer.
-    if current == 0 {
-        if let Some(ref idle_task) = tasks.tasks[0] {
-            let base = idle_task.stack_alloc;
-            let size = idle_task.stack_size;
-            if size > 0 && (current_rsp < base || current_rsp >= base + size) {
-                raw_putc(b'D');  // idle not on its own stack
-                {
-                    let idle_rsp_val = IDLE_RSP.load(Ordering::Acquire);
-                    let s = zenus_console::serial::SerialPort::new(0x3F8);
-                    s.write_str(" rsp=");
-                    s.write_hex(current_rsp);
-                    s.write_str(" base=");
-                    s.write_hex(base);
-                    s.write_str(" top=");
-                    s.write_hex(base + size);
-                    s.write_str(" IDLE_RSP=");
-                    s.write_hex(idle_rsp_val);
-                    s.write_str("\n");
-                }
-                return 0;
-            }
-        }
     }
 
     let expired = if let Some(ref mut task) = tasks.tasks[current as usize] {
@@ -887,7 +853,6 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     };
 
     if !expired {
-        raw_putc(b'E');  // not expired yet
         return 0;
     }
 
@@ -905,15 +870,12 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         return 0;
     }
 
-    raw_putc(b'F');  // expired is true!
     let next = find_next_ready(&tasks, current, cpu);
     if next == current {
-        raw_putc(b'G');  // no next task found
         return 0;
     }
 
     if tasks.tasks[next as usize].is_none() {
-        raw_putc(b'H');  // next task is None
         return 0;
     }
 
@@ -921,13 +883,11 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         current_task.state = TaskState::Ready;
         current_task.cr3 = current_cr3_raw;
     } else {
-        raw_putc(b'I');  // current gone
         return 0;
     }
 
     let new_rsp = match tasks.tasks[next as usize].as_mut() {
         Some(nt) => {
-            raw_putc(b'J');  // about to switch!
             nt.state = TaskState::Running;
             nt.ticks_left = TIME_SLICE;
 
@@ -952,31 +912,15 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
                 zenus_arch::gdt::set_tss_stack(x86_64::VirtAddr::new(nt.kernel_rsp_top));
             }
 
-            {
-                let sd = zenus_console::serial::SerialPort::new(0x3F8);
-                sd.write_str("[SCHED] switch to 0x");
-                sd.write_hex(next as u64);
-                sd.write_str(" rsp=0x");
-                sd.write_hex(nt.rsp);
-                sd.write_str(" top=0x");
-                sd.write_hex(nt.kernel_rsp_top);
-                sd.write_str("\n");
-            }
-
             nt.rsp
         }
-        None => { raw_putc(b'K'); return 0; },
+        None => return 0,
     };
 
     drop(tasks);
     new_rsp
 }
 
-// Defined in a separate section so the linker-script KEEP can retain it.
-//
-// The indirect call through SCHED_IDLE_KEEP (a function pointer) prevents LLVM
-// from inlining the asm entry sequence (cli/mov rsp/sti) — a direct call to a
-// global_asm symbol is visible to ThinLTO and gets inlined + pruned by GC.
 core::arch::global_asm!(
     ".section .text._sched_idle_asm, \"ax\"",
     ".globl _sched_idle_asm",
@@ -998,18 +942,16 @@ extern "C" {
     fn _sched_idle_asm() -> !;
 }
 
-/// Wrapper so we can store a raw pointer in a static.
+/// Opaque reference that ThinLTO cannot devirtualize.
+/// Stored as a raw pointer so the compiler sees an indirect call.
 struct SyncPtr(*const ());
 unsafe impl Sync for SyncPtr {}
 
-/// Opaque reference that ThinLTO cannot devirtualize.
-/// Stored as a raw pointer so the compiler sees an indirect call.
 #[used]
 #[link_section = ".text._sched_idle_ref"]
 static SCHED_IDLE_KEEP: SyncPtr = SyncPtr(_sched_idle_asm as *const () as *const ());
 
 pub fn idle() -> ! {
-    // Volatile read prevents LLVM from resolving the pointer.
     let p = unsafe { core::ptr::read_volatile(&SCHED_IDLE_KEEP).0 };
     let f: unsafe extern "C" fn() -> ! = unsafe { core::mem::transmute(p) };
     unsafe { f() }

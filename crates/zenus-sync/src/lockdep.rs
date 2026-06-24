@@ -26,6 +26,7 @@ const MAX_CPUS: usize = 8;
 #[derive(Clone, Copy)]
 struct LockClass {
     name: &'static str,
+    #[allow(dead_code)]
     registered: bool,
 }
 
