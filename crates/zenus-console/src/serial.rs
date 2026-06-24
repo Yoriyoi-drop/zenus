@@ -1,5 +1,4 @@
 use core::fmt;
-use core::sync::atomic::{AtomicU32, Ordering};
 use zenus_sync::spinlock::SpinLock;
 
 pub struct SerialPort {
@@ -66,15 +65,6 @@ pub fn flush_output() {
 pub fn write_task_boundary() {
     uart_write_byte(b'\r');
     uart_write_byte(b'\n');
-}
-
-/// Write bytes directly to the UART, bypassing the output buffer.
-/// Used only for single-character echo during interactive typing so the
-/// user sees each keypress immediately.
-fn uart_write_bytes(bytes: &[u8]) {
-    for &b in bytes {
-        uart_write_byte(b);
-    }
 }
 
 impl SerialPort {
@@ -145,11 +135,13 @@ impl SerialPort {
         let mut ob = OUTPUT_BUF.lock();
         if val < 0 {
             ob.push(b"-");
-            ob.push(&int_to_dec(val.wrapping_neg() as u64));
+            let (digits, start) = int_to_dec(val.wrapping_neg() as u64);
+            ob.push(&digits[start..]);
         } else if val == 0 {
             ob.push(b"0");
         } else {
-            ob.push(&int_to_dec(val as u64));
+            let (digits, start) = int_to_dec(val as u64);
+            ob.push(&digits[start..]);
         }
     }
 
@@ -159,7 +151,8 @@ impl SerialPort {
             ob.push(b"0");
             return;
         }
-        ob.push(&int_to_dec(val));
+        let (digits, start) = int_to_dec(val);
+        ob.push(&digits[start..]);
     }
 
     pub fn write_u64_noirq(&self, val: u64) {
@@ -168,7 +161,8 @@ impl SerialPort {
             ob.push(b"0");
             return;
         }
-        ob.push(&int_to_dec(val));
+        let (digits, start) = int_to_dec(val);
+        ob.push(&digits[start..]);
     }
 
     pub fn write_bytes(&self, bytes: &[u8]) {
@@ -193,7 +187,7 @@ impl SerialPort {
     }
 }
 
-fn int_to_dec(mut v: u64) -> [u8; 20] {
+fn int_to_dec(mut v: u64) -> ([u8; 20], usize) {
     let mut buf = [0u8; 20];
     let mut i = 20;
     while v > 0 {
@@ -201,7 +195,7 @@ fn int_to_dec(mut v: u64) -> [u8; 20] {
         buf[i] = b'0' + (v % 10) as u8;
         v /= 10;
     }
-    buf
+    (buf, i)
 }
 
 impl fmt::Write for SerialPort {

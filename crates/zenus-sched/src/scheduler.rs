@@ -833,17 +833,14 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         false
     };
 
-    let next = find_next_ready(&tasks, current, cpu);
-    if next == current {
-        if current != 0 {
-            // Flush output buffer so the current task's output is not
-            // delayed indefinitely when no task switch occurs.
-            zenus_console::serial::flush_output();
-        }
-        return 0;
+    // Flush output buffer on every tick so the current task's output
+    // doesn't stall indefinitely.  This call is fast (just drains a
+    // SpinLock-guarded buffer to the UART) and prevents echo lag.
+    if current != 0 {
+        zenus_console::serial::flush_output();
     }
 
-    if tasks.tasks[next as usize].is_none() {
+    if !expired {
         return 0;
     }
 
@@ -861,6 +858,15 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         return 0;
     }
 
+    let next = find_next_ready(&tasks, current, cpu);
+    if next == current {
+        return 0;
+    }
+
+    if tasks.tasks[next as usize].is_none() {
+        return 0;
+    }
+
     if let Some(ref mut current_task) = tasks.tasks[current as usize] {
         current_task.state = TaskState::Ready;
         current_task.cr3 = current_cr3_raw;
@@ -871,6 +877,8 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     // Flush the outgoing task's output to the UART before switching.
     // This guarantees each task's output is atomically committed to the
     // serial line before the next task runs — no interleaving.
+    // Already flushed above, but flush again to catch anything written
+    // by the save-and-find logic above.
     zenus_console::serial::flush_output();
 
     // Insert task-boundary separator so each task's output starts on a
