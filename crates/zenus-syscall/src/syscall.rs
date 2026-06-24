@@ -56,8 +56,12 @@ const SYS_GETUID: u64 = 100;
 const SYS_GETEUID: u64 = 101;
 const SYS_GETGID: u64 = 102;
 const SYS_GETEGID: u64 = 103;
-const SYS_SETUID: u64 = 104;
-const SYS_SETGID: u64 = 105;
+    const SYS_SETUID: u64 = 104;
+    const SYS_SETGID: u64 = 105;
+    const SYS_CLONE: u64 = 56;
+    const SYS_UNAME_NS: u64 = 61;
+    const SYS_SET_HOSTNAME: u64 = 107;
+    const SYS_GETPID_NS: u64 = 110;
 
 type SyscallFn = fn(u64, u64, u64, u64, u64, u64) -> u64;
 
@@ -85,6 +89,10 @@ const fn init_table() -> [Option<SyscallFn>; 128] {
     t[SYS_GETEGID as usize] = Some(sys_getegid);
     t[SYS_SETUID as usize] = Some(sys_setuid);
     t[SYS_SETGID as usize] = Some(sys_setgid);
+    t[SYS_CLONE as usize] = Some(sys_clone);
+    t[SYS_UNAME_NS as usize] = Some(sys_uname_ns);
+    t[SYS_SET_HOSTNAME as usize] = Some(sys_sethostname);
+    t[SYS_GETPID_NS as usize] = Some(sys_getpid_ns);
     t
 }
 
@@ -410,6 +418,71 @@ fn sys_setuid(uid: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
 
 fn sys_setgid(gid: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     if zenus_sched::scheduler::set_current_gid(gid as u32) { 0 } else { -1i64 as u64 }
+}
+
+fn sys_sethostname(name_ptr: u64, len: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if !validate_user_range(name_ptr, len) { return -1i64 as u64; }
+    if len == 0 || len > 64 { return -1i64 as u64; }
+    let euid = zenus_sched::scheduler::current_euid();
+    if euid != 0 { return -1i64 as u64; } // Only root
+    let mut buf = [0u8; 64];
+    unsafe {
+        core::ptr::copy_nonoverlapping(name_ptr as *const u8, buf.as_mut_ptr(), len as usize);
+    }
+    let uts_ns = zenus_sched::scheduler::current_uts_ns();
+    if zenus_ns::uts::set_hostname(uts_ns, &buf[..len as usize]) { 0 } else { -1i64 as u64 }
+}
+
+fn sys_uname_ns(buf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    if !validate_user_ptr::<UtsName>(buf) { return -1i64 as u64; }
+    let uts = buf as *mut UtsName;
+    let uts_ns = zenus_sched::scheduler::current_uts_ns();
+    let hostname = zenus_ns::uts::get_hostname(uts_ns);
+    let domainname = zenus_ns::uts::get_domainname(uts_ns);
+    let hlen = hostname.iter().position(|&b| b == 0).unwrap_or(64);
+    let _dlen = domainname.iter().position(|&b| b == 0).unwrap_or(64);
+    unsafe {
+        (*uts).sysname = [0; 65];
+        copy_str_to_fixed(&mut (*uts).sysname, "Zenus");
+        (*uts).nodename = [0; 65];
+        if hlen > 0 {
+            let dst = &mut (*uts).nodename;
+            dst[..hlen.min(64)].copy_from_slice(&hostname[..hlen.min(64)]);
+        }
+        (*uts).release = [0; 65];
+        copy_str_to_fixed(&mut (*uts).release, "0.1.0");
+        (*uts).version = [0; 65];
+        copy_str_to_fixed(&mut (*uts).version, "#1 Tue Jun 9 2026");
+        (*uts).machine = [0; 65];
+        copy_str_to_fixed(&mut (*uts).machine, "x86_64");
+    }
+    0
+}
+
+fn sys_clone(flags: u64, stack: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let cr3: u64;
+    unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags)); }
+    let user_rsp = if stack != 0 { stack } else {
+        zenus_arch::cpu::get_percpu_user_rsp(0)
+    };
+    let entry_field: u64;
+    unsafe { core::arch::asm!("mov {}, [rsp]", out(reg) entry_field, options(nostack)); }
+    if entry_field == 0 { return -1i64 as u64; }
+    let heap_brk = zenus_sched::scheduler::get_task_heap_brk(zenus_sched::scheduler::current_task_id());
+    let new_pid = zenus_sched::scheduler::clone_task(
+        flags,
+        stack,
+        65536,
+        entry_field,
+        cr3,
+        user_rsp,
+        heap_brk,
+    );
+    if new_pid == 0 { -1i64 as u64 } else { new_pid }
+}
+
+fn sys_getpid_ns(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    zenus_sched::scheduler::current_local_pid()
 }
 
 fn copy_str_to_fixed(dst: &mut [u8], s: &str) {

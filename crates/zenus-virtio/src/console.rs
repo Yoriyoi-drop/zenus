@@ -53,8 +53,8 @@ impl VirtioConsole {
             return None;
         }
 
-        let rx_queue = VirtioQueue::new(rx_mem, qsize0, 0, transport.notify_base, cr3);
-        let tx_queue = VirtioQueue::new(tx_mem, qsize1, 1, transport.notify_base, cr3);
+        let rx_queue = VirtioQueue::new(rx_mem, qsize0, 0, transport.queue_notify_addr(0), cr3);
+        let tx_queue = VirtioQueue::new(tx_mem, qsize1, 1, transport.queue_notify_addr(1), cr3);
 
         transport.set_device_status(transport.device_status() | 4);
 

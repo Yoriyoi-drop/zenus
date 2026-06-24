@@ -19,6 +19,7 @@ pub struct VirtioPciCap {
     pub bar: u8,
     pub offset: u32,
     pub length: u32,
+    pub notify_off_multiplier: u32,
 }
 
 pub struct VirtioPciTransport {
@@ -98,13 +99,14 @@ fn find_virtio_caps(dev: &PciDevice) -> [Option<VirtioPciCap>; 6] {
             let next = ((dword >> 8) & 0xFF) as u8;
             if cap_id == 0 { break; }
             if cap_id == PCI_CAP_ID_VNDR {
-                let mut hdr = [0u8; 16];
+                let mut hdr = [0u8; 20];
                 pci_read_cap_bytes(dev, cap_off, &mut hdr);
                 let cap = VirtioPciCap {
                     cfg_type: hdr[3],
                     bar: hdr[4],
                     offset: u32::from_le_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]),
                     length: u32::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]),
+                    notify_off_multiplier: u32::from_le_bytes([hdr[16], hdr[17], hdr[18], hdr[19]]),
                 };
                 let idx = cap.cfg_type as usize;
                 if idx < 6 {
@@ -157,12 +159,7 @@ pub unsafe fn init_device(dev: &PciDevice) -> Option<VirtioPciTransport> {
         .map(|d| bar_phys + d.offset as u64 + hhdm)
         .unwrap_or(0);
 
-    let notify_off_multiplier = if notify.length >= 4 {
-        let raw = ptr::read_volatile(notify_base as *const u32);
-        raw.wrapping_add(2)
-    } else {
-        0
-    };
+    let notify_off_multiplier = notify.notify_off_multiplier;
 
     let trans = VirtioPciTransport {
         dev: *dev,
@@ -216,22 +213,22 @@ impl VirtioPciTransport {
         ptr::read_volatile((self.device_base + offset as u64) as *const u8)
     }
 
-    unsafe fn device_read16(&self, offset: u16) -> u16 {
+    pub(crate) unsafe fn device_read16(&self, offset: u16) -> u16 {
         if self.device_base == 0 { return 0; }
         ptr::read_volatile((self.device_base + offset as u64) as *const u16)
     }
 
-    unsafe fn device_read32(&self, offset: u16) -> u32 {
+    pub(crate) unsafe fn device_read32(&self, offset: u16) -> u32 {
         if self.device_base == 0 { return 0; }
         ptr::read_volatile((self.device_base + offset as u64) as *const u32)
     }
 
-    unsafe fn device_write8(&self, offset: u16, val: u8) {
+    pub(crate) unsafe fn device_write16(&self, offset: u16, val: u16) {
         if self.device_base == 0 { return; }
-        ptr::write_volatile((self.device_base + offset as u64) as *mut u8, val);
+        ptr::write_volatile((self.device_base + offset as u64) as *mut u16, val);
     }
 
-    unsafe fn device_write32(&self, offset: u16, val: u32) {
+    pub(crate) unsafe fn device_write32(&self, offset: u16, val: u32) {
         if self.device_base == 0 { return; }
         ptr::write_volatile((self.device_base + offset as u64) as *mut u32, val);
     }
@@ -283,10 +280,16 @@ impl VirtioPciTransport {
     }
 
     pub unsafe fn queue_notify(&self, queue_idx: u16) {
-        ptr::write_volatile(
-            (self.notify_base) as *mut u16,
-            queue_idx,
-        );
+        self.common_write16(0x16, queue_idx);
+        let notify_off = self.common_read16(0x1E);
+        let addr = self.notify_base + (notify_off as u64) * (self.notify_off_multiplier as u64);
+        ptr::write_volatile(addr as *mut u16, queue_idx);
+    }
+
+    pub unsafe fn queue_notify_addr(&self, queue_idx: u16) -> u64 {
+        self.common_write16(0x16, queue_idx);
+        let notify_off = self.common_read16(0x1E);
+        self.notify_base + (notify_off as u64) * (self.notify_off_multiplier as u64)
     }
 
     pub unsafe fn read_isr(&self) -> u8 {

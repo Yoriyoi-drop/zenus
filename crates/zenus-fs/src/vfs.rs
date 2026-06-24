@@ -56,6 +56,7 @@ pub struct VfsNode {
     pub inode: u64,
 }
 
+#[derive(Clone, Copy)]
 struct Mount {
     path: &'static str,
     fs: &'static dyn FileSystem,
@@ -63,6 +64,7 @@ struct Mount {
 
 const MAX_MOUNTS: usize = 32;
 
+#[derive(Clone, Copy)]
 struct MountTable {
     mounts: [Mount; MAX_MOUNTS],
     count: usize,
@@ -90,6 +92,110 @@ impl MountTable {
 static MOUNT_TABLE: SpinLock<MountTable> = SpinLock::new(MountTable::new());
 static VFS_ROOT: SpinLock<Option<VfsNode>> = SpinLock::new(None);
 
+// Per-namespace mount tables
+const MAX_MNT_NS: usize = 8;
+
+#[derive(Clone, Copy)]
+struct MntNsEntry {
+    ns_id: zenus_ns::NsId,
+    table: MountTable,
+}
+
+#[derive(Clone, Copy)]
+struct MntNsTables {
+    entries: [Option<MntNsEntry>; MAX_MNT_NS],
+    count: usize,
+}
+
+impl MntNsTables {
+    const fn new() -> Self {
+        MntNsTables {
+            entries: [None; MAX_MNT_NS],
+            count: 0,
+        }
+    }
+}
+
+static MNT_NS_TABLES: SpinLock<MntNsTables> = SpinLock::new(MntNsTables::new());
+
+fn get_mount_table(ns_id: zenus_ns::NsId) -> *const SpinLock<MountTable> {
+    if ns_id == zenus_ns::NS_ROOT {
+        return &MOUNT_TABLE as *const SpinLock<MountTable>;
+    }
+    let tables = MNT_NS_TABLES.lock();
+    for i in 0..tables.count {
+        if let Some(ref entry) = tables.entries[i] {
+            if entry.ns_id == ns_id {
+                // Return the global MOUNT_TABLE for now — per-ns tables stored inline
+                // but we route through ns-aware functions
+            }
+        }
+    }
+    &MOUNT_TABLE
+}
+
+/// Copy the root mount table into a new mount namespace.
+pub fn create_mnt_ns(ns_id: zenus_ns::NsId) -> bool {
+    let root_table = MOUNT_TABLE.lock();
+    let mut tables = MNT_NS_TABLES.lock();
+    if tables.count >= MAX_MNT_NS {
+        return false;
+    }
+    let idx = tables.count;
+    tables.entries[idx] = Some(MntNsEntry {
+        ns_id,
+        table: MountTable {
+            mounts: root_table.mounts,
+            count: root_table.count,
+        },
+    });
+    tables.count = idx + 1;
+    true
+}
+
+fn with_mount_table<R>(ns_id: zenus_ns::NsId, f: impl FnOnce(&mut MountTable) -> R) -> R {
+    if ns_id == zenus_ns::NS_ROOT {
+        let mut mt = MOUNT_TABLE.lock();
+        f(&mut mt)
+    } else {
+        let mut tables = MNT_NS_TABLES.lock();
+        for i in 0..tables.count {
+            if let Some(ref mut entry) = tables.entries[i] {
+                if entry.ns_id == ns_id {
+                    return f(&mut entry.table);
+                }
+            }
+        }
+        // Fallback to root
+        let mut mt = MOUNT_TABLE.lock();
+        f(&mut mt)
+    }
+}
+
+fn find_mount_in_table(ns_id: zenus_ns::NsId, path: &str) -> Option<&'static (dyn FileSystem + 'static)> {
+    if ns_id == zenus_ns::NS_ROOT {
+        return find_mount(path);
+    }
+    let tables = MNT_NS_TABLES.lock();
+    for i in 0..tables.count {
+        if let Some(ref entry) = tables.entries[i] {
+            if entry.ns_id == ns_id {
+                let mut best: Option<&dyn FileSystem> = None;
+                let mut best_len = 0usize;
+                for j in 0..entry.table.count {
+                    let m = &entry.table.mounts[j];
+                    if path.starts_with(m.path) && m.path.len() > best_len {
+                        best = Some(m.fs);
+                        best_len = m.path.len();
+                    }
+                }
+                return best;
+            }
+        }
+    }
+    find_mount(path)
+}
+
 pub fn init() {
     let s = SerialPort::new(0x3F8);
 
@@ -112,6 +218,27 @@ pub fn init() {
 }
 
 pub fn mount(path: &'static str, fs: &'static dyn FileSystem) -> bool {
+    mount_in_ns(zenus_ns::NS_ROOT, path, fs)
+}
+
+pub fn mount_in_ns(ns_id: zenus_ns::NsId, path: &'static str, fs: &'static dyn FileSystem) -> bool {
+    if ns_id != zenus_ns::NS_ROOT {
+        let mut tables = MNT_NS_TABLES.lock();
+        for i in 0..tables.count {
+            if let Some(ref mut entry) = tables.entries[i] {
+                if entry.ns_id == ns_id {
+                    if entry.table.count >= MAX_MOUNTS {
+                        return false;
+                    }
+                    let j = entry.table.count;
+                    entry.table.mounts[j] = Mount { path, fs };
+                    entry.table.count += 1;
+                    return true;
+                }
+            }
+        }
+    }
+    // Fallback to root
     let mut mt = MOUNT_TABLE.lock();
     if mt.count >= MAX_MOUNTS {
         return false;
@@ -142,36 +269,48 @@ pub fn root() -> Option<VfsNode> {
 }
 
 pub fn create_file(path: &str) -> bool {
+    create_file_in_ns(zenus_ns::NS_ROOT, path)
+}
+
+pub fn create_file_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
     let parent = match parent_dir(path) {
         Some(p) => p,
         None => return false,
     };
     let name = file_name(path);
-    match open(&parent) {
+    match open_in_ns(ns_id, &parent) {
         Some(node) => node.fs.create(node.inode, name, FileType::File).is_some(),
         None => false,
     }
 }
 
 pub fn create_dir(path: &str) -> bool {
+    create_dir_in_ns(zenus_ns::NS_ROOT, path)
+}
+
+pub fn create_dir_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
     let parent = match parent_dir(path) {
         Some(p) => p,
         None => return false,
     };
     let name = file_name(path);
-    match open(&parent) {
+    match open_in_ns(ns_id, &parent) {
         Some(node) => node.fs.create(node.inode, name, FileType::Directory).is_some(),
         None => false,
     }
 }
 
 pub fn remove(path: &str) -> bool {
+    remove_in_ns(zenus_ns::NS_ROOT, path)
+}
+
+pub fn remove_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
     let parent = match parent_dir(path) {
         Some(p) => p,
         None => return false,
     };
     let name = file_name(path);
-    match open(&parent) {
+    match open_in_ns(ns_id, &parent) {
         Some(node) => node.fs.unlink(node.inode, name),
         None => false,
     }
@@ -197,17 +336,25 @@ pub(crate) fn file_name<'a>(path: &'a str) -> &'a str {
 
 /// Read directory entries for a given VFS path, merging mount points into the listing.
 pub fn read_dir(path: &str) -> alloc::vec::Vec<DirEntry> {
+    read_dir_in_ns(zenus_ns::NS_ROOT, path)
+}
+
+pub fn read_dir_in_ns(ns_id: zenus_ns::NsId, path: &str) -> alloc::vec::Vec<DirEntry> {
     if path == "/" || path.is_empty() {
-        return read_dir_root();
+        return read_dir_root_in_ns(ns_id);
     }
 
-    match open(path) {
+    match open_in_ns(ns_id, path) {
         Some(node) => node.fs.read_dir(node.inode),
         None => alloc::vec::Vec::new(),
     }
 }
 
 fn read_dir_root() -> alloc::vec::Vec<DirEntry> {
+    read_dir_root_in_ns(zenus_ns::NS_ROOT)
+}
+
+fn read_dir_root_in_ns(ns_id: zenus_ns::NsId) -> alloc::vec::Vec<DirEntry> {
     let mut entries = alloc::vec::Vec::with_capacity(32);
 
     if let Some(root_node) = root() {
@@ -216,9 +363,46 @@ fn read_dir_root() -> alloc::vec::Vec<DirEntry> {
         }
     }
 
-    let mt = MOUNT_TABLE.lock();
-    for i in 1..mt.count {
-        let m = &mt.mounts[i];
+    let mount_count;
+    let mounts_copy;
+    if ns_id == zenus_ns::NS_ROOT {
+        let mt = MOUNT_TABLE.lock();
+        mount_count = mt.count;
+        mounts_copy = mt.mounts;
+    } else {
+        let tables = MNT_NS_TABLES.lock();
+        let mut found = false;
+        mount_count = {
+            let mut cnt = 0;
+            for i in 0..tables.count {
+                if let Some(ref entry) = tables.entries[i] {
+                    if entry.ns_id == ns_id {
+                        cnt = entry.table.count;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            cnt
+        };
+        mounts_copy = {
+            let mut mnts = [EMPTY_MOUNT; MAX_MOUNTS];
+            if found {
+                for i in 0..tables.count {
+                    if let Some(ref entry) = tables.entries[i] {
+                        if entry.ns_id == ns_id {
+                            mnts = entry.table.mounts;
+                            break;
+                        }
+                    }
+                }
+            }
+            mnts
+        };
+    }
+
+    for i in 1..mount_count {
+        let m = &mounts_copy[i];
         let dir_name = m.path.trim_start_matches('/');
         if !dir_name.is_empty() {
             let dup = entries.iter().any(|e| e.name == dir_name);
@@ -231,31 +415,55 @@ fn read_dir_root() -> alloc::vec::Vec<DirEntry> {
             }
         }
     }
-    drop(mt);
 
     entries
 }
 
 pub fn open(path: &str) -> Option<VfsNode> {
+    open_in_ns(zenus_ns::NS_ROOT, path)
+}
+
+pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
     if path == "/" || path.is_empty() {
         return root().map(|r| VfsNode { fs: r.fs, inode: r.inode });
     }
 
-    let fs = find_mount(path)?;
+    let fs = find_mount_in_table(ns_id, path)?;
     let root_inode = fs.root_inode();
 
     // Find relative path by stripping the mount prefix
     let mount_prefix = {
-        let mt = MOUNT_TABLE.lock();
-        let mut longest = "";
-        for i in 0..mt.count {
-            let m = &mt.mounts[i];
-            if core::ptr::eq(m.fs as *const _, fs as *const _) {
-                if m.path.len() > longest.len() {
-                    longest = m.path;
+        let longest = if ns_id == zenus_ns::NS_ROOT {
+            let mt = MOUNT_TABLE.lock();
+            let mut longest = "";
+            for i in 0..mt.count {
+                let m = &mt.mounts[i];
+                if core::ptr::eq(m.fs as *const _, fs as *const _) {
+                    if m.path.len() > longest.len() {
+                        longest = m.path;
+                    }
                 }
             }
-        }
+            longest
+        } else {
+            let tables = MNT_NS_TABLES.lock();
+            let mut longest = "";
+            for i in 0..tables.count {
+                if let Some(ref entry) = tables.entries[i] {
+                    if entry.ns_id == ns_id {
+                        for j in 0..entry.table.count {
+                            let m = &entry.table.mounts[j];
+                            if core::ptr::eq(m.fs as *const _, fs as *const _) {
+                                if m.path.len() > longest.len() {
+                                    longest = m.path;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            longest
+        };
         longest
     };
 

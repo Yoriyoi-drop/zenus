@@ -16,6 +16,7 @@ zenus-fs = { path = "../crates/zenus-fs" }
 zenus-net = { path = "../crates/zenus-net" }
 zenus-syscall = { path = "../crates/zenus-syscall" }
 zenus-virtio = { path = "../crates/zenus-virtio" }
+zenus-ns = { path = "../crates/zenus-ns" }
 x86_64 = { workspace = true }
 
 [features]

@@ -322,7 +322,12 @@ pub extern "C" fn entry() -> ! {
         zenus_fs::pkg::pkg_init();
         zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Package manager initialized");
 
-        // 10f. Try to mount ext2 filesystem on first ATA drive
+        // 10f. Initialize container namespaces (PID, UTS, mount)
+        zenus_ns::uts::init();
+        zenus_ns::pid::init();
+        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Namespaces initialized");
+
+        // 10g. Try to mount ext2 filesystem on first ATA drive
     if zenus_arch::ata::device_count() > 0 {
         both!(serial, hhdm_offset, "[EXT2] Trying to mount /mnt...\n");
         zenus_fs::vfs::create_dir("/mnt");

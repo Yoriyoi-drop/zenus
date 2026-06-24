@@ -55,6 +55,7 @@ dependencies = [
  "zenus-fs",
  "zenus-mem",
  "zenus-net",
+ "zenus-ns",
  "zenus-sched",
  "zenus-sync",
  "zenus-syscall",
@@ -86,6 +87,7 @@ dependencies = [
  "x86_64",
  "zenus-console",
  "zenus-mem",
+ "zenus-ns",
  "zenus-sync",
 ]
 
@@ -113,6 +115,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zenus-ns"
+version = "0.1.0"
+dependencies = [
+ "x86_64",
+ "zenus-console",
+ "zenus-sync",
+]
+
+[[package]]
 name = "zenus-sched"
 version = "0.1.0"
 dependencies = [
@@ -121,6 +132,7 @@ dependencies = [
  "zenus-console",
  "zenus-fs",
  "zenus-mem",
+ "zenus-ns",
  "zenus-sync",
 ]
 
@@ -140,6 +152,7 @@ dependencies = [
  "zenus-console",
  "zenus-fs",
  "zenus-mem",
+ "zenus-ns",
  "zenus-sched",
  "zenus-sync",
 ]

@@ -91,7 +91,7 @@ impl VirtioBlk {
             return None;
         }
 
-        let queue = VirtioQueue::new(queue_mem, size, 0, transport.notify_base, cr3);
+        let queue = VirtioQueue::new(queue_mem, size, 0, transport.queue_notify_addr(0), cr3);
 
         let capacity = {
             let cfg_base = transport.get_device_config_space();

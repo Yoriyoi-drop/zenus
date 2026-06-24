@@ -11,3 +11,4 @@ x86_64 = { workspace = true }
 zenus-console = { path = "../zenus-console" }
 zenus-mem = { path = "../zenus-mem" }
 zenus-sync = { path = "../zenus-sync" }
+zenus-ns = { path = "../zenus-ns" }

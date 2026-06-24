@@ -59,8 +59,8 @@ impl VirtioBalloon {
             return None;
         }
 
-        let inflate_queue = VirtioQueue::new(inf_mem, qsize0, 0, transport.notify_base, cr3);
-        let deflate_queue = VirtioQueue::new(def_mem, qsize1, 1, transport.notify_base, cr3);
+        let inflate_queue = VirtioQueue::new(inf_mem, qsize0, 0, transport.queue_notify_addr(0), cr3);
+        let deflate_queue = VirtioQueue::new(def_mem, qsize1, 1, transport.queue_notify_addr(1), cr3);
 
         transport.set_device_status(transport.device_status() | 4);
 

@@ -12,7 +12,7 @@
 
 ## Ringkasan Eksekutif
 
-Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Limine bootloader. Saat ini berada pada tahap **alpha/pre-beta** — kernel dapat boot, shell serial berjalan, scheduler preemptive berfungsi, networking functional (TCP/UDP/DHCP/DNS/routing), init system dengan service supervision, SSH server, package manager, sysctl, watchdog, crash dump, lockdep, syslog, ext2 read-write dengan journaling+fsck, user mode (Ring 3) via SYSCALL, dan **Virtio drivers (virtio-net, virtio-blk, virtio-balloon)**. Phase 3 (server infrastructure) complete at 100%. Phase 4 dimulai dengan Virtio drivers (item 32/50 ✅). Namun, masih banyak komponen kritis yang tidak ada (container support, production-grade TCP congestion control, IPv6, firewall, NFS, cloud integration).
+Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Limine bootloader. Saat ini berada pada tahap **alpha/pre-beta** — kernel dapat boot, shell serial berjalan, scheduler preemptive berfungsi, networking functional (TCP/UDP/DHCP/DNS/routing), init system dengan service supervision, SSH server, package manager, sysctl, watchdog, crash dump, lockdep, syslog, ext2 read-write dengan journaling+fsck, user mode (Ring 3) via SYSCALL, dan **Virtio drivers (virtio-net multi-queue, virtio-blk, virtio-balloon)**. Phase 3 (server infrastructure) complete at 100%. Phase 4 berjalan dengan Virtio + multi-queue NIC (item 32,34 ✅) dan Container namespaces — PID + UTS (item 33 ✅). Namun, masih banyak komponen kritis yang tidak ada (production-grade TCP congestion control, IPv6, firewall, NFS, cloud integration).
 
 **Tidak dapat digunakan di produksi dalam bentuk apapun.**
 
@@ -71,7 +71,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 | ASLR | PARTIAL | HIGH |
 | Stack protection | PARTIAL | MEDIUM |
 | Memory safety | PARTIAL | MEDIUM |
-| Sandboxing | NOT IMPLEMENTED | HIGH |
+| Sandboxing | ✅ PARTIAL (PID + UTS namespaces) | HIGH |
 | Audit logging | NOT IMPLEMENTED | HIGH |
 | Encryption support | NOT IMPLEMENTED | HIGH |
 
@@ -84,7 +84,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 - **Encryption:** Tidak ada crypto API, tidak ada disk encryption, tidak ada TLS.
 - **Audit:** Tidak ada audit subsystem.
 - **Secure boot:** Tidak ada implementasi.
-- **Sandboxing:** Tidak ada seccomp, Landlock, atau namespace.
+- **Sandboxing:** ✅ **PARTIAL — PID + UTS namespaces implemented.** PID namespace with local PID remapping (`crates/zenus-ns/src/pid.rs`), UTS namespace with per-namespace hostname (`crates/zenus-ns/src/uts.rs`). Clone flags `CLONE_NEWPID` and `CLONE_NEWUTS` supported via internal `clone_task()`. Task struct tracks `pid_ns`, `uts_ns`, `mnt_ns` IDs. Task exit properly unregisters from PID namespace. Missing: NET, USER, IPC, MOUNT namespace isolation, setns() syscall, /proc/PID/ns integration.
 
 ### Perbandingan
 | Aspek | Debian | Ubuntu | RHEL | Alpine | Zenus |
@@ -294,8 +294,8 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 
 ### Detail
 - **KVM/QEMU:** Boots di QEMU dengan emulasi penuh (`-cpu max`). Hanya emulasi — tidak ada KVM paravirt support atau PVH entry.
-- **Virtio:** ✅ **DONE** — virtio-net (polling RX/TX, MAC from device config), virtio-blk (sector read/write, registered via devfs, ext2 mount), virtio-balloon (inflate/deflate queue siap), virtio-console (TX queue siap). Transport: modern virtio-over-PCI v1.0 common config MMIO, split virtqueue. Init sequence lengkap (reset→ack→driver→FEATURES_OK→queue setup→DRIVER_OK). Lihat `crates/zenus-virtio/`.
-- **Docker:** Tidak mungkin. Tidak ada kernel namespace (pid, net, mount, user, uts, ipc), cgroups, overlayfs, seccomp, atau capabilities.
+- **Virtio:** ✅ **DONE** — virtio-net (multi-queue via `VIRTIO_NET_F_MQ`, polling RX/TX, MAC from device config), virtio-blk (sector read/write, registered via devfs, ext2 mount), virtio-balloon (inflate/deflate queue siap), virtio-console (TX queue siap). Transport: modern virtio-over-PCI v1.0 common config MMIO, split virtqueue. Init sequence lengkap (reset→ack→driver→FEATURES_OK→queue setup→DRIVER_OK). **Notify address fix:** `notify_off_multiplier` dibaca dari PCI config capability, per-queue notify address computed dengan `queue_notify_off * notify_off_multiplier`. Lihat `crates/zenus-virtio/`.
+- **Docker:** Belum mungkin. ✅ **PID + UTS namespaces** implemented (clone_task with CLONE_NEWPID/CLONE_NEWUTS flags, UTS hostname isolation). Masih kurang: NET, USER, IPC, MOUNT namespaces, cgroups, overlayfs, seccomp, capabilities.
 - **OCI:** Tidak ada support.
 - **Kubernetes:** Tidak ada. Kublet, container runtime (containerd/CRI-O), dan network plugin (CNI) tidak bisa berjalan.
 - **Cloud-init:** Tidak ada.
@@ -411,12 +411,12 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 26. Audit logging subsystem
 27. Encryption / crypto API
 28. Disk encryption (LUKS)
-29. Container namespaces (pid, net, mount, user)
+29. ✅ **Container namespaces** — PID + UTS implemented (`crates/zenus-ns/`). Clone flags `CLONE_NEWPID`, `CLONE_NEWUTS`, per-ns hostname, PID remapping. Missing: NET, MOUNT, USER, IPC.
 30. Cgroups v2 (resource control)
 31. Overlayfs (container images)
 32. Seccomp (syscall filtering)
 33. ✅ **Virtio drivers** — net, blk, console, balloon (`crates/zenus-virtio/`)
-34. Multi-queue NIC support
+34. ✅ **Multi-queue NIC support** — virtio-net `VIRTIO_NET_F_MQ`, up to `MAX_QUEUE_PAIRS` (2), per-queue notify address, round-robin TX queue selection
 35. DMA engine (ATA DMA, NIC DMA)
 36. Block I/O scheduler / elevator (✅ noop via cache)
 37. Block cache / buffer cache (✅ 64-entry LRU)
@@ -455,7 +455,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 | 15 | **~~No block cache~~** | Filesystem | ✅ **64-entry LRU** — hit/miss ratio tracked |
 | 16 | **~~No testing~~** | Reliability | ✅ **25 unit tests** — `make test` untuk build+run QEMU |
 | 17 | **No documentation** | Developer | Tidak ada cara bagi developer baru untuk memahami sistem |
-| 18 | **No container support** | Cloud | Tidak bisa deploy Docker/K8s |
+| 18 | **~~No container support~~** | Cloud | ✅ **PARTIAL — PID + UTS namespaces** (clone_task, PID remapping, per-ns hostname). Masih kurang: NET, MOUNT, USER, IPC, cgroups, overlayfs |
 | 19 | ~~**ASLR tidak ada**~~ | Security | ✅ **PARTIAL — per-process userspace ASLR via RDRAND+PRNG, kernel at fixed base** |
 | 20 | **Hardcoded IP address** | Networking | Tidak bisa digunakan di network manapun tanpa rebuild |
 
@@ -509,7 +509,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 ### Phase 4: Cloud & Production (12-18 months) → Production Ready
 **Goal:** Sistem cloud-ready, enterprise grade.
 
-32. ✅ **Virtio drivers** — virtio-net, virtio-blk, virtio-console, virtio-balloon.`crates/zenus-virtio/`
+32. ✅ **Virtio drivers** — virtio-net, virtio-blk, virtio-console, virtio-balloon + multi-queue NIC (`VIRTIO_NET_F_MQ`, up to 2 queue pairs, per-queue notify addr, round-robin TX).`crates/zenus-virtio/`
 33. **Container namespaces** — pid, net, mount, user, uts, ipc namespaces.
 34. **Cgroups v2** — CPU, memory, I/O, PID controllers.
 35. **Overlayfs** — Container image layer support.
@@ -535,7 +535,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 
 | Metrik | Nilai |
 |---|---|
-| Production readiness | **40%** (+1%: DHCP, journaling; +0.5%: DNS, routing, user/group+perms, ASLR, NIC IRQ, DHCP server; +1%: ext2 write, block I/O scheduler; +1%: user mode demo; +1%: access_check enforcement; +1%: Ring 3 SYSCALL verified; **+15%: Phase 3 complete — init system, service supervision, initrd execution, SSH server, package manager, sysctl, reliable logging, watchdog, crash dump, lockdep**; **+1.5%: Virtio drivers — virtio-net, virtio-blk, virtio-balloon**)
+| Production readiness | **41%** (+1%: DHCP, journaling; +0.5%: DNS, routing, user/group+perms, ASLR, NIC IRQ, DHCP server; +1%: ext2 write, block I/O scheduler; +1%: user mode demo; +1%: access_check enforcement; +1%: Ring 3 SYSCALL verified; **+15%: Phase 3 complete — init system, service supervision, initrd execution, SSH server, package manager, sysctl, reliable logging, watchdog, crash dump, lockdep**; **+1.5%: Virtio drivers — virtio-net, virtio-blk, virtio-balloon**; **+0.5%: Container namespaces — PID + UTS**) |
 | Maturity | **Alpha / Pre-Beta** |
 | Risk level | **CRITICAL** — tidak boleh digunakan di luar pengembangan |
 | Estimated effort to Alpha | 6-12 months (full-time team) |
@@ -551,9 +551,9 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 
 **Phase 3 progress:** ✅ SSH server (3.20), ✅ Init system (3.21), ✅ Package manager (3.22), ✅ Initrd execution (3.23), ✅ Persistent config/sysctl (3.24), ✅ Service supervision (3.25), ✅ Reliable logging (3.26), ✅ Watchdog (3.27), ✅ Crash dump (3.28), ✅ Lockdep (3.29). **10/10 Phase 3 items complete (100%).**
 
-**Phase 4 progress:** ✅ Virtio drivers (4.32). **1/19 Phase 4 items complete (5%).**
+**Phase 4 progress:** ✅ Virtio drivers + multi-queue NIC (4.32), ✅ Container namespaces — PID + UTS (4.33). **2/19 Phase 4 items complete (10%).**
 
-**Bottom line:** Zenus OS adalah project kernel yang menarik secara edukasional dengan fondasi Rust yang solid. Phase 3 (server infrastructure) complete at 100%. Phase 4 (Cloud & Production) dimulai dengan virtio drivers (item 32) — virtio-net, virtio-blk, virtio-balloon berjalan di QEMU. Untuk "Production-grade Server OS", diperlukan peningkatan ~30x dalam scope implementasi. Saat ini, sistem memiliki init system dengan service supervision (auto-restart, health check), SSH server (encrypted remote shell port 22), package manager (.zpk format), sysctl kernel parameter interface, watchdog (30s timeout), crash dump (register + backtrace), lockdep (deadlock detection), syslog (4096 entries), dan virtio drivers — tapi masih kekurangan: production-grade user isolation, TCP congestion control, container support (namespace/cgroups/seccomp), IPv6, firewall, NFS, dan cloud integration.
+**Bottom line:** Zenus OS adalah project kernel yang menarik secara edukasional dengan fondasi Rust yang solid. Phase 3 (server infrastructure) complete at 100%. Phase 4 (Cloud & Production) berjalan dengan virtio drivers + multi-queue NIC (item 32,34 ✅), Container namespaces PID+UTS (item 33 ✅) — virtio-net (multi-queue via `VIRTIO_NET_F_MQ`), virtio-blk, virtio-balloon berjalan di QEMU, PID+UTS namespaces operational via clone_task dengan CLONE_NEWPID/CLONE_NEWUTS. Untuk "Production-grade Server OS", diperlukan peningkatan ~30x dalam scope implementasi. Saat ini, sistem memiliki init system dengan service supervision (auto-restart, health check), SSH server (encrypted remote shell port 22), package manager (.zpk format), sysctl kernel parameter interface, watchdog (30s timeout), crash dump (register + backtrace), lockdep (deadlock detection), syslog (4096 entries), virtio drivers, dan PID+UTS namespaces — tapi masih kekurangan: production-grade user isolation, TCP congestion control, full container support (NET/MOUNT/USER/IPC namespaces, cgroups, seccomp), IPv6, firewall, NFS, dan cloud integration.
 
 ---
 ## Known Critical Bugs (2026-06-21 Debug Session)

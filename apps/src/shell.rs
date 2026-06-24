@@ -194,6 +194,9 @@ impl Shell {
             "syslog" => self.cmd_syslog(&parts[1..count]),
             "ssh-start" => self.cmd_ssh_start(),
             "ssh-status" => self.cmd_ssh_status(),
+            "ns-info" => self.cmd_ns_info(),
+            "ns-sethost" => self.cmd_ns_sethost(&parts[1..count]),
+            "ns-clone" => self.cmd_ns_clone(&parts[1..count]),
             _ => {
                 self.write_str("Unknown command: ");
                 self.write_str(cmd);
@@ -258,6 +261,10 @@ impl Shell {
         self.write_str("  resolve <domain> - DNS resolve domain name\r\n");
         self.write_str("  id        - Show current user/group IDs\r\n");
         self.write_str("  whoami    - Show current username\r\n");
+        self.write_str("Namespace Commands:\r\n");
+        self.write_str("  ns-info      - Show current namespace IDs and hostname\r\n");
+        self.write_str("  ns-sethost   - Set hostname in current UTS namespace\r\n");
+        self.write_str("  ns-clone [--uts] [--pid] [--mnt] - Clone into new namespace(s)\r\n");
     }
 
     fn cmd_echo(&mut self, args: &[&str]) {
@@ -283,7 +290,7 @@ impl Shell {
     }
 
     fn cmd_ps(&mut self) {
-        self.write_str("PID\tUID\tGID\tState\r\n");
+        self.write_str("PID\tUID\tGID\tState\tPidNS\tUtsNS\r\n");
         let tasks = zenus_sched::scheduler::list_tasks();
         for info in tasks.iter().flatten() {
             self.serial.write_u64(info.id);
@@ -293,6 +300,10 @@ impl Shell {
             self.serial.write_u64(info.gid as u64);
             self.write_str("\t");
             self.write_str(info.state.to_str());
+            self.write_str("\t");
+            self.serial.write_u64(info.pid_ns as u64);
+            self.write_str("\t");
+            self.serial.write_u64(info.uts_ns as u64);
             if info.id == zenus_sched::scheduler::current_task_id() {
                 self.write_str(" (current)");
             }
@@ -452,7 +463,18 @@ impl Shell {
     }
 
     fn cmd_uname(&mut self) {
-        self.write_str("Zenus OS v0.1.0 x86_64\r\n");
+        let uts_ns = zenus_sched::scheduler::current_uts_ns();
+        let hostname = zenus_ns::uts::get_hostname(uts_ns);
+        let hlen = hostname.iter().position(|&b| b == 0).unwrap_or(64);
+        self.write_str("Zenus OS v0.1.0 x86_64");
+        if hlen > 0 {
+            self.write_str(" (");
+            if let Ok(h) = core::str::from_utf8(&hostname[..hlen]) {
+                self.write_str(h);
+            }
+            self.write_str(")");
+        }
+        self.write_str("\r\n");
     }
 
     fn cmd_dmesg(&mut self) {
@@ -472,11 +494,22 @@ impl Shell {
     }
 
     fn cmd_mount(&mut self) {
-        self.write_str("Mount points:\r\n");
+        let mnt_ns = zenus_sched::scheduler::current_mnt_ns();
+        self.write_str("Mount points (ns ");
+        self.serial.write_u64(mnt_ns as u64);
+        self.write_str("):\r\n");
         self.write_str("  /       tmpfs (root)\r\n");
-        self.write_str("  /dev    devfs\r\n");
-        if zenus_fs::vfs::open("/mnt").is_some() {
+        if zenus_fs::vfs::open_in_ns(mnt_ns, "/dev").is_some() {
+            self.write_str("  /dev    devfs\r\n");
+        }
+        if zenus_fs::vfs::open_in_ns(mnt_ns, "/mnt").is_some() {
             self.write_str("  /mnt    ext2 (if mounted)\r\n");
+        }
+        if zenus_fs::vfs::open_in_ns(mnt_ns, "/virtio").is_some() {
+            self.write_str("  /virtio virtio-blk ext2\r\n");
+        }
+        if zenus_fs::vfs::open_in_ns(mnt_ns, "/initrd").is_some() {
+            self.write_str("  /initrd initrd (tarfs)\r\n");
         }
         let (hits, misses) = zenus_fs::block_cache::bc_stats();
         self.write_str("Block cache: ");
@@ -1062,6 +1095,80 @@ impl Shell {
         }
     }
 
+    fn cmd_ns_info(&mut self) {
+        let uts_ns = zenus_sched::scheduler::current_uts_ns();
+        let pid_ns = zenus_sched::scheduler::current_pid_ns();
+        let mnt_ns = zenus_sched::scheduler::current_mnt_ns();
+        let local_pid = zenus_sched::scheduler::current_local_pid();
+        let global_pid = zenus_sched::scheduler::current_task_id();
+        let hostname = zenus_ns::uts::get_hostname(uts_ns);
+        let hlen = hostname.iter().position(|&b| b == 0).unwrap_or(64);
+        self.write_str("PID namespace: ");
+        self.serial.write_u64(pid_ns as u64);
+        self.write_str("\r\n");
+        self.write_str("UTS namespace: ");
+        self.serial.write_u64(uts_ns as u64);
+        self.write_str("\r\n");
+        self.write_str("MNT namespace: ");
+        self.serial.write_u64(mnt_ns as u64);
+        self.write_str("\r\n");
+        self.write_str("Global PID:    ");
+        self.serial.write_u64(global_pid);
+        self.write_str("\r\n");
+        self.write_str("Local PID:     ");
+        self.serial.write_u64(local_pid);
+        self.write_str("\r\n");
+        self.write_str("Hostname:      ");
+        if hlen > 0 {
+            let h = core::str::from_utf8(&hostname[..hlen]).unwrap_or("?");
+            self.write_str(h);
+        }
+        self.write_str("\r\n");
+    }
+
+    fn cmd_ns_sethost(&mut self, args: &[&str]) {
+        if args.is_empty() || args[0].is_empty() {
+            self.write_str("Usage: ns-sethost <hostname>\r\n");
+            return;
+        }
+        let hostname = args[0];
+        let uts_ns = zenus_sched::scheduler::current_uts_ns();
+        if zenus_ns::uts::set_hostname(uts_ns, hostname.as_bytes()) {
+            self.write_str("Hostname set to: ");
+            self.write_str(hostname);
+            self.write_str("\r\n");
+        } else {
+            self.write_str("Failed to set hostname\r\n");
+        }
+    }
+
+    fn cmd_ns_clone(&mut self, args: &[&str]) {
+        let mut flags = 0u64;
+        if args.contains(&"uts") || args.contains(&"--uts") {
+            flags |= zenus_ns::CLONE_NEWUTS;
+        }
+        if args.contains(&"pid") || args.contains(&"--pid") {
+            flags |= zenus_ns::CLONE_NEWPID;
+        }
+        if args.contains(&"mnt") || args.contains(&"--mnt") {
+            flags |= zenus_ns::CLONE_NEWNS;
+        }
+        self.write_str("Cloning with flags: 0x");
+        self.serial.write_hex(flags);
+        self.write_str("\r\n");
+
+        let _ = zenus_sched::scheduler::clone_task(
+            flags,
+            0,
+            65536,
+            0,
+            0,
+            0,
+            0x6000_0000_0000,
+        );
+        self.write_str("Clone attempted\r\n");
+    }
+
     fn cmd_chmod(&mut self, args: &[&str]) {
         if args.len() < 2 {
             self.write_str("Usage: chmod <mode> <file>\r\n");
@@ -1485,10 +1592,11 @@ impl Shell {
         let long = args.iter().any(|a| *a == "-l");
         let path = args.iter().find(|a| !a.is_empty() && **a != "-l").unwrap_or(&"/");
         let path = if path.is_empty() { "/" } else { path };
+        let mnt_ns = zenus_sched::scheduler::current_mnt_ns();
 
-        let entries = zenus_fs::vfs::read_dir(path);
+        let entries = zenus_fs::vfs::read_dir_in_ns(mnt_ns, path);
         if entries.is_empty() {
-            match zenus_fs::vfs::open(path) {
+            match zenus_fs::vfs::open_in_ns(mnt_ns, path) {
                 Some(node) => {
                     let e = node.fs.read_dir(node.inode);
                     if e.is_empty() {
@@ -1521,7 +1629,7 @@ impl Shell {
         }
         for entry in entries {
             if long {
-                let node = match zenus_fs::vfs::open(path) {
+                let node = match zenus_fs::vfs::open_in_ns(mnt_ns, path) {
                     Some(n) => n,
                     None => continue,
                 };
@@ -1557,8 +1665,9 @@ impl Shell {
                 return;
             }
         };
+        let mnt_ns = zenus_sched::scheduler::current_mnt_ns();
 
-        match zenus_fs::vfs::open(path) {
+        match zenus_fs::vfs::open_in_ns(mnt_ns, path) {
             Some(node) => {
                 let stat = node.fs.stat(node.inode);
                 if stat.file_type == zenus_fs::vfs::FileType::Directory {

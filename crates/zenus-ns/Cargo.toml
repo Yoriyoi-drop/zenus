@@ -1,0 +1,9 @@
+[package]
+name = "zenus-ns"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+x86_64 = { workspace = true }
+zenus-sync = { path = "../zenus-sync" }
+zenus-console = { path = "../zenus-console" }

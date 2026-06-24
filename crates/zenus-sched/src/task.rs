@@ -1,4 +1,5 @@
 use core::sync::atomic::{AtomicU32, Ordering};
+use zenus_ns::NsId;
 
 static NEXT_UID: AtomicU32 = AtomicU32::new(0);
 static NEXT_GID: AtomicU32 = AtomicU32::new(0);
@@ -52,6 +53,9 @@ pub struct Task {
     pub gid: u32,
     pub euid: u32,
     pub egid: u32,
+    pub uts_ns: NsId,
+    pub pid_ns: NsId,
+    pub mnt_ns: NsId,
 }
 
 impl Task {
@@ -73,6 +77,9 @@ impl Task {
             gid: 0,
             euid: 0,
             egid: 0,
+            uts_ns: 0,
+            pid_ns: 0,
+            mnt_ns: 0,
         }
     }
 
@@ -91,4 +98,6 @@ pub struct TaskInfo {
     pub cpu: u32,
     pub uid: u32,
     pub gid: u32,
+    pub uts_ns: NsId,
+    pub pid_ns: NsId,
 }

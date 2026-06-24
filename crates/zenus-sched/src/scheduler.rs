@@ -3,6 +3,7 @@ use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 use super::task::{Task, TaskInfo, TaskState, MAX_TASKS};
 use zenus_mem::allocator::ALLOCATOR;
+use zenus_ns::{NsId, NS_ROOT};
 
 static IDLE_RSP: AtomicU64 = AtomicU64::new(0);
 
@@ -250,6 +251,121 @@ fn current_cpu_id() -> u32 {
 
 fn set_current_cpu_id(cpu: u32, idx: u32) {
     CURRENT_TASK[cpu as usize].store(idx, Ordering::Release);
+}
+
+/// Clone the current task, optionally creating new namespaces.
+/// flags: bitmask of CLONE_NEW* constants.
+/// Returns the new task's global task ID.
+pub fn clone_task(
+    flags: u64,
+    _stack: u64,
+    stack_size: usize,
+    entry: u64,
+    cr3: u64,
+    user_rsp: u64,
+    heap_brk: u64,
+) -> u64 {
+    let cpu = current_cpu();
+    let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    let tasks = TASKS.lock();
+    let parent = match tasks.tasks[current as usize].as_ref() {
+        Some(t) => t.clone(),
+        None => return 0,
+    };
+    drop(tasks);
+
+    if entry < 0x1000 || entry >= 0x0000_8000_0000_0000 {
+        return 0;
+    }
+
+    let (stack_base, _stack_layout) = unsafe { alloc_stack(stack_size) };
+    if stack_base == 0 {
+        return 0;
+    }
+    let id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
+    let stack_top = stack_base + stack_size as u64;
+
+    let mut new_uts_ns = parent.uts_ns;
+    let mut new_pid_ns = parent.pid_ns;
+    let mut new_mnt_ns = parent.mnt_ns;
+
+    // Create new namespaces if requested
+    if flags & zenus_ns::CLONE_NEWUTS != 0 {
+        match zenus_ns::uts::create() {
+            Some(id) => new_uts_ns = id,
+            None => return 0,
+        }
+    }
+    if flags & zenus_ns::CLONE_NEWPID != 0 {
+        match zenus_ns::pid::create() {
+            Some(id) => new_pid_ns = id,
+            None => return 0,
+        }
+    }
+    if flags & zenus_ns::CLONE_NEWNS != 0 {
+        match zenus_ns::mnt::create() {
+            Some(id) => {
+                new_mnt_ns = id;
+                if !zenus_fs::vfs::create_mnt_ns(id) {
+                    return 0;
+                }
+            }
+            None => return 0,
+        }
+    }
+
+    unsafe {
+        let mut sp = stack_top as *mut u64;
+        sp = sp.sub(1); sp.write(0x1bu64);
+        sp = sp.sub(1); sp.write(user_rsp);
+        sp = sp.sub(1); sp.write(0x202u64);
+        sp = sp.sub(1); sp.write(0x23u64);
+        sp = sp.sub(1); sp.write(entry);
+        for _ in 0..15 {
+            sp = sp.sub(1); sp.write(0u64);
+        }
+        let initial_rsp = sp as u64;
+
+        let mut task = Task::new(id, initial_rsp);
+        task.rsp = initial_rsp;
+        task.stack_alloc = stack_base;
+        task.stack_size = stack_size as u64;
+        task.kernel_rsp_top = stack_top;
+        task.user_rsp = user_rsp;
+        task.cpu = cpu;
+        task.cr3 = cr3;
+        task.heap_brk = heap_brk;
+        task.uid = parent.uid;
+        task.gid = parent.gid;
+        task.euid = parent.euid;
+        task.egid = parent.egid;
+        task.uts_ns = new_uts_ns;
+        task.pid_ns = new_pid_ns;
+        task.mnt_ns = new_mnt_ns;
+
+        let mut tasks = TASKS.lock();
+        let mut placed = false;
+        for i in 0..MAX_TASKS {
+            if tasks.tasks[i].is_none() {
+                tasks.tasks[i] = Some(task);
+                placed = true;
+                TASK_COUNT.fetch_add(1, Ordering::Release);
+                break;
+            }
+        }
+        if !placed {
+            dealloc_stack(stack_base, stack_size);
+            return 0;
+        }
+    }
+
+    // Register in PID namespace if it's a new or existing non-root NS
+    if new_pid_ns != NS_ROOT {
+        zenus_ns::pid::register_task(new_pid_ns, id);
+    }
+
+    CPU_TASK_COUNT[cpu as usize].fetch_add(1, Ordering::SeqCst);
+    id
 }
 
 pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64, heap_base: u64) -> u64 {
@@ -535,10 +651,58 @@ pub fn list_tasks() -> [Option<TaskInfo>; MAX_TASKS] {
     let mut result: [Option<TaskInfo>; MAX_TASKS] = [None; MAX_TASKS];
     for (i, t) in tasks.tasks.iter().enumerate() {
         if let Some(ref task) = t {
-            result[i] = Some(TaskInfo { id: task.id, state: task.state, cpu: task.cpu, uid: task.uid, gid: task.gid });
+            result[i] = Some(TaskInfo {
+                id: task.id,
+                state: task.state,
+                cpu: task.cpu,
+                uid: task.uid,
+                gid: task.gid,
+                uts_ns: task.uts_ns,
+                pid_ns: task.pid_ns,
+            });
         }
     }
     result
+}
+
+/// Get the PID namespace of the current task.
+pub fn current_pid_ns() -> NsId {
+    let cpu = current_cpu();
+    let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    let tasks = TASKS.lock();
+    tasks.tasks[idx as usize].as_ref().map(|t| t.pid_ns).unwrap_or(0)
+}
+
+/// Get the mount namespace of the current task.
+pub fn current_mnt_ns() -> NsId {
+    let cpu = current_cpu();
+    let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    let tasks = TASKS.lock();
+    tasks.tasks[idx as usize].as_ref().map(|t| t.mnt_ns).unwrap_or(0)
+}
+
+/// Get the UTS namespace of the current task.
+pub fn current_uts_ns() -> NsId {
+    let cpu = current_cpu();
+    let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    let tasks = TASKS.lock();
+    tasks.tasks[idx as usize].as_ref().map(|t| t.uts_ns).unwrap_or(0)
+}
+
+/// Get the local PID for the current task within its PID namespace.
+pub fn current_local_pid() -> u64 {
+    let cpu = current_cpu();
+    let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    let tasks = TASKS.lock();
+    let (tid, pid_ns) = match tasks.tasks[idx as usize].as_ref() {
+        Some(t) => (t.id, t.pid_ns),
+        None => return 0,
+    };
+    drop(tasks);
+    if pid_ns == NS_ROOT || pid_ns == 0 {
+        return tid;
+    }
+    zenus_ns::pid::local_pid(pid_ns, tid).unwrap_or(tid)
 }
 
 pub fn current_uid() -> u32 {
@@ -811,13 +975,15 @@ pub fn task_exit() {
     let cpu = current_cpu();
     let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let mut tasks = TASKS.lock();
-    let (stack_alloc, stack_size, task_cpu, task_cr3) = {
+    let (stack_alloc, stack_size, task_cpu, task_cr3, task_pid_ns, task_id) = {
         let task = &tasks.tasks[current as usize];
         (
             task.as_ref().map(|t| t.stack_alloc),
             task.as_ref().map(|t| t.stack_size),
             task.as_ref().map(|t| t.cpu),
             task.as_ref().map(|t| t.cr3),
+            task.as_ref().map(|t| t.pid_ns),
+            task.as_ref().map(|t| t.id),
         )
     };
     if let (Some(sa), Some(ss), Some(tc)) = (stack_alloc, stack_size, task_cpu) {
@@ -834,6 +1000,11 @@ pub fn task_exit() {
             drop(list);
         }
         CPU_TASK_COUNT[tc as usize].fetch_sub(1, Ordering::SeqCst);
+    }
+    if let (Some(pid_ns), Some(tid)) = (task_pid_ns, task_id) {
+        if pid_ns != 0 {
+            zenus_ns::pid::unregister_task(pid_ns, tid);
+        }
     }
     // Free the user address space
     if let Some(cr3) = task_cr3 {
@@ -872,11 +1043,14 @@ pub fn kill_task(id: u64) -> bool {
         let task_info = {
             let t = &tasks.tasks[i];
             match t {
-                Some(tc) if tc.id == id && tc.is_active() => Some((tc.cpu, tc.stack_alloc, tc.stack_size, tc.cr3, tc.state)),
+                Some(tc) if tc.id == id && tc.is_active() => Some((tc.cpu, tc.stack_alloc, tc.stack_size, tc.cr3, tc.state, tc.pid_ns, tc.id)),
                 _ => None,
             }
         };
-        if let Some((task_cpu, stack_alloc, stack_size, cr3, state)) = task_info {
+        if let Some((task_cpu, stack_alloc, stack_size, cr3, state, pid_ns, tid)) = task_info {
+            if pid_ns != 0 {
+                zenus_ns::pid::unregister_task(pid_ns, tid);
+            }
             if state == TaskState::Running {
                 tasks.tasks[i] = None;
                 CPU_TASK_COUNT[task_cpu as usize].fetch_sub(1, Ordering::SeqCst);
