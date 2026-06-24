@@ -809,6 +809,7 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
     zenus_arch::watchdog::watchdog_tick();
+    zenus_arch::watchdog::watchdog_pet();
 
     let count = TASK_COUNT.load(Ordering::Acquire);
     if count <= 1 {

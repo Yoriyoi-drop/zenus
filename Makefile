@@ -2,6 +2,7 @@ ARCH ?= x86_64
 TARGET = $(ARCH)-unknown-none
 CARGO := cargo
 CARGO_FLAGS ?=
+SMP ?= 4
 BUILD_DIR := build
 PROFILE_DIR := $(if $(filter --release,$(CARGO_FLAGS)),release,debug)
 LIMINE_DIR := limine
@@ -78,17 +79,17 @@ img: $(KERNEL) $(INITRD)
 run: run-qemu
 
 run-bios: $(ISO)
-	qemu-system-x86_64 -serial mon:stdio -m 2G -cdrom $(ISO) -no-reboot \
+	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 run-uefi: $(ISO)
-	qemu-system-x86_64 -serial mon:stdio -m 2G -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -no-reboot \
+	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 run-qemu: run-bios
 
 run-qemu-gdb: $(ISO)
-	qemu-system-x86_64 -serial mon:stdio -m 2G -cdrom $(ISO) -s -S -no-reboot \
+	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(ISO) -s -S -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 # Test build — enables testing feature for unit tests
@@ -121,11 +122,11 @@ test-iso: $(BUILD_DIR)/zenus-test $(INITRD)
 	$(LIMINE_DIR)/limine bios-install $(BUILD_DIR)/zenus-test.iso
 
 test: test-iso
-	qemu-system-x86_64 -serial mon:stdio -m 2G -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
+	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
 		-drive file=ext2_test.img,format=raw,if=ide 2>&1
 
 test-quiet: test-iso
-	qemu-system-x86_64 -serial mon:stdio -m 2G -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
+	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
 		-drive file=ext2_test.img,format=raw,if=ide 2>&1 | grep -a "\[TEST\]"
 
 clean:

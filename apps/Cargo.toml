@@ -50,6 +50,7 @@ zutils_du = { path = "../zutils/crates/du" }
 zutils_chown = { path = "../zutils/crates/chown" }
 
 [features]
+default = ["smp"]
 smp = []
 testing = ["zenus-fs/testing", "zenus-mem/testing"]
 

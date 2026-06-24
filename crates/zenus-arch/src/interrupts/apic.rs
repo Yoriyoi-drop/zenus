@@ -1,5 +1,4 @@
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::instructions::interrupts;
 
 pub static LAPIC_VIRT_BASE: AtomicU64 = AtomicU64::new(0);
 
@@ -52,8 +51,15 @@ fn enable_lapic() {
     s.write_str("[APIC] SVR after enable=0x");
     s.write_hex(svr2 as u64);
     s.write_str("\n");
-    lapic_write(0x80, 0);              // TPR = 0: allow all interrupt priorities
+    // Mask all LVT entries to prevent spurious interrupts
+    lapic_write(0x2F0, 0x0100FF);      // CMCI: masked
+    lapic_write(0x320, 0x00010000);    // Timer: masked
+    lapic_write(0x330, 0x0100FF);      // Thermal: masked
+    lapic_write(0x340, 0x0100FF);      // Performance Counter: masked
     lapic_write(0x350, 0x0100FF);      // LINT0: masked (bit 16), vector 0xFF
+    lapic_write(0x360, 0x0100FF);      // LINT1: masked (bit 16), vector 0xFF
+    lapic_write(0x370, 0x0100FF);      // Error: masked
+    lapic_write(0x380, 0);             // Timer initial count = 0 (no fire)
 }
 
 pub fn eoi() {
@@ -67,14 +73,22 @@ pub extern "C" fn apic_timer_eoi() {
 
 pub fn init_timer(vector: u8) {
     lapic_write(0x3E0, 0xB);          // divide by 1
-    lapic_write(0x380, 100_000);      // count = 100K, ~1ms at 100MHz bus
-    lapic_write(0x320, vector as u32 | 0x20000); // periodic mode
+    // Use conservative count that works across QEMU (TCG/KVM) and real HW:
+    // - 100MHz bus (QEMU TCG): ~1ms per tick (1000 Hz)
+    // - 2-3GHz bus (KVM/real): ~33-50μs per tick (20-30 KHz)
+    // Both are fine for preemptive multitasking with TIME_SLICE=5.
+    lapic_write(0x380, 100_000);
+    lapic_write(0x320, vector as u32 | 0x20000); // periodic mode, unmasked
 }
 
 pub fn init_timer_ap(vector: u8) {
     lapic_write(0x3E0, 0xB);
+    lapic_write(0x380, 0);
+    lapic_write(0x320, 0x00010000);
     lapic_write(0x380, 100_000);
-    lapic_write(0x320, vector as u32 | 0x20000);
+    // Keep timer MASKED initially — BSP will broadcast IPI to start AP timers
+    // after all APs have signaled readiness.
+    lapic_write(0x320, vector as u32 | 0x20000 | 0x10000);
 }
 
 pub fn send_ipi(cpu_id: u8, vector: u8) {

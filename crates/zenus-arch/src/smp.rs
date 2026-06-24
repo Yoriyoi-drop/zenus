@@ -91,25 +91,18 @@ pub fn wake_aps() {
 pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
     crate::cpu::enable_sse();
     crate::gdt::init_ap();
-    // Get CPU number from pre-populated CPU_TABLE using LAPIC ID
     let cpu_id = cpu_number_for_apic(info.lapic_id);
     crate::cpu::init_syscall_ap(cpu_id);
 
     let apic_base = unsafe { crate::cpu::read_msr(0x1B) & 0xFFFFF000 };
-    let hhdm = crate::limine::HHDM_REQUEST.response;
-    let hhdm_offset = if hhdm.is_null() { 0 } else {
-        unsafe { (&*hhdm.as_ptr::<limine::LimineHhdmResponse>()).offset }
-    };
+    let hhdm_offset = crate::limine::hhdm_offset();
     crate::interrupts::apic::init_ap(apic_base + hhdm_offset);
 
     x86_64::instructions::interrupts::enable();
     crate::interrupts::apic::init_timer_ap(48);
 
     AP_READY_COUNT.fetch_add(1, Ordering::Release);
-
-    SerialPort::new(0x3F8).write_str("[AP] CPU ");
-    SerialPort::new(0x3F8).write_u64(info.lapic_id as u64);
-    SerialPort::new(0x3F8).write_str(" started\n");
+    SerialPort::new(0x3F8).write_str("[AP] CPU started\n");
 
     let idle_fn = unsafe { AP_IDLE_FN };
     if let Some(f) = idle_fn {
