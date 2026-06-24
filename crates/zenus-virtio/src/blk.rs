@@ -169,11 +169,14 @@ impl VirtioBlk {
         self.queue.submit(d0);
         self.queue.kick();
 
-        for _ in 0..50000 {
+        for i in 0..10000 {
             if let Some((_id, _len)) = self.queue.collect_used() {
                 break;
             }
             core::hint::spin_loop();
+            if i & 0xFF == 0 {
+                x86_64::instructions::hlt();
+            }
         }
 
         BLK_BUF_BUSY[buf_idx as usize] = false;
@@ -233,11 +236,14 @@ impl VirtioBlk {
         self.queue.submit(d0);
         self.queue.kick();
 
-        for _ in 0..50000 {
+        for i in 0..10000 {
             if let Some((_id, _len)) = self.queue.collect_used() {
                 break;
             }
             core::hint::spin_loop();
+            if i & 0xFF == 0 {
+                x86_64::instructions::hlt();
+            }
         }
 
         BLK_BUF_BUSY[buf_idx as usize] = false;

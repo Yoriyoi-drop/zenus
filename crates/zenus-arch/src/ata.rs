@@ -37,18 +37,21 @@ static ATA_DEVICES: zenus_sync::spinlock::SpinLock<[Option<AtaDevice>; MAX_ATA_D
 static ATA_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 fn ata_wait_busy(io_base: u16) -> bool {
-    for _ in 0..1000 {
+    for i in 0..1000 {
         let status: u8 = unsafe { Port::new(io_base + 7).read() };
         if status & STATUS_BSY == 0 {
             return true;
         }
         core::hint::spin_loop();
+        if i & 0x7F == 0 {
+            x86_64::instructions::hlt();
+        }
     }
     false
 }
 
 fn ata_wait_drq(io_base: u16) -> bool {
-    for _ in 0..1000 {
+    for i in 0..1000 {
         let status: u8 = unsafe { Port::new(io_base + 7).read() };
         if status & STATUS_BSY == 0 {
             if status & STATUS_ERR != 0 {
@@ -59,6 +62,9 @@ fn ata_wait_drq(io_base: u16) -> bool {
             }
         }
         core::hint::spin_loop();
+        if i & 0x7F == 0 {
+            x86_64::instructions::hlt();
+        }
     }
     false
 }
@@ -226,10 +232,15 @@ pub fn read_sectors(dev_idx: usize, lba: u64, count: u16, buf: &mut [u8]) -> boo
             return false;
         }
 
-        for i in 0..256 {
-            let word: u16 = unsafe { Port::new(io_base).read() };
-            buf[offset + i * 2] = (word & 0xFF) as u8;
-            buf[offset + i * 2 + 1] = (word >> 8) as u8;
+        unsafe {
+            let ptr = buf.as_mut_ptr().add(offset);
+            core::arch::asm!(
+                "rep insw",
+                in("dx") io_base,
+                in("rcx") 256u64,
+                inout("rdi") ptr => _,
+                options(nostack, preserves_flags)
+            );
         }
     }
 
@@ -277,9 +288,15 @@ pub fn write_sectors(dev_idx: usize, lba: u64, count: u16, buf: &[u8]) -> bool {
             return false;
         }
 
-        for i in 0..256 {
-            let word = (buf[offset + i * 2] as u16) | ((buf[offset + i * 2 + 1] as u16) << 8);
-            unsafe { Port::new(io_base).write(word); }
+        unsafe {
+            let ptr = buf.as_ptr().add(offset);
+            core::arch::asm!(
+                "rep outsw",
+                in("dx") io_base,
+                in("rcx") 256u64,
+                inout("rsi") ptr => _,
+                options(nostack, preserves_flags)
+            );
         }
 
         if !ata_wait_busy(io_base) {

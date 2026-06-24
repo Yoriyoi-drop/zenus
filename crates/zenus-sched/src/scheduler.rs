@@ -25,11 +25,34 @@ static TASKS: SpinLock<TaskArray> = SpinLock::new(TaskArray::new());
 
 struct TaskArray {
     tasks: [Option<Task>; MAX_TASKS],
+    next_free: usize,
 }
 
 impl TaskArray {
     const fn new() -> Self {
-        TaskArray { tasks: [None; MAX_TASKS] }
+        TaskArray { tasks: [None; MAX_TASKS], next_free: 0 }
+    }
+
+    fn find_free(&mut self) -> Option<usize> {
+        for i in self.next_free..MAX_TASKS {
+            if self.tasks[i].is_none() {
+                self.next_free = i + 1;
+                return Some(i);
+            }
+        }
+        for i in 0..self.next_free {
+            if self.tasks[i].is_none() {
+                self.next_free = i + 1;
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    fn mark_freed(&mut self, idx: usize) {
+        if idx < self.next_free {
+            self.next_free = idx;
+        }
     }
 }
 
@@ -344,18 +367,15 @@ pub fn clone_task(
         task.mnt_ns = new_mnt_ns;
 
         let mut tasks = TASKS.lock();
-        let mut placed = false;
-        for i in 0..MAX_TASKS {
-            if tasks.tasks[i].is_none() {
+        match tasks.find_free() {
+            Some(i) => {
                 tasks.tasks[i] = Some(task);
-                placed = true;
                 TASK_COUNT.fetch_add(1, Ordering::Release);
-                break;
             }
-        }
-        if !placed {
-            dealloc_stack(stack_base, stack_size);
-            return 0;
+            None => {
+                dealloc_stack(stack_base, stack_size);
+                return 0;
+            }
         }
     }
 
@@ -422,18 +442,15 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64, 
         task.heap_brk = heap_brk;
 
         let mut tasks = TASKS.lock();
-        let mut placed = false;
-        for i in 0..MAX_TASKS {
-            if tasks.tasks[i].is_none() {
+        match tasks.find_free() {
+            Some(i) => {
                 tasks.tasks[i] = Some(task);
-                placed = true;
                 TASK_COUNT.fetch_add(1, Ordering::Release);
-                break;
             }
-        }
-        if !placed {
-            dealloc_stack(stack_base, stack_size);
-            return 0;
+            None => {
+                dealloc_stack(stack_base, stack_size);
+                return 0;
+            }
         }
     }
 
@@ -470,18 +487,15 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
         task.cpu = cpu;
 
         let mut tasks = TASKS.lock();
-        let mut placed = false;
-        for i in 0..MAX_TASKS {
-            if tasks.tasks[i].is_none() {
+        match tasks.find_free() {
+            Some(i) => {
                 tasks.tasks[i] = Some(task);
-                placed = true;
                 TASK_COUNT.fetch_add(1, Ordering::Release);
-                break;
             }
-        }
-        if !placed {
-            dealloc_stack(stack_base, stack_size);
-            return 0;
+            None => {
+                dealloc_stack(stack_base, stack_size);
+                return 0;
+            }
         }
     }
 
@@ -1022,15 +1036,9 @@ pub fn task_exit() {
             zenus_mem::paging::destroy_address_space(cr3);
         }
     }
+    tasks.mark_freed(current as usize);
     tasks.tasks[current as usize] = None;
-    let mut new_count = 1u32;
-    for scan in (1..MAX_TASKS).rev() {
-        if tasks.tasks[scan].is_some() {
-            new_count = (scan + 1) as u32;
-            break;
-        }
-    }
-    TASK_COUNT.store(new_count, Ordering::Release);
+    TASK_COUNT.fetch_sub(1, Ordering::Release);
     drop(tasks);
     loop { x86_64::instructions::hlt(); }
 }
@@ -1061,6 +1069,7 @@ pub fn kill_task(id: u64) -> bool {
             if pid_ns != 0 {
                 zenus_ns::pid::unregister_task(pid_ns, tid);
             }
+            tasks.mark_freed(i);
             if state == TaskState::Running {
                 tasks.tasks[i] = None;
                 CPU_TASK_COUNT[task_cpu as usize].fetch_sub(1, Ordering::SeqCst);
@@ -1076,14 +1085,7 @@ pub fn kill_task(id: u64) -> bool {
                 if cr3 != 0 {
                     zenus_mem::paging::destroy_address_space(cr3);
                 }
-                let mut new_count = 1u32;
-                for scan in (1..MAX_TASKS).rev() {
-                    if tasks.tasks[scan].is_some() {
-                        new_count = (scan + 1) as u32;
-                        break;
-                    }
-                }
-                TASK_COUNT.store(new_count, Ordering::Release);
+                TASK_COUNT.fetch_sub(1, Ordering::Release);
                 return true;
             }
             tasks.tasks[i] = None;
@@ -1101,14 +1103,7 @@ pub fn kill_task(id: u64) -> bool {
             if cr3 != 0 {
                 zenus_mem::paging::destroy_address_space(cr3);
             }
-            let mut new_count = 1u32;
-            for scan in (1..MAX_TASKS).rev() {
-                if tasks.tasks[scan].is_some() {
-                    new_count = (scan + 1) as u32;
-                    break;
-                }
-            }
-            TASK_COUNT.store(new_count, Ordering::Release);
+            TASK_COUNT.fetch_sub(1, Ordering::Release);
             return true;
         }
     }

@@ -1,4 +1,5 @@
 use x86_64::instructions::port::Port;
+use x86_64::instructions::interrupts;
 use crate::limine;
 
 const KBD_CMD: u16 = 0x64;
@@ -6,6 +7,17 @@ const KBD_CMD: u16 = 0x64;
 const KBD_DATA: u16 = 0x60;
 
 const KBD_RESET_CPU: u8 = 0xFE;
+
+fn efficient_wait(iterations: u64) {
+    for i in 0..iterations {
+        core::hint::spin_loop();
+        if i & 0xFF == 0 {
+            interrupts::enable();
+            x86_64::instructions::hlt();
+            interrupts::disable();
+        }
+    }
+}
 
 pub fn reboot_via_keyboard() -> ! {
     let s = zenus_console::serial::SerialPort::new(0x3F8);
@@ -26,7 +38,7 @@ pub fn reboot_via_keyboard() -> ! {
                         s.write_str("[ACPI] Rebooting via ACPI reset register...\n");
                         let mut p = Port::<u8>::new(reg_addr as u16);
                         p.write(reset_val);
-                        for _ in 0..10000000 { core::hint::spin_loop(); }
+                        efficient_wait(1000);
                     }
                 }
             }
@@ -38,9 +50,9 @@ pub fn reboot_via_keyboard() -> ! {
         s.write_str("[ACPI] Rebooting via 0xCF9 reset port...\n");
         let mut p = Port::<u8>::new(0xCF9);
         p.write(0x06);
-        for _ in 0..10000000 { core::hint::spin_loop(); }
+        efficient_wait(1000);
         p.write(0x0E);
-        for _ in 0..10000000 { core::hint::spin_loop(); }
+        efficient_wait(1000);
     }
 
     // Try keyboard controller with proper status check
@@ -52,7 +64,7 @@ pub fn reboot_via_keyboard() -> ! {
             core::arch::asm!("in al, dx", out("al") st, in("dx") 0x64u16);
             if st & 0x02 == 0 {
                 status.write(KBD_RESET_CPU);
-                for _ in 0..10000000 { core::hint::spin_loop(); }
+                efficient_wait(1000);
             }
         }
     }

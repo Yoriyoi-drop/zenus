@@ -144,6 +144,7 @@ impl Shell {
                 let b = zenus_arch::keyboard::read_key().unwrap_or(0);
                 Some(b)
             } else {
+                zenus_sched::scheduler::yield_now();
                 None
             };
 
