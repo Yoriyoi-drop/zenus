@@ -11,7 +11,7 @@ static WDT_TIMEOUT_SECS: AtomicU32 = AtomicU32::new(30);
 static WDT_LAST_PET: AtomicU64 = AtomicU64::new(0);
 static WDT_TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
-const TICKS_PER_SEC: u64 = 100;
+const TICKS_PER_SEC: u64 = 1000;
 
 pub fn watchdog_init(wdt_type: WatchdogType, timeout_secs: u32) -> bool {
     if WDT_ENABLED.load(Ordering::SeqCst) {

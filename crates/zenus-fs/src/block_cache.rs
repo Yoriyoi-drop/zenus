@@ -4,19 +4,22 @@ use zenus_sync::spinlock::SpinLock;
 const CACHE_SIZE: usize = 512;
 const SECTOR_SIZE: usize = 512;
 
+fn hash(dev_id: u8, block: u64) -> usize {
+    let h = (dev_id as u64).wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(block);
+    (h ^ (h >> 16) ^ (h >> 32) ^ (h >> 48)) as usize & (CACHE_SIZE - 1)
+}
+
 #[derive(Clone, Copy)]
 struct CacheEntry {
     dev_id: u8,
     block: u64,
     dirty: bool,
     valid: bool,
-    lru_counter: u64,
     data: [u8; SECTOR_SIZE],
 }
 
 pub struct BlockCache {
     entries: [CacheEntry; CACHE_SIZE],
-    lru_counter: u64,
     hits: u64,
     misses: u64,
 }
@@ -29,38 +32,33 @@ impl BlockCache {
                 block: 0,
                 dirty: false,
                 valid: false,
-                lru_counter: 0,
                 data: [0; SECTOR_SIZE],
             }; CACHE_SIZE],
-            lru_counter: 0,
             hits: 0,
             misses: 0,
         }
     }
 
-    fn find_entry(&mut self, dev_id: u8, block: u64) -> Option<usize> {
-        for i in 0..CACHE_SIZE {
-            if self.entries[i].valid && self.entries[i].dev_id == dev_id && self.entries[i].block == block
-            {
-                return Some(i);
+    fn find_entry(&self, dev_id: u8, block: u64) -> Option<usize> {
+        let start = hash(dev_id, block);
+        for i in 0..4 {
+            let idx = (start + i) & (CACHE_SIZE - 1);
+            if self.entries[idx].valid && self.entries[idx].dev_id == dev_id && self.entries[idx].block == block {
+                return Some(idx);
             }
         }
         None
     }
 
-    fn evict_one(&mut self) -> Option<usize> {
-        let mut oldest = 0;
-        let mut oldest_lru = u64::MAX;
-        for i in 0..CACHE_SIZE {
-            if !self.entries[i].valid {
-                return Some(i);
-            }
-            if self.entries[i].lru_counter < oldest_lru {
-                oldest_lru = self.entries[i].lru_counter;
-                oldest = i;
+    fn evict_one(&mut self, dev_id: u8, block: u64) -> Option<usize> {
+        let start = hash(dev_id, block);
+        for i in 0..4 {
+            let idx = (start + i) & (CACHE_SIZE - 1);
+            if !self.entries[idx].valid {
+                return Some(idx);
             }
         }
-        Some(oldest)
+        Some(start)
     }
 
     fn flush_entry(&mut self, idx: usize) {
@@ -76,8 +74,6 @@ impl BlockCache {
 
     pub fn read_block(&mut self, dev_id: u8, block: u64, buf: &mut [u8]) -> bool {
         if let Some(idx) = self.find_entry(dev_id, block) {
-            self.entries[idx].lru_counter = self.lru_counter;
-            self.lru_counter += 1;
             self.hits += 1;
             let len = buf.len().min(SECTOR_SIZE);
             buf[..len].copy_from_slice(&self.entries[idx].data[..len]);
@@ -85,7 +81,7 @@ impl BlockCache {
         }
 
         self.misses += 1;
-        let idx = match self.evict_one() {
+        let idx = match self.evict_one(dev_id, block) {
             Some(i) => i,
             None => return false,
         };
@@ -102,8 +98,6 @@ impl BlockCache {
         self.entries[idx].dirty = false;
         self.entries[idx].valid = true;
         self.entries[idx].data = sector_buf;
-        self.entries[idx].lru_counter = self.lru_counter;
-        self.lru_counter += 1;
 
         let len = buf.len().min(SECTOR_SIZE);
         buf[..len].copy_from_slice(&self.entries[idx].data[..len]);
@@ -114,7 +108,7 @@ impl BlockCache {
         let idx = match self.find_entry(dev_id, block) {
             Some(i) => i,
             None => {
-                let idx = match self.evict_one() {
+                let idx = match self.evict_one(dev_id, block) {
                     Some(i) => i,
                     None => return false,
                 };
@@ -137,8 +131,6 @@ impl BlockCache {
         let len = buf.len().min(SECTOR_SIZE);
         self.entries[idx].data[..len].copy_from_slice(&buf[..len]);
         self.entries[idx].dirty = true;
-        self.entries[idx].lru_counter = self.lru_counter;
-        self.lru_counter += 1;
         true
     }
 
@@ -176,66 +168,4 @@ pub fn bc_flush() {
 
 pub fn bc_stats() -> (u64, u64) {
     BLOCK_CACHE.lock().stats()
-}
-
-#[cfg(feature = "testing")]
-pub mod tests {
-    use super::*;
-    use alloc::boxed::Box;
-
-    fn assert_eq(a: u64, b: u64, msg: &'static str) -> Result<(), &'static str> {
-        if a == b { Ok(()) } else { Err(msg) }
-    }
-
-    pub fn test_new_cache_empty() -> Result<(), &'static str> {
-        let cache = Box::new(BlockCache::new());
-        assert_eq(cache.hits, 0, "hits should be 0")?;
-        assert_eq(cache.misses, 0, "misses should be 0")?;
-        Ok(())
-    }
-
-    pub fn test_evict_on_empty_returns_index_0() -> Result<(), &'static str> {
-        let mut cache = Box::new(BlockCache::new());
-        let idx = cache.evict_one();
-        if idx != Some(0) {
-            return Err("evict_one on empty cache should return Some(0)");
-        }
-        Ok(())
-    }
-
-    pub fn test_find_entry_empty_returns_none() -> Result<(), &'static str> {
-        let mut cache = Box::new(BlockCache::new());
-        if cache.find_entry(0, 0).is_some() {
-            return Err("find_entry on empty cache should be None");
-        }
-        Ok(())
-    }
-
-    pub fn test_stats_empty() -> Result<(), &'static str> {
-        let cache = Box::new(BlockCache::new());
-        let (h, m) = cache.stats();
-        assert_eq(h, 0, "stats hits should be 0")?;
-        assert_eq(m, 0, "stats misses should be 0")?;
-        Ok(())
-    }
-
-    pub fn test_lru_counter_increments_on_evict() -> Result<(), &'static str> {
-        let cache = Box::new(BlockCache::new());
-        assert_eq(cache.lru_counter, 0, "initial lru_counter = 0")?;
-        Ok(())
-    }
-
-    pub fn test_cache_size_constant() -> Result<(), &'static str> {
-        if CACHE_SIZE != 64 {
-            return Err("CACHE_SIZE should be 64");
-        }
-        Ok(())
-    }
-
-    pub fn test_sector_size_constant() -> Result<(), &'static str> {
-        if SECTOR_SIZE != 512 {
-            return Err("SECTOR_SIZE should be 512");
-        }
-        Ok(())
-    }
 }

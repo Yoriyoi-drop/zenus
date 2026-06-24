@@ -6,7 +6,7 @@ use zenus_sync::spinlock::SpinLock;
 
 static HEAP_LOCK: SpinLock<()> = SpinLock::new(());
 
-const HEAP_SIZE: usize = 1024 * 1024 * 64;
+const HEAP_SIZE: usize = 1024 * 1024 * 128;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 const HEADER_SIZE: usize = core::mem::size_of::<BlockHeader>();
@@ -53,7 +53,7 @@ impl FreeListAllocator {
         self.initialized.store(true, Ordering::Release);
 
         let s = SerialPort::new(0x3F8);
-        s.write_str("[OK] Heap: 64MB free-list allocator ready\n");
+        s.write_str("[OK] Heap: 128MB free-list allocator ready\n");
     }
 
     fn alloc_mut(&self, layout: Layout) -> *mut u8 {

@@ -7,7 +7,7 @@ use zenus_ns::{NsId, NS_ROOT};
 
 static IDLE_RSP: AtomicU64 = AtomicU64::new(0);
 
-pub const TIME_SLICE: u64 = 1;
+pub const TIME_SLICE: u64 = 5;
 const MAX_CPUS: usize = 8;
 
 static CURRENT_TASK: [AtomicU32; MAX_CPUS] = [

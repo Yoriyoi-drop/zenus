@@ -59,25 +59,18 @@ pub fn clear(hhdm_offset: u64) {
 
 fn scroll(hhdm_offset: u64) {
     let base = vga_base(hhdm_offset);
+    let line_bytes = WIDTH * 2;
     unsafe {
         for row in 1..HEIGHT {
-            for col in 0..WIDTH {
-                let src_off = ((row * WIDTH + col) * 2) as isize;
-                let dst_off = (((row - 1) * WIDTH + col) * 2) as isize;
-                core::ptr::write_volatile(
-                    base.offset(dst_off),
-                    core::ptr::read_volatile(base.offset(src_off)),
-                );
-                core::ptr::write_volatile(
-                    base.offset(dst_off + 1),
-                    core::ptr::read_volatile(base.offset(src_off + 1)),
-                );
-            }
+            let src = base.offset((row * line_bytes) as isize);
+            let dst = base.offset(((row - 1) * line_bytes) as isize);
+            core::ptr::copy_nonoverlapping(src, dst, line_bytes);
         }
+        let last_line = base.offset(((HEIGHT - 1) * line_bytes) as isize);
+        let attr = ATTR.load(Ordering::Relaxed) as u8;
         for col in 0..WIDTH {
-            let off = (((HEIGHT - 1) * WIDTH + col) * 2) as isize;
-            core::ptr::write_volatile(base.offset(off), b' ');
-            core::ptr::write_volatile(base.offset(off + 1), ATTR.load(Ordering::Relaxed) as u8);
+            core::ptr::write_volatile(last_line.add(col * 2), b' ');
+            core::ptr::write_volatile(last_line.add(col * 2 + 1), attr);
         }
     }
 }

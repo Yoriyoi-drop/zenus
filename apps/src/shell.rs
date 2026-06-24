@@ -31,12 +31,19 @@ impl Shell {
     }
 
     fn write_str(&mut self, s: &str) {
-        self.serial.write_str(s);
+        self.serial.write_str_noirq(s);
         zenus_console::vga::write_str(s, self.hhdm_offset);
     }
 
     fn write_byte(&mut self, b: u8) {
-        self.serial.write_byte_serial(b);
+        self.serial.write_str_noirq(core::str::from_utf8(&[b]).unwrap_or(""));
+        let arr = [b];
+        if let Ok(s) = core::str::from_utf8(&arr) {
+            zenus_console::vga::write_str(s, self.hhdm_offset);
+        }
+    }
+
+    fn write_vga_only(&mut self, b: u8) {
         let arr = [b];
         if let Ok(s) = core::str::from_utf8(&arr) {
             zenus_console::vga::write_str(s, self.hhdm_offset);
@@ -74,6 +81,7 @@ impl Shell {
     fn read_line(&mut self) -> Option<&'static str> {
         static mut BUF: [u8; MAX_LINE] = [0; MAX_LINE];
         static mut POS: usize = 0;
+        let mut idle_count = 0u64;
 
         unsafe { POS = 0 };
 
@@ -109,15 +117,18 @@ impl Shell {
                             if POS < MAX_LINE - 1 {
                                 BUF[POS] = c;
                                 POS += 1;
-                                self.write_byte(c);
+                                self.write_vga_only(c);
                             }
                         }
                     }
                     _ => {}
                 }
             } else {
-                zenus_net::nic::net_poll();
-                Self::echo_server_poll();
+                idle_count += 1;
+                if idle_count % 10 == 0 {
+                    zenus_net::nic::net_poll();
+                    Self::echo_server_poll();
+                }
                 if !zenus_arch::keyboard::is_key_available() {
                     zenus_sched::scheduler::yield_now();
                 }

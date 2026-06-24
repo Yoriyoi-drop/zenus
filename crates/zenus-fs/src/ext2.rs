@@ -348,7 +348,6 @@ impl Ext2Fs {
                 let mut bgd = self.read_bgdt(0)?;
                 bgd.free_blocks_count -= 1;
                 self.write_bgdt(0, &bgd);
-                crate::block_cache::bc_flush();
                 return Some(i as u32);
             }
         }
@@ -419,7 +418,6 @@ impl Ext2Fs {
                 return false;
             }
         }
-        crate::block_cache::bc_flush();
         true
     }
 }
@@ -521,7 +519,6 @@ impl FileSystem for Ext2Fs {
             raw.size_low = new_size as u32;
         }
         self.write_inode_raw(inode, &raw);
-        crate::block_cache::bc_flush();
         Some(written)
     }
 

@@ -45,6 +45,16 @@ impl SerialPort {
         self.read_byte(self.port + 5) & 0x20 != 0
     }
 
+    fn tx_ready(&self) -> bool {
+        self.read_byte(self.port + 5) & 0x20 != 0
+    }
+
+    fn wait_tx_ready(&self) {
+        while !self.tx_ready() {
+            core::hint::spin_loop();
+        }
+    }
+
     pub fn is_data_available(&self) -> bool {
         self.read_byte(self.port + 5) & 0x01 != 0
     }
@@ -57,22 +67,66 @@ impl SerialPort {
     }
 
     pub fn write_byte_serial(&self, byte: u8) {
-        while !self.is_transmit_empty() {
-            core::hint::spin_loop();
-        }
+        self.wait_tx_ready();
         self.write_byte(byte);
+    }
+
+    fn write_batch_raw(&self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_byte(b);
+        }
+        self.wait_tx_ready();
     }
 
     pub fn write_str(&self, s: &str) {
         let _guard = SERIAL_LOCK.lock();
+        let mut buf = [0u8; 16];
+        let mut pos = 0usize;
         for byte in s.bytes() {
-            match byte {
-                0x0A => {
-                    self.write_byte_serial(0x0D);
-                    self.write_byte_serial(0x0A);
+            if byte == 0x0A {
+                if pos + 2 > 16 {
+                    self.write_batch_raw(&buf[..pos]);
+                    pos = 0;
                 }
-                _ => self.write_byte_serial(byte),
+                buf[pos] = 0x0D; pos += 1;
+                buf[pos] = 0x0A; pos += 1;
+            } else {
+                if pos >= 16 {
+                    self.write_batch_raw(&buf[..pos]);
+                    pos = 0;
+                }
+                buf[pos] = byte; pos += 1;
             }
+        }
+        if pos > 0 {
+            self.write_batch_raw(&buf[..pos]);
+        }
+    }
+
+    /// Like write_str but uses lock_no_irq() so interrupts stay enabled
+    /// during serial I/O. Use from non-ISR context (e.g. shell).
+    pub fn write_str_noirq(&self, s: &str) {
+        let _guard = SERIAL_LOCK.lock_no_irq();
+        let mut buf = [0u8; 16];
+        let mut pos = 0usize;
+        for byte in s.bytes() {
+            if byte == 0x0A {
+                if pos + 2 > 16 {
+                    self.write_batch_raw(&buf[..pos]);
+                    pos = 0;
+                }
+                buf[pos] = 0x0D; pos += 1;
+                buf[pos] = 0x0A; pos += 1;
+            } else {
+                if pos >= 16 {
+                    self.write_batch_raw(&buf[..pos]);
+                    pos = 0;
+                }
+                buf[pos] = byte; pos += 1;
+            }
+        }
+        if pos > 0 {
+            self.write_batch_raw(&buf[..pos]);
         }
     }
 
@@ -105,16 +159,39 @@ impl SerialPort {
         }
     }
 
+    pub fn write_u64_noirq(&self, val: u64) {
+        let mut buf = [0u8; 20];
+        let mut i = 0;
+        let mut v = val;
+        let _guard = SERIAL_LOCK.lock_no_irq();
+        if v == 0 {
+            self.write_byte_serial(b'0');
+            return;
+        }
+        while v > 0 {
+            buf[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            i += 1;
+        }
+        while i > 0 {
+            i -= 1;
+            self.write_byte_serial(buf[i]);
+        }
+    }
+
     pub fn write_bytes(&self, buf: &[u8]) {
         let _guard = SERIAL_LOCK.lock();
-        for &byte in buf {
-            match byte {
-                0x0A => {
-                    self.write_byte_serial(0x0D);
-                    self.write_byte_serial(0x0A);
+        for chunk in buf.chunks(16) {
+            for &byte in chunk {
+                match byte {
+                    0x0A => {
+                        self.write_byte(0x0D);
+                        self.write_byte(0x0A);
+                    }
+                    _ => self.write_byte(byte),
                 }
-                _ => self.write_byte_serial(byte),
             }
+            self.wait_tx_ready();
         }
     }
 
