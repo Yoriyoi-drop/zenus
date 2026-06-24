@@ -13,6 +13,7 @@ SECTIONS {
     __text_start = .;
     .text : ALIGN(4K) {
         KEEP(*(.limine_reqs))
+        KEEP(*(.text._sched_idle_asm))
         . = ALIGN(4K);
         *(.text .text.*)
         . = ALIGN(4K);
@@ -20,6 +21,7 @@ SECTIONS {
     __text_end = .;
 
     .rodata : ALIGN(4K) {
+        KEEP(*(.text._sched_idle_ref))
         *(.rodata .rodata.*)
         *(.got)
         *(.got.plt)
