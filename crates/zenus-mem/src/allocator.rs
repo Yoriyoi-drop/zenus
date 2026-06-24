@@ -19,7 +19,10 @@ struct BlockHeader {
     magic: u64,
     size: usize,
     next: *mut BlockHeader,
+    canary: u64,
 }
+
+const CANARY_VALUE: u64 = 0xDEADBEEF_CAFEBABE;
 
 pub struct FreeListAllocator {
     free_head: AtomicUsize,
@@ -47,6 +50,7 @@ impl FreeListAllocator {
                 magic: MAGIC_FREE,
                 size: HEAP_SIZE - HEADER_SIZE,
                 next: ptr::null_mut(),
+                canary: CANARY_VALUE,
             });
         }
         self.free_head.store(heap_start as usize, Ordering::Release);
@@ -76,8 +80,10 @@ impl FreeListAllocator {
                 let needed = pad + size;
 
                 if needed <= block_size {
-                    let pad_ptr = (aligned_data as *mut usize).sub(1);
-                    *pad_ptr = pad;
+                    if pad > 0 {
+                        let pad_ptr = (aligned_data as *mut usize).sub(1);
+                        *pad_ptr = pad;
+                    }
 
                     let remaining = block_size - needed;
                     if remaining >= HEADER_SIZE + MIN_BLOCK {
@@ -86,6 +92,7 @@ impl FreeListAllocator {
                             magic: MAGIC_FREE,
                             size: remaining - HEADER_SIZE,
                             next: (*block).next,
+                            canary: CANARY_VALUE,
                         });
 
                         if prev == 0 {
@@ -132,11 +139,19 @@ impl FreeListAllocator {
 
         if ptr.is_null() { return; }
 
-        let pad = unsafe { *((ptr as *const usize).sub(1)) as usize };
+        let raw = unsafe { *((ptr as *const usize).sub(1)) as usize };
+        let pad = if raw == CANARY_VALUE as usize { 0 } else { raw };
         let block = (ptr as usize - HEADER_SIZE - pad) as *mut BlockHeader;
 
         unsafe {
             if (*block).magic == MAGIC_FREE {
+                return;
+            }
+            if (*block).canary != CANARY_VALUE {
+                let s = SerialPort::new(0x3F8);
+                s.write_str("[HEAP] Canary corrupted! Block at 0x");
+                s.write_hex(block as usize as u64);
+                s.write_str("\n");
                 return;
             }
         }

@@ -43,7 +43,7 @@ pub extern "x86-interrupt" fn interrupt_spurious(_frame: InterruptStackFrame) {
 
 #[no_mangle]
 pub extern "x86-interrupt" fn interrupt_nic(_frame: InterruptStackFrame) {
-    let ptr = NIC_IRQ_HANDLER.load(core::sync::atomic::Ordering::Relaxed);
+    let ptr = NIC_IRQ_HANDLER.load(core::sync::atomic::Ordering::Acquire);
     if ptr != 0 && ptr_in_text(ptr) {
         let handler: fn() = unsafe { core::mem::transmute_copy(&ptr) };
         handler();

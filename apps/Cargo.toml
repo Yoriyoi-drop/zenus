@@ -18,6 +18,36 @@ zenus-syscall = { path = "../crates/zenus-syscall" }
 zenus-virtio = { path = "../crates/zenus-virtio" }
 zenus-ns = { path = "../crates/zenus-ns" }
 x86_64 = { workspace = true }
+zutils_common = { path = "../zutils/crates/common" }
+zutils_help = { path = "../zutils/crates/help" }
+zutils_echo = { path = "../zutils/crates/echo" }
+zutils_uname = { path = "../zutils/crates/uname" }
+zutils_ls = { path = "../zutils/crates/ls" }
+zutils_cat = { path = "../zutils/crates/cat" }
+zutils_ps = { path = "../zutils/crates/ps" }
+zutils_id = { path = "../zutils/crates/id" }
+zutils_whoami = { path = "../zutils/crates/whoami" }
+zutils_ifconfig = { path = "../zutils/crates/ifconfig" }
+zutils_meminfo = { path = "../zutils/crates/meminfo" }
+zutils_dmesg = { path = "../zutils/crates/dmesg" }
+zutils_clear = { path = "../zutils/crates/clear" }
+zutils_timer = { path = "../zutils/crates/timer" }
+zutils_mkdir = { path = "../zutils/crates/mkdir" }
+zutils_rm = { path = "../zutils/crates/rm" }
+zutils_touch = { path = "../zutils/crates/touch" }
+zutils_chmod = { path = "../zutils/crates/chmod" }
+zutils_cp = { path = "../zutils/crates/cp" }
+zutils_mv = { path = "../zutils/crates/mv" }
+zutils_reboot = { path = "../zutils/crates/reboot" }
+zutils_shutdown = { path = "../zutils/crates/shutdown" }
+zutils_mount = { path = "../zutils/crates/mount" }
+zutils_kill = { path = "../zutils/crates/kill" }
+zutils_pwd = { path = "../zutils/crates/pwd" }
+zutils_df = { path = "../zutils/crates/df" }
+zutils_grep = { path = "../zutils/crates/grep" }
+zutils_find = { path = "../zutils/crates/find" }
+zutils_du = { path = "../zutils/crates/du" }
+zutils_chown = { path = "../zutils/crates/chown" }
 
 [features]
 smp = []

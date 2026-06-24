@@ -33,6 +33,12 @@ use zenus_fs::vfs::FileSystem as _;
 use zenus_mem::paging;
 
 mod shell;
+
+struct EchoState {
+    listen_fds: [Option<usize>; 8],
+    client_fds: [Option<usize>; 16],
+}
+
 use zenus_mem::frame_allocator;
 use zenus_mem::frame_allocator::MemoryRegion;
 use zenus_sched::scheduler;

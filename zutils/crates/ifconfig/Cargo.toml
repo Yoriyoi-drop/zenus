@@ -1,0 +1,8 @@
+[package]
+name = "zutils_ifconfig"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zutils_common = { path = "../common" }
+zenus-net = { path = "../../../crates/zenus-net" }

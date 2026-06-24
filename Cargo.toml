@@ -11,10 +11,41 @@ members = [
     "crates/zenus-syscall",
     "crates/zenus-virtio",
     "crates/zenus-ns",
+    "zutils/crates/common",
+    "zutils/crates/help",
+    "zutils/crates/echo",
+    "zutils/crates/uname",
+    "zutils/crates/ls",
+    "zutils/crates/cat",
+    "zutils/crates/ps",
+    "zutils/crates/id",
+    "zutils/crates/whoami",
+    "zutils/crates/ifconfig",
+    "zutils/crates/meminfo",
+    "zutils/crates/dmesg",
+    "zutils/crates/clear",
+    "zutils/crates/timer",
+    "zutils/crates/mkdir",
+    "zutils/crates/rm",
+    "zutils/crates/touch",
+    "zutils/crates/chmod",
+    "zutils/crates/cp",
+    "zutils/crates/mv",
+    "zutils/crates/reboot",
+    "zutils/crates/shutdown",
+    "zutils/crates/mount",
+    "zutils/crates/kill",
+    "zutils/crates/pwd",
+    "zutils/crates/grep",
+    "zutils/crates/find",
+    "zutils/crates/df",
+    "zutils/crates/du",
+    "zutils/crates/chown",
 ]
 resolver = "2"
 
 [workspace.package]
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 

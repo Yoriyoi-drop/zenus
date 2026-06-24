@@ -297,8 +297,6 @@ fn sys_dup(old_fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
 }
 
 fn sys_nanosleep(sec: u64, nsec: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    let mut s = SerialPort::new(0x3F8);
-    let _ = write!(s, "[sys] nanosleep {}s {}ns\n", sec, nsec);
     let total_ms = sec.saturating_mul(1000).saturating_add(nsec / 1_000_000);
     let start = zenus_arch::interrupts::pit::get_ticks();
     loop {
@@ -307,6 +305,7 @@ fn sys_nanosleep(sec: u64, nsec: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) ->
         if elapsed >= total_ms {
             break;
         }
+        x86_64::instructions::hlt();
     }
     0
 }

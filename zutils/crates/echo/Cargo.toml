@@ -1,0 +1,7 @@
+[package]
+name = "zutils_echo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zutils_common = { path = "../common" }

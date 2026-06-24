@@ -243,7 +243,10 @@ impl VirtioPciTransport {
 
     pub unsafe fn reset(&self) {
         self.set_device_status(0);
-        while self.device_status() != 0 {
+        for _ in 0..100000 {
+            if self.device_status() == 0 {
+                return;
+            }
             core::hint::spin_loop();
         }
     }

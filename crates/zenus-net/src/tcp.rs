@@ -2,7 +2,6 @@ use crate::ipv4;
 use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 
-#[allow(static_mut_refs)]
 pub const TCP_CLOSED: u8 = 0;
 pub const TCP_LISTEN: u8 = 1;
 pub const TCP_SYN_SENT: u8 = 2;
@@ -47,9 +46,15 @@ struct Tcb {
     time_wait_ticks: u8,
 }
 
-static TCP_LOCK: SpinLock<()> = SpinLock::new(());
-static mut TCP_CONNS: [Option<Tcb>; MAX_CONNS] = [None; MAX_CONNS];
-static mut NEXT_CONN_ID: usize = 0;
+struct TcpState {
+    conns: [Option<Tcb>; MAX_CONNS],
+    next_conn_id: usize,
+}
+
+static TCP_STATE: SpinLock<TcpState> = SpinLock::new(TcpState {
+    conns: [None; MAX_CONNS],
+    next_conn_id: 0,
+});
 
 fn seq_before(a: u32, b: u32) -> bool {
     ((a.wrapping_sub(b)) as i32) < 0
@@ -59,31 +64,27 @@ fn seq_before_eq(a: u32, b: u32) -> bool {
     a == b || seq_before(a, b)
 }
 
-fn find_slot() -> Option<usize> {
-    unsafe {
-        for i in 0..MAX_CONNS {
-            if TCP_CONNS[i].is_none() {
-                return Some(i);
-            }
+fn find_slot(state: &TcpState) -> Option<usize> {
+    for i in 0..MAX_CONNS {
+        if state.conns[i].is_none() {
+            return Some(i);
         }
-        for i in 0..MAX_CONNS {
-            if let Some(ref t) = TCP_CONNS[i] {
-                if t.state == TCP_CLOSED {
-                    return Some(i);
-                }
+    }
+    for i in 0..MAX_CONNS {
+        if let Some(ref t) = state.conns[i] {
+            if t.state == TCP_CLOSED {
+                return Some(i);
             }
         }
     }
     None
 }
 
-fn conn_by_port(port: u16) -> Option<usize> {
-    unsafe {
-        for i in 0..MAX_CONNS {
-            if let Some(ref t) = TCP_CONNS[i] {
-                if t.listening && t.local_port == port {
-                    return Some(i);
-                }
+fn conn_by_port(port: u16, state: &TcpState) -> Option<usize> {
+    for i in 0..MAX_CONNS {
+        if let Some(ref t) = state.conns[i] {
+            if t.listening && t.local_port == port {
+                return Some(i);
             }
         }
     }
@@ -146,13 +147,12 @@ fn rand_isn() -> u32 {
 }
 
 pub fn listen(port: u16) -> Option<usize> {
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        if conn_by_port(port).is_some() {
-            return None;
-        }
-        let idx = find_slot()?;
-        TCP_CONNS[idx] = Some(Tcb {
+    let mut state = TCP_STATE.lock();
+    if conn_by_port(port, &state).is_some() {
+        return None;
+    }
+    let idx = find_slot(&state)?;
+    state.conns[idx] = Some(Tcb {
             state: TCP_LISTEN,
             local_ip: [0; 4],
             local_port: port,
@@ -173,37 +173,35 @@ pub fn listen(port: u16) -> Option<usize> {
             time_wait_ticks: 0,
         });
         Some(idx)
-    }
 }
 
 pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16) -> Option<usize> {
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        let idx = find_slot()?;
-        let local_ip = crate::nic::get_iface(iface_idx)
-            .map(|iface| iface.ip)
-            .unwrap_or([0; 4]);
-        if local_ip == [0; 4] || local_ip == [127, 0, 0, 1] {
-            return None;
-        }
-        let isn = rand_isn();
+    let mut state = TCP_STATE.lock();
+    let idx = find_slot(&state)?;
+    let local_ip = crate::nic::get_iface(iface_idx)
+        .map(|iface| iface.ip)
+        .unwrap_or([0; 4]);
+    if local_ip == [0; 4] || local_ip == [127, 0, 0, 1] {
+        return None;
+    }
+    let isn = rand_isn();
 
-        let mut seg = build_segment(
-            local_port, dst_port,
-            isn, 0,
-            TCP_FLAG_SYN,
-            65535,
-            &[],
-        );
-        let csum = checksum(local_ip, dst_ip, &seg[..20]);
-        seg[16] = (csum >> 8) as u8;
-        seg[17] = (csum & 0xFF) as u8;
-        let sent = ipv4::send(iface_idx, dst_ip, ipv4::PROTO_TCP, &seg[..20]);
-        if !sent {
-            return None;
-        }
+    let mut seg = build_segment(
+        local_port, dst_port,
+        isn, 0,
+        TCP_FLAG_SYN,
+        65535,
+        &[],
+    );
+    let csum = checksum(local_ip, dst_ip, &seg[..20]);
+    seg[16] = (csum >> 8) as u8;
+    seg[17] = (csum & 0xFF) as u8;
+    let sent = ipv4::send(iface_idx, dst_ip, ipv4::PROTO_TCP, &seg[..20]);
+    if !sent {
+        return None;
+    }
 
-        TCP_CONNS[idx] = Some(Tcb {
+    state.conns[idx] = Some(Tcb {
             state: TCP_SYN_SENT,
             local_ip,
             local_port,
@@ -234,7 +232,6 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
         s.write_str("\n");
 
         Some(idx)
-    }
 }
 
 pub fn handle_receive(
@@ -242,7 +239,7 @@ pub fn handle_receive(
     src_ip: [u8; 4], dst_ip: [u8; 4],
     segment: &[u8],
 ) -> bool {
-    let _tcp_guard = TCP_LOCK.lock();
+    let mut state = TCP_STATE.lock();
     if segment.len() < 20 {
         return false;
     }
@@ -295,10 +292,10 @@ pub fn handle_receive(
         s.write_str("\n");
     }
 
-    let conn_idx = unsafe {
+    let conn_idx = {
         let mut found = None;
         for i in 0..MAX_CONNS {
-            match &TCP_CONNS[i] {
+            match &state.conns[i] {
                 Some(tcb) if tcb.listening && tcb.local_port == dst_port => {
                     found = Some(i);
                 }
@@ -330,21 +327,20 @@ pub fn handle_receive(
         }
     };
 
-    unsafe {
-        let tcb = match &mut TCP_CONNS[conn_idx] {
-            Some(t) => t,
-            None => return false,
-        };
+    let tcb = match &mut state.conns[conn_idx] {
+        Some(t) => t,
+        None => return false,
+    };
 
-        if (flags & TCP_FLAG_RST) != 0 {
-            tcb.state = TCP_CLOSED;
-            return true;
-        }
+    if (flags & TCP_FLAG_RST) != 0 {
+        tcb.state = TCP_CLOSED;
+        return true;
+    }
 
-        match tcb.state {
-            TCP_LISTEN => {
-                if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) == 0 {
-                    let child = match find_slot() {
+    match tcb.state {
+        TCP_LISTEN => {
+            if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) == 0 {
+                let child = match find_slot(&state) {
                         Some(idx) => idx,
                         None => return false,
                     };
@@ -363,7 +359,7 @@ pub fn handle_receive(
                     let sent = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &syn_ack[..20]);
 
                     if sent {
-                        TCP_CONNS[child] = Some(Tcb {
+                        state.conns[child] = Some(Tcb {
                             state: TCP_SYN_RECEIVED,
                             local_ip: dst_ip,
                             local_port: dst_port,
@@ -646,16 +642,14 @@ pub fn handle_receive(
 
             _ => {}
         }
-    }
 
     true
 }
 
 pub fn poll_retransmit(iface_idx: usize) {
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        for i in 0..MAX_CONNS {
-            let tcb = match &mut TCP_CONNS[i] {
+    let mut state = TCP_STATE.lock();
+    for i in 0..MAX_CONNS {
+        let tcb = match &mut state.conns[i] {
                 Some(t) => t,
                 None => continue,
             };
@@ -748,92 +742,84 @@ pub fn poll_retransmit(iface_idx: usize) {
                 tcb.state = TCP_CLOSED;
             }
         }
-    }
 }
 
 pub fn send_data(conn: usize, data: &[u8]) -> bool {
     if conn >= MAX_CONNS { return false; }
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        let tcb = match &mut TCP_CONNS[conn] {
-            Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
-            _ => return false,
-        };
+    let mut state = TCP_STATE.lock();
+    let tcb = match &mut state.conns[conn] {
+        Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
+        _ => return false,
+    };
 
-        let available = tcb.tx_data.len().saturating_sub(tcb.tx_data_len);
-        let copy_len = core::cmp::min(data.len(), available);
-        if copy_len > 0 {
-            tcb.tx_data[tcb.tx_data_len..tcb.tx_data_len + copy_len].copy_from_slice(&data[..copy_len]);
-            tcb.tx_data_len += copy_len;
-        }
-        copy_len > 0
+    let available = tcb.tx_data.len().saturating_sub(tcb.tx_data_len);
+    let copy_len = core::cmp::min(data.len(), available);
+    if copy_len > 0 {
+        tcb.tx_data[tcb.tx_data_len..tcb.tx_data_len + copy_len].copy_from_slice(&data[..copy_len]);
+        tcb.tx_data_len += copy_len;
     }
+    copy_len > 0
 }
 
 pub fn flush_tx(conn: usize, iface_idx: usize) -> bool {
     if conn >= MAX_CONNS { return false; }
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        let tcb = match &mut TCP_CONNS[conn] {
-            Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
-            _ => return false,
-        };
+    let mut state = TCP_STATE.lock();
+    let tcb = match &mut state.conns[conn] {
+        Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
+        _ => return false,
+    };
 
-        if tcb.tx_data_len == 0 {
-            return true;
-        }
-
-        let payload_len = core::cmp::min(tcb.tx_data_len, 1460);
-        let payload = &tcb.tx_data[..payload_len];
-
-        let mut seg = build_segment(
-            tcb.local_port, tcb.remote_port,
-            tcb.send_nxt, tcb.recv_nxt,
-            TCP_FLAG_ACK | TCP_FLAG_PSH,
-            tcb.recv_window,
-            payload,
-        );
-        let seg_len = 20 + payload_len;
-        let csum = checksum(tcb.local_ip, tcb.remote_ip, &seg[..seg_len]);
-        seg[16] = (csum >> 8) as u8;
-        seg[17] = (csum & 0xFF) as u8;
-        let result = ipv4::send(iface_idx, tcb.remote_ip, ipv4::PROTO_TCP, &seg[..seg_len]);
-        if result {
-            tcb.send_nxt += payload_len as u32;
-
-            if tcb.tx_data_len > 0 {
-                tcb.retry_count = MAX_RETRIES;
-                tcb.retry_ticks = RETRY_INTERVAL;
-            }
-        }
-        result
+    if tcb.tx_data_len == 0 {
+        return true;
     }
+
+    let payload_len = core::cmp::min(tcb.tx_data_len, 1460);
+    let payload = &tcb.tx_data[..payload_len];
+
+    let mut seg = build_segment(
+        tcb.local_port, tcb.remote_port,
+        tcb.send_nxt, tcb.recv_nxt,
+        TCP_FLAG_ACK | TCP_FLAG_PSH,
+        tcb.recv_window,
+        payload,
+    );
+    let seg_len = 20 + payload_len;
+    let csum = checksum(tcb.local_ip, tcb.remote_ip, &seg[..seg_len]);
+    seg[16] = (csum >> 8) as u8;
+    seg[17] = (csum & 0xFF) as u8;
+    let result = ipv4::send(iface_idx, tcb.remote_ip, ipv4::PROTO_TCP, &seg[..seg_len]);
+    if result {
+        tcb.send_nxt += payload_len as u32;
+
+        if tcb.tx_data_len > 0 {
+            tcb.retry_count = MAX_RETRIES;
+            tcb.retry_ticks = RETRY_INTERVAL;
+        }
+    }
+    result
 }
 
 pub fn receive_data(conn: usize, buf: &mut [u8]) -> Option<usize> {
     if conn >= MAX_CONNS { return None; }
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        let tcb = match &mut TCP_CONNS[conn] {
-            Some(t) if t.rx_data_len > 0 => t,
-            _ => return None,
-        };
+    let mut state = TCP_STATE.lock();
+    let tcb = match &mut state.conns[conn] {
+        Some(t) if t.rx_data_len > 0 => t,
+        _ => return None,
+    };
 
-        let copy_len = core::cmp::min(tcb.rx_data_len, buf.len());
-        buf[..copy_len].copy_from_slice(&tcb.rx_data[..copy_len]);
-        if copy_len < tcb.rx_data_len {
-            tcb.rx_data.copy_within(copy_len..tcb.rx_data_len, 0);
-        }
-        tcb.rx_data_len -= copy_len;
-        Some(copy_len)
+    let copy_len = core::cmp::min(tcb.rx_data_len, buf.len());
+    buf[..copy_len].copy_from_slice(&tcb.rx_data[..copy_len]);
+    if copy_len < tcb.rx_data_len {
+        tcb.rx_data.copy_within(copy_len..tcb.rx_data_len, 0);
     }
+    tcb.rx_data_len -= copy_len;
+    Some(copy_len)
 }
 
 pub fn close(conn: usize, iface_idx: usize) -> bool {
     if conn >= MAX_CONNS { return false; }
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        let tcb = match &mut TCP_CONNS[conn] {
+    let mut state = TCP_STATE.lock();
+    let tcb = match &mut state.conns[conn] {
             Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
             _ => return false,
         };
@@ -856,83 +842,124 @@ pub fn close(conn: usize, iface_idx: usize) -> bool {
             tcb.retry_ticks = RETRY_INTERVAL;
         }
         result
-    }
 }
 
 pub fn close_conn(conn: usize) {
     if conn >= MAX_CONNS { return; }
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        TCP_CONNS[conn] = None;
-    }
+    let mut state = TCP_STATE.lock();
+    state.conns[conn] = None;
 }
 
 pub fn is_connected(conn: usize) -> bool {
     if conn >= MAX_CONNS { return false; }
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        match &TCP_CONNS[conn] {
-            Some(t) => t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT,
-            None => false,
-        }
+    let state = TCP_STATE.lock();
+    match &state.conns[conn] {
+        Some(t) => t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT,
+        None => false,
     }
 }
 
 pub fn has_data(conn: usize) -> bool {
     if conn >= MAX_CONNS { return false; }
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        match &TCP_CONNS[conn] {
-            Some(t) => t.rx_data_len > 0,
-            None => false,
-        }
+    let state = TCP_STATE.lock();
+    match &state.conns[conn] {
+        Some(t) => t.rx_data_len > 0,
+        None => false,
     }
 }
 
 pub fn get_conn_info(conn: usize) -> Option<(u8, [u8; 4], u16, [u8; 4], u16)> {
     if conn >= MAX_CONNS { return None; }
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        match &TCP_CONNS[conn] {
-            Some(t) => Some((t.state, t.remote_ip, t.remote_port, t.local_ip, t.local_port)),
-            None => None,
-        }
+    let state = TCP_STATE.lock();
+    match &state.conns[conn] {
+        Some(t) => Some((t.state, t.remote_ip, t.remote_port, t.local_ip, t.local_port)),
+        None => None,
     }
 }
 
 pub fn state_name(conn: usize) -> &'static str {
     if conn >= MAX_CONNS { return "NONE"; }
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        match &TCP_CONNS[conn] {
-            Some(t) => match t.state {
-                TCP_CLOSED => "CLOSED",
-                TCP_LISTEN => "LISTEN",
-                TCP_SYN_SENT => "SYN_SENT",
-                TCP_SYN_RECEIVED => "SYN_RCVD",
-                TCP_ESTABLISHED => "ESTAB",
-                TCP_FIN_WAIT1 => "FIN_WAIT1",
-                TCP_FIN_WAIT2 => "FIN_WAIT2",
-                TCP_CLOSE_WAIT => "CLOSE_WAIT",
-                TCP_CLOSING => "CLOSING",
-                TCP_LAST_ACK => "LAST_ACK",
-                TCP_TIME_WAIT => "TIME_WAIT",
-                _ => "UNKNOWN",
-            },
-            None => "NONE",
+    let state = TCP_STATE.lock();
+    match &state.conns[conn] {
+        Some(t) => match t.state {
+            TCP_CLOSED => "CLOSED",
+            TCP_LISTEN => "LISTEN",
+            TCP_SYN_SENT => "SYN_SENT",
+            TCP_SYN_RECEIVED => "SYN_RCVD",
+            TCP_ESTABLISHED => "ESTAB",
+            TCP_FIN_WAIT1 => "FIN_WAIT1",
+            TCP_FIN_WAIT2 => "FIN_WAIT2",
+            TCP_CLOSE_WAIT => "CLOSE_WAIT",
+            TCP_CLOSING => "CLOSING",
+            TCP_LAST_ACK => "LAST_ACK",
+            TCP_TIME_WAIT => "TIME_WAIT",
+            _ => "UNKNOWN",
+        },
+        None => "NONE",
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct TcpConnInfo {
+    pub active: bool,
+    pub local_port: u16,
+    pub local_ip: [u8; 4],
+    pub remote_port: u16,
+    pub remote_ip: [u8; 4],
+    pub state: u8,
+}
+
+impl TcpConnInfo {
+    pub fn state_str(&self) -> &'static str {
+        match self.state {
+            TCP_CLOSED => "CLOSED",
+            TCP_LISTEN => "LISTEN",
+            TCP_SYN_SENT => "SYN_SENT",
+            TCP_SYN_RECEIVED => "SYN_RCVD",
+            TCP_ESTABLISHED => "ESTAB",
+            TCP_FIN_WAIT1 => "FIN_WAIT1",
+            TCP_FIN_WAIT2 => "FIN_WAIT2",
+            TCP_CLOSE_WAIT => "CLOSE_WAIT",
+            TCP_CLOSING => "CLOSING",
+            TCP_LAST_ACK => "LAST_ACK",
+            TCP_TIME_WAIT => "TIME_WAIT",
+            _ => "UNKNOWN",
         }
     }
 }
 
-pub fn connection_count() -> usize {
-    let _tcp_guard = TCP_LOCK.lock();
-    unsafe {
-        let mut count = 0;
-        for i in 0..MAX_CONNS {
-            if TCP_CONNS[i].is_some() {
-                count += 1;
-            }
+pub fn tcp_status() -> [TcpConnInfo; MAX_CONNS] {
+    let state = TCP_STATE.lock();
+    let mut status = [TcpConnInfo {
+        active: false,
+        local_port: 0,
+        local_ip: [0; 4],
+        remote_port: 0,
+        remote_ip: [0; 4],
+        state: 0,
+    }; MAX_CONNS];
+    for i in 0..MAX_CONNS {
+        if let Some(t) = &state.conns[i] {
+            status[i] = TcpConnInfo {
+                active: true,
+                local_port: t.local_port,
+                local_ip: t.local_ip,
+                remote_port: t.remote_port,
+                remote_ip: t.remote_ip,
+                state: t.state,
+            };
         }
-        count
     }
+    status
+}
+
+pub fn connection_count() -> usize {
+    let state = TCP_STATE.lock();
+    let mut count = 0;
+    for i in 0..MAX_CONNS {
+        if state.conns[i].is_some() {
+            count += 1;
+        }
+    }
+    count
 }

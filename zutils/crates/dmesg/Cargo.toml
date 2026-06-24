@@ -1,0 +1,8 @@
+[package]
+name = "zutils_dmesg"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zutils_common = { path = "../common" }
+zenus-console = { path = "../../../crates/zenus-console" }

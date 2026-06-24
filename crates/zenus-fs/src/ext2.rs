@@ -12,6 +12,7 @@ const EXT2_DYNAMIC_REV: u32 = 1;
 const EXT2_FT_REG_FILE: u8 = 1;
 const EXT2_FT_DIR: u8 = 2;
 
+#[allow(static_mut_refs)]
 static mut EXT2_FS: Ext2Fs = Ext2Fs {
     dev_id: 0,
     block_size: 1024,

@@ -245,12 +245,12 @@ fn current_cpu() -> u32 {
 }
 
 fn current_cpu_id() -> u32 {
-    let cpu = current_cpu();
-    CURRENT_TASK[cpu as usize].load(Ordering::Acquire)
+    let cpu = current_cpu() as usize % MAX_CPUS;
+    CURRENT_TASK[cpu].load(Ordering::Acquire)
 }
 
 fn set_current_cpu_id(cpu: u32, idx: u32) {
-    CURRENT_TASK[cpu as usize].store(idx, Ordering::Release);
+    CURRENT_TASK[cpu as usize % MAX_CPUS].store(idx, Ordering::Release);
 }
 
 /// Clone the current task, optionally creating new namespaces.
@@ -630,7 +630,7 @@ pub fn check_yield() {
 }
 
 fn find_next_ready(tasks: &TaskArray, current: u32, cpu: u32) -> u32 {
-    for i in 1..MAX_TASKS as u32 {
+    for i in 0..MAX_TASKS as u32 {
         let idx = (current + i) % MAX_TASKS as u32;
         if let Some(ref task) = tasks.tasks[idx as usize] {
             if task.is_active() && task.cpu == cpu { return idx; }

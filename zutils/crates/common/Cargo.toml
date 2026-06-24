@@ -1,0 +1,4 @@
+[package]
+name = "zutils_common"
+version.workspace = true
+edition.workspace = true

@@ -12,3 +12,14 @@ zenus-arch = { path = "../zenus-arch" }
 zenus-fs = { path = "../zenus-fs" }
 zenus-sched = { path = "../zenus-sched" }
 zenus-virtio = { path = "../zenus-virtio" }
+zutils_common = { path = "../../zutils/crates/common" }
+zutils_help = { path = "../../zutils/crates/help" }
+zutils_echo = { path = "../../zutils/crates/echo" }
+zutils_ls = { path = "../../zutils/crates/ls" }
+zutils_cat = { path = "../../zutils/crates/cat" }
+zutils_uname = { path = "../../zutils/crates/uname" }
+zutils_id = { path = "../../zutils/crates/id" }
+zutils_whoami = { path = "../../zutils/crates/whoami" }
+zutils_ps = { path = "../../zutils/crates/ps" }
+zutils_meminfo = { path = "../../zutils/crates/meminfo" }
+zutils_dmesg = { path = "../../zutils/crates/dmesg" }

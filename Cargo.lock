@@ -60,6 +60,36 @@ dependencies = [
  "zenus-sync",
  "zenus-syscall",
  "zenus-virtio",
+ "zutils_cat",
+ "zutils_chmod",
+ "zutils_chown",
+ "zutils_clear",
+ "zutils_common",
+ "zutils_cp",
+ "zutils_df",
+ "zutils_dmesg",
+ "zutils_du",
+ "zutils_echo",
+ "zutils_find",
+ "zutils_grep",
+ "zutils_help",
+ "zutils_id",
+ "zutils_ifconfig",
+ "zutils_kill",
+ "zutils_ls",
+ "zutils_meminfo",
+ "zutils_mkdir",
+ "zutils_mount",
+ "zutils_mv",
+ "zutils_ps",
+ "zutils_pwd",
+ "zutils_reboot",
+ "zutils_rm",
+ "zutils_shutdown",
+ "zutils_timer",
+ "zutils_touch",
+ "zutils_uname",
+ "zutils_whoami",
 ]
 
 [[package]]
@@ -112,6 +142,17 @@ dependencies = [
  "zenus-sched",
  "zenus-sync",
  "zenus-virtio",
+ "zutils_cat",
+ "zutils_common",
+ "zutils_dmesg",
+ "zutils_echo",
+ "zutils_help",
+ "zutils_id",
+ "zutils_ls",
+ "zutils_meminfo",
+ "zutils_ps",
+ "zutils_uname",
+ "zutils_whoami",
 ]
 
 [[package]]
@@ -167,4 +208,234 @@ dependencies = [
  "zenus-fs",
  "zenus-mem",
  "zenus-sync",
+]
+
+[[package]]
+name = "zutils_cat"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_chmod"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_chown"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_clear"
+version = "0.1.0"
+dependencies = [
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_common"
+version = "0.1.0"
+
+[[package]]
+name = "zutils_cp"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_df"
+version = "0.1.0"
+dependencies = [
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_dmesg"
+version = "0.1.0"
+dependencies = [
+ "zenus-console",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_du"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_echo"
+version = "0.1.0"
+dependencies = [
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_find"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_grep"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_help"
+version = "0.1.0"
+dependencies = [
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_id"
+version = "0.1.0"
+dependencies = [
+ "zenus-sched",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_ifconfig"
+version = "0.1.0"
+dependencies = [
+ "zenus-net",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_kill"
+version = "0.1.0"
+dependencies = [
+ "zenus-sched",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_ls"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_meminfo"
+version = "0.1.0"
+dependencies = [
+ "zenus-mem",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_mkdir"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_mount"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zenus-sched",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_mv"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_ps"
+version = "0.1.0"
+dependencies = [
+ "zenus-sched",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_pwd"
+version = "0.1.0"
+dependencies = [
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_reboot"
+version = "0.1.0"
+dependencies = [
+ "zenus-arch",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_rm"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_shutdown"
+version = "0.1.0"
+dependencies = [
+ "zenus-arch",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_timer"
+version = "0.1.0"
+dependencies = [
+ "zenus-arch",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_touch"
+version = "0.1.0"
+dependencies = [
+ "zenus-fs",
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_uname"
+version = "0.1.0"
+dependencies = [
+ "zutils_common",
+]
+
+[[package]]
+name = "zutils_whoami"
+version = "0.1.0"
+dependencies = [
+ "zutils_common",
 ]

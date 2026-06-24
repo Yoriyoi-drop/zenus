@@ -1,6 +1,7 @@
 use crate::udp;
 use crate::nic;
 use crate::ipv4;
+use zenus_sync::spinlock::SpinLock;
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
@@ -37,15 +38,27 @@ enum State {
     Bound,
 }
 
-static mut DHCP_STATE: State = State::Idle;
-static mut XID: u32 = 0;
-static mut SERVER_ID: [u8; 4] = [0; 4];
-static mut OFFERED_IP: [u8; 4] = [0; 4];
-static mut LEASE_TIME: u32 = 0;
+struct DhcpInner {
+    state: State,
+    xid: u32,
+    server_id: [u8; 4],
+    offered_ip: [u8; 4],
+    lease_time: u32,
+    resp_buf: [u8; 1500],
+    resp_len: usize,
+    resp_ready: bool,
+}
 
-static mut RESP_BUF: [u8; 1500] = [0; 1500];
-static mut RESP_LEN: usize = 0;
-static mut RESP_READY: bool = false;
+static DHCP: SpinLock<DhcpInner> = SpinLock::new(DhcpInner {
+    state: State::Idle,
+    xid: 0,
+    server_id: [0; 4],
+    offered_ip: [0; 4],
+    lease_time: 0,
+    resp_buf: [0; 1500],
+    resp_len: 0,
+    resp_ready: false,
+});
 
 fn build_dhcp_msg(op: u8, xid: u32, ciaddr: [u8; 4], mac: &[u8; 6], msg_type: u8, server_id: Option<[u8; 4]>, req_ip: Option<[u8; 4]>) -> [u8; 548] {
     let mut buf = [0u8; 548];
@@ -121,16 +134,15 @@ pub fn handle_receive(_iface_idx: usize, _src_ip: [u8; 4], packet: &[u8]) -> boo
     }
 
     let rxid = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
-    if rxid != unsafe { XID } {
+    if rxid != DHCP.lock().xid {
         return false;
     }
 
-    let resp_len = core::cmp::min(packet.len(), unsafe { RESP_BUF.len() });
-    unsafe {
-        RESP_BUF[..resp_len].copy_from_slice(&packet[..resp_len]);
-        RESP_LEN = resp_len;
-        RESP_READY = true;
-    }
+    let resp_len = core::cmp::min(packet.len(), DHCP.lock().resp_buf.len());
+    let mut dhcp = DHCP.lock();
+    dhcp.resp_buf[..resp_len].copy_from_slice(&packet[..resp_len]);
+    dhcp.resp_len = resp_len;
+    dhcp.resp_ready = true;
 
     true
 }
@@ -184,9 +196,10 @@ fn parse_dhcp_options(payload: &[u8]) -> (u8, [u8; 4], [u8; 4], [u8; 4], u32) {
 }
 
 pub fn dhcp_start(iface_idx: usize) -> bool {
-    unsafe {
-        DHCP_STATE = State::Idle;
-        RESP_READY = false;
+    {
+        let mut dhcp = DHCP.lock();
+        dhcp.state = State::Idle;
+        dhcp.resp_ready = false;
     }
 
     let iface = match nic::get_iface(iface_idx) {
@@ -196,7 +209,7 @@ pub fn dhcp_start(iface_idx: usize) -> bool {
 
     let mac = iface.mac;
     let xid = u32::from_le_bytes([mac[0], mac[1], mac[2], mac[3]]).wrapping_mul(0x01000001).wrapping_add(0xDEAD0001);
-    unsafe { XID = xid; }
+    DHCP.lock().xid = xid;
 
     let bcast_ip = [255u8; 4];
     let zero_ip = [0u8; 4];
@@ -205,27 +218,27 @@ pub fn dhcp_start(iface_idx: usize) -> bool {
     let max_retries = 3;
     let timeout_ticks: usize = 50;
 
-    unsafe { DHCP_STATE = State::Discovering; }
+    DHCP.lock().state = State::Discovering;
 
     loop {
-        match unsafe { DHCP_STATE } {
+        match DHCP.lock().state {
             State::Bound => return true,
             State::Idle => return false,
             _ => {}
         }
 
-        let is_discover = matches!(unsafe { DHCP_STATE }, State::Discovering);
+        let is_discover = DHCP.lock().state == State::Discovering;
 
         if retries >= max_retries && is_discover {
-            unsafe { DHCP_STATE = State::Idle; }
+            DHCP.lock().state = State::Idle;
             return false;
         }
 
-        if is_discover || matches!(unsafe { DHCP_STATE }, State::Requesting) {
+        if is_discover || DHCP.lock().state == State::Requesting {
             let msg_type = if is_discover { MSG_DISCOVER } else { MSG_REQUEST };
-            let ciaddr = if is_discover { zero_ip } else { unsafe { OFFERED_IP } };
-            let server_id = if is_discover { None } else { Some(unsafe { SERVER_ID }) };
-            let req_ip = if is_discover { None } else { Some(unsafe { OFFERED_IP }) };
+            let ciaddr = if is_discover { zero_ip } else { DHCP.lock().offered_ip };
+            let server_id = if is_discover { None } else { Some(DHCP.lock().server_id) };
+            let req_ip = if is_discover { None } else { Some(DHCP.lock().offered_ip) };
 
             let dhcp_msg = build_dhcp_msg(OP_REQUEST, xid, ciaddr, &mac, msg_type, server_id, req_ip);
             send_dhcp_udp(iface_idx, &dhcp_msg, zero_ip, bcast_ip);
@@ -235,14 +248,15 @@ pub fn dhcp_start(iface_idx: usize) -> bool {
         let mut waited = 0;
         while waited < timeout_ticks {
             nic::net_poll();
-            unsafe {
-                if RESP_READY {
-                    if let Some(iface2) = nic::get_iface(iface_idx) {
-                        dhcp_handle_response(iface2.mac);
-                    }
+            if waited % 5 == 0 {
+                zenus_sched::scheduler::yield_now();
+            }
+            if DHCP.lock().resp_ready {
+                if let Some(iface2) = nic::get_iface(iface_idx) {
+                    dhcp_handle_response(iface2.mac);
                 }
             }
-            if matches!(unsafe { DHCP_STATE }, State::Bound | State::Idle) {
+            if matches!(DHCP.lock().state, State::Bound | State::Idle) {
                 break;
             }
             waited += 1;
@@ -277,76 +291,77 @@ fn send_dhcp_udp(iface_idx: usize, dhcp_msg: &[u8; 548], src_ip: [u8; 4], dst_ip
 }
 
 fn dhcp_handle_response(our_mac: [u8; 6]) -> bool {
-    unsafe {
-        if !RESP_READY {
-            return false;
-        }
-        RESP_READY = false;
-
-        let payload = &RESP_BUF[..RESP_LEN];
-        let (hdr, udp_data) = match udp::parse(payload) {
-            Some(h) => h,
-            None => return false,
-        };
-
-        if hdr.src_port != DHCP_SERVER_PORT || hdr.dst_port != DHCP_CLIENT_PORT {
-            return false;
-        }
-
-        if udp_data.len() < 240 {
-            return false;
-        }
-
-        let magic = [udp_data[236], udp_data[237], udp_data[238], udp_data[239]];
-        if magic != MAGIC_COOKIE {
-            return false;
-        }
-
-        let rxid = u32::from_be_bytes([udp_data[4], udp_data[5], udp_data[6], udp_data[7]]);
-        if rxid != XID {
-            return false;
-        }
-
-        let op = udp_data[0];
-        if op != OP_REPLY {
-            return false;
-        }
-
-        let mut chaddr = [0u8; 16];
-        chaddr[..6].copy_from_slice(&our_mac);
-        if udp_data[28..34] != chaddr[..6] {
-            return false;
-        }
-
-        let (msg_type, server_id, subnet_mask, gateway, lease_time) = parse_dhcp_options(udp_data);
-
-        match msg_type {
-            MSG_OFFER => {
-                if !matches!(DHCP_STATE, State::Discovering) {
-                    return false;
-                }
-                OFFERED_IP.copy_from_slice(&udp_data[16..20]);
-                SERVER_ID = server_id;
-                LEASE_TIME = lease_time;
-                DHCP_STATE = State::Requesting;
-            }
-            MSG_ACK => {
-                if !matches!(DHCP_STATE, State::Requesting) {
-                    return false;
-                }
-                let yiaddr = [udp_data[16], udp_data[17], udp_data[18], udp_data[19]];
-                let gw = if gateway == [0; 4] { server_id } else { gateway };
-                nic::set_iface_ip(1, yiaddr, subnet_mask, gw);
-                crate::route::clear();
-                crate::route::add_direct(
-                    [yiaddr[0] & subnet_mask[0], yiaddr[1] & subnet_mask[1], yiaddr[2] & subnet_mask[2], yiaddr[3] & subnet_mask[3]],
-                    subnet_mask, 1,
-                );
-                crate::route::add_default(gw, 1);
-                DHCP_STATE = State::Bound;
-            }
-            _ => {}
-        }
-        true
+    let mut dhcp = DHCP.lock();
+    if !dhcp.resp_ready {
+        return false;
     }
+    dhcp.resp_ready = false;
+
+    let payload = &dhcp.resp_buf[..dhcp.resp_len];
+    let (hdr, udp_data) = match udp::parse(payload) {
+        Some(h) => h,
+        None => return false,
+    };
+
+    if hdr.src_port != DHCP_SERVER_PORT || hdr.dst_port != DHCP_CLIENT_PORT {
+        return false;
+    }
+
+    if udp_data.len() < 240 {
+        return false;
+    }
+
+    let magic = [udp_data[236], udp_data[237], udp_data[238], udp_data[239]];
+    if magic != MAGIC_COOKIE {
+        return false;
+    }
+
+    let rxid = u32::from_be_bytes([udp_data[4], udp_data[5], udp_data[6], udp_data[7]]);
+    if rxid != dhcp.xid {
+        return false;
+    }
+
+    let op = udp_data[0];
+    if op != OP_REPLY {
+        return false;
+    }
+
+    let mut chaddr = [0u8; 16];
+    chaddr[..6].copy_from_slice(&our_mac);
+    if udp_data[28..34] != chaddr[..6] {
+        return false;
+    }
+
+    let (msg_type, server_id, subnet_mask, gateway, lease_time) = parse_dhcp_options(udp_data);
+
+    let offered = [udp_data[16], udp_data[17], udp_data[18], udp_data[19]];
+
+    match msg_type {
+        MSG_OFFER => {
+            if dhcp.state != State::Discovering {
+                return false;
+            }
+            dhcp.offered_ip = offered;
+            dhcp.server_id = server_id;
+            dhcp.lease_time = lease_time;
+            dhcp.state = State::Requesting;
+        }
+        MSG_ACK => {
+            if dhcp.state != State::Requesting {
+                return false;
+            }
+            let gw = if gateway == [0; 4] { server_id } else { gateway };
+            drop(dhcp);
+            nic::set_iface_ip(1, offered, subnet_mask, gw);
+            crate::route::clear();
+            crate::route::add_direct(
+                [offered[0] & subnet_mask[0], offered[1] & subnet_mask[1], offered[2] & subnet_mask[2], offered[3] & subnet_mask[3]],
+                subnet_mask, 1,
+            );
+            crate::route::add_default(gw, 1);
+            DHCP.lock().state = State::Bound;
+        }
+        _ => {}
+    }
+    true
 }

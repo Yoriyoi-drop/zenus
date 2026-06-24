@@ -41,22 +41,39 @@ impl CrashDump {
     }
 }
 
-static mut CRASH_DUMP: CrashDump = CrashDump::new();
-static CRASH_SAVED: AtomicBool = AtomicBool::new(false);
+const MAX_CRASH_CPUS: usize = 8;
+static mut CRASH_DUMPS: [CrashDump; MAX_CRASH_CPUS] = [
+    CrashDump::new(), CrashDump::new(), CrashDump::new(), CrashDump::new(),
+    CrashDump::new(), CrashDump::new(), CrashDump::new(), CrashDump::new(),
+];
+static CRASH_SAVED: [AtomicBool; MAX_CRASH_CPUS] = [
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false), AtomicBool::new(false),
+];
+
+fn crash_cpu() -> usize {
+    let cpu: u64;
+    unsafe { core::arch::asm!("mov {}, cr8", out(reg) cpu); }
+    (cpu as usize) % MAX_CRASH_CPUS
+}
 
 pub fn crash_dump_init() {
+    let cpu = crash_cpu();
     unsafe {
-        CRASH_DUMP.magic.copy_from_slice(b"ZENUS_CRASH_DUMP");
+        CRASH_DUMPS[cpu].magic.copy_from_slice(b"ZENUS_CRASH_DUMP");
     }
 }
 
 pub fn crash_dump_save(msg: &str) -> &'static CrashDump {
-    if CRASH_SAVED.load(Ordering::SeqCst) {
-        return unsafe { &CRASH_DUMP };
+    let cpu = crash_cpu();
+    if CRASH_SAVED[cpu].load(Ordering::SeqCst) {
+        return unsafe { &CRASH_DUMPS[cpu] };
     }
-    CRASH_SAVED.store(true, Ordering::SeqCst);
+    CRASH_SAVED[cpu].store(true, Ordering::SeqCst);
 
-    let dump = unsafe { &mut CRASH_DUMP };
+    let dump = unsafe { &mut CRASH_DUMPS[cpu] };
     dump.magic.copy_from_slice(b"ZENUS_CRASH_DUMP");
 
     unsafe {
@@ -166,15 +183,25 @@ pub fn crash_dump_print(dump: &CrashDump) {
 }
 
 pub fn crash_dump_get() -> Option<&'static CrashDump> {
-    if CRASH_SAVED.load(Ordering::SeqCst) {
-        Some(unsafe { &CRASH_DUMP })
+    let cpu = crash_cpu();
+    if CRASH_SAVED[cpu].load(Ordering::SeqCst) {
+        Some(unsafe { &CRASH_DUMPS[cpu] })
+    } else {
+        None
+    }
+}
+
+pub fn crash_dump_get_cpu(cpu: usize) -> Option<&'static CrashDump> {
+    if cpu < MAX_CRASH_CPUS && CRASH_SAVED[cpu].load(Ordering::SeqCst) {
+        Some(unsafe { &CRASH_DUMPS[cpu] })
     } else {
         None
     }
 }
 
 pub fn crash_dump_save_to_disk(dev_id: usize, lba: u64) -> bool {
-    let dump = unsafe { &CRASH_DUMP };
+    let cpu = crash_cpu();
+    let dump = unsafe { &CRASH_DUMPS[cpu] };
     let dump_bytes = unsafe {
         core::slice::from_raw_parts(
             dump as *const CrashDump as *const u8,

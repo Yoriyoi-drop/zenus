@@ -4,10 +4,14 @@ use crate::spinlock::SpinLock;
 fn lockdep_serial(msg: &str) {
     for &b in msg.as_bytes() {
         unsafe {
+            let mut timeout = 100000;
             loop {
                 let mut lsr: u8;
                 core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16, options(nostack, preserves_flags));
                 if lsr & 0x20 != 0 { break; }
+                timeout -= 1;
+                if timeout == 0 { return; }
+                core::hint::spin_loop();
             }
             core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nostack, preserves_flags));
         }

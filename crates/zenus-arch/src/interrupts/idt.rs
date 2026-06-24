@@ -5,6 +5,27 @@ use zenus_console::vga;
 
 use crate::gdt;
 
+fn is_kernel_addr(addr: u64) -> bool {
+    addr >= 0xFFFF800000000000
+}
+
+fn try_read_u64(addr: u64) -> Option<u64> {
+    if addr < 0x1000 {
+        return None;
+    }
+    if (addr & 0xFFF) > 0xFF8 {
+        return None;
+    }
+    Some(unsafe { core::ptr::read_volatile(addr as *const u64) })
+}
+
+fn try_read_u8(addr: u64) -> Option<u8> {
+    if addr < 0x1000 {
+        return None;
+    }
+    Some(unsafe { core::ptr::read_volatile(addr as *const u8) })
+}
+
 #[allow(static_mut_refs)]
 static mut IDT: MaybeUninit<InterruptDescriptorTable> = MaybeUninit::uninit();
 
@@ -125,13 +146,23 @@ extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
     s.write_hex(_code);
     s.write_str(" RSP: ");
     s.write_hex(stk);
-    if stk >= 0xFFFF800000000000 {
+    if is_kernel_addr(stk) {
         for i in 0..6 {
-            let val: u64 = unsafe { core::ptr::read_volatile((stk + i*8) as *const u64) };
-            s.write_str(" [");
-            s.write_hex(i*8);
-            s.write_str("]=");
-            s.write_hex(val);
+            let addr = stk + i * 8;
+            match try_read_u64(addr) {
+                Some(val) => {
+                    s.write_str(" [");
+                    s.write_hex(i*8);
+                    s.write_str("]=");
+                    s.write_hex(val);
+                }
+                None => {
+                    s.write_str(" [");
+                    s.write_hex(i*8);
+                    s.write_str("]=INVALID");
+                    break;
+                }
+            }
         }
     }
     // Actual CPU registers at fault time
@@ -187,6 +218,9 @@ fn try_handle_user_page_fault(addr: u64, code: PageFaultErrorCode) -> bool {
         drop(allocator);
 
         let hhdm = zenus_mem::paging::hhdm_offset();
+        if hhdm == 0 {
+            return false;
+        }
         unsafe {
             core::ptr::write_bytes((hhdm + frame.as_u64()) as *mut u8, 0, 4096);
         }
@@ -298,40 +332,56 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let stack = frame.stack_pointer.as_u64();
     s.write_str("\n[STACK ABOVE]\n");
-    let stack_valid = stack >= 0xFFFF800000000000 || (stack >= 0x1000 && stack < 0x800000000000);
+    let stack_valid = is_kernel_addr(stack) || (stack >= 0x1000 && stack < 0x800000000000);
     if stack_valid {
         for i in 0..16u64 {
             let p = stack.wrapping_add(i * 8);
-            let val: u64 = unsafe { core::ptr::read_volatile(p as *const u64) };
-            s.write_hex(p);
-            s.write_str(": ");
-            s.write_hex(val);
-            if val < 0x1000 {
-                s.write_str(" <--- LOW ADDR");
-            } else if val >= 0xFFFF800000000000 {
-                s.write_str(" (kern)");
+            match try_read_u64(p) {
+                Some(val) => {
+                    s.write_hex(p);
+                    s.write_str(": ");
+                    s.write_hex(val);
+                    if val < 0x1000 {
+                        s.write_str(" <--- LOW ADDR");
+                    } else if val >= 0xFFFF800000000000 {
+                        s.write_str(" (kern)");
+                    }
+                    s.write_str("\n");
+                }
+                None => {
+                    s.write_hex(p);
+                    s.write_str(": INVALID\n");
+                    break;
+                }
             }
-            s.write_str("\n");
         }
     }
     s.write_str("[STACK BELOW]\n");
-    let stack_valid = stack >= 0xFFFF800000000000 || (stack >= 0x1000 && stack < 0x800000000000);
+    let stack_valid = is_kernel_addr(stack) || (stack >= 0x1000 && stack < 0x800000000000);
     if stack_valid {
         for i in 0..16u64 {
             let p = stack.wrapping_sub(i * 8);
             if p < 0x1000 { continue; }
-            let val: u64 = unsafe { core::ptr::read_volatile(p as *const u64) };
-            s.write_hex(p);
-            s.write_str(": ");
-            s.write_hex(val);
-            if val == 0x3333333333333333 {
-                s.write_str(" <--- FREED/UNINIT");
-            } else if val < 0x1000 {
-                s.write_str(" <--- LOW ADDR");
-            } else if val >= 0xFFFF800000000000 {
-                s.write_str(" (kern)");
+            match try_read_u64(p) {
+                Some(val) => {
+                    s.write_hex(p);
+                    s.write_str(": ");
+                    s.write_hex(val);
+                    if val == 0x3333333333333333 {
+                        s.write_str(" <--- FREED/UNINIT");
+                    } else if val < 0x1000 {
+                        s.write_str(" <--- LOW ADDR");
+                    } else if val >= 0xFFFF800000000000 {
+                        s.write_str(" (kern)");
+                    }
+                    s.write_str("\n");
+                }
+                None => {
+                    s.write_hex(p);
+                    s.write_str(": INVALID\n");
+                    break;
+                }
             }
-            s.write_str("\n");
         }
     } else {
         s.write_str("(invalid stack pointer)\n");
@@ -406,13 +456,20 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     s.write_str("\n");
 
     s.write_str("[CODE]\n");
-    if rip >= 0xFFFF800000000000 {
+    if is_kernel_addr(rip) {
         let page_off = rip & 0xFFF;
         let count = 16.min(4096 - page_off);
         for i in 0..count {
-            let byte: u8 = unsafe { core::ptr::read_volatile((rip + i) as *const u8) };
-            s.write_hex(byte as u64);
-            s.write_str(" ");
+            match try_read_u8(rip + i) {
+                Some(byte) => {
+                    s.write_hex(byte as u64);
+                    s.write_str(" ");
+                }
+                None => {
+                    s.write_str("?? ");
+                    break;
+                }
+            }
         }
     } else {
         s.write_str("(invalid rip)\n");
@@ -437,19 +494,27 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     s.write_str("\n");
 
     s.write_str("[STACK]\n");
-    let stack_valid = rsp >= 0xFFFF800000000000 || (rsp >= 0x1000 && rsp < 0x800000000000);
+    let stack_valid = is_kernel_addr(rsp) || (rsp >= 0x1000 && rsp < 0x800000000000);
     if stack_valid {
         for i in 0..20u64 {
             let p = rsp.wrapping_add(i * 8);
             if p < 0x1000 { continue; }
-            let val: u64 = unsafe { core::ptr::read_volatile(p as *const u64) };
-            s.write_hex(p);
-            s.write_str(": ");
-            s.write_hex(val);
-            if val < 0x1000 && val != 0 {
-                s.write_str(" <--- small");
+            match try_read_u64(p) {
+                Some(val) => {
+                    s.write_hex(p);
+                    s.write_str(": ");
+                    s.write_hex(val);
+                    if val < 0x1000 && val != 0 {
+                        s.write_str(" <--- small");
+                    }
+                    s.write_str("\n");
+                }
+                None => {
+                    s.write_hex(p);
+                    s.write_str(": INVALID\n");
+                    break;
+                }
             }
-            s.write_str("\n");
         }
     } else {
         s.write_str("(invalid stack pointer)\n");
