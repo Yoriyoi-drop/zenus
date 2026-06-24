@@ -84,7 +84,7 @@ pub fn init_timer(vector: u8) {
     // in the ISR return path, corrupting the target task's saved RIP.
     // With 50_000_000 ticks: 25 ms at 2 GHz, 500 ms at 100 MHz.
     // TIME_SLICE=5 → every task runs for ~125 ms, which is still snappy.
-    lapic_write(0x380, 50_000_000);
+    lapic_write(0x380, 1_000_000);
     lapic_write(0x320, vector as u32 | 0x20000); // periodic mode, unmasked
 }
 

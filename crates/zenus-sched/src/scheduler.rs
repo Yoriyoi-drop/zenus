@@ -511,11 +511,13 @@ unsafe fn alloc_stack(size: usize) -> (u64, core::alloc::Layout) {
 pub fn yield_now() {
     let cpu = current_cpu();
     if (cpu as usize) >= MAX_CPUS {
+        zenus_console::serial::flush_output();
         x86_64::instructions::hlt();
         return;
     }
     let count = TASK_COUNT.load(Ordering::Acquire);
     if count <= 1 {
+        zenus_console::serial::flush_output();
         x86_64::instructions::hlt();
         return;
     }
@@ -531,6 +533,7 @@ pub fn yield_now() {
     let next = find_next_ready(&tasks, current, cpu);
     if next == current {
         drop(tasks);
+        zenus_console::serial::flush_output();
         x86_64::instructions::hlt();
         return;
     }
@@ -836,9 +839,7 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     // Flush output buffer on every tick so the current task's output
     // doesn't stall indefinitely.  This call is fast (just drains a
     // SpinLock-guarded buffer to the UART) and prevents echo lag.
-    if current != 0 {
-        zenus_console::serial::flush_output();
-    }
+    zenus_console::serial::flush_output();
 
     if !expired {
         return 0;
@@ -924,6 +925,7 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 }
 
 pub fn idle() -> ! {
+    zenus_console::serial::flush_output();
     unsafe {
         core::arch::asm!(
             "cli",

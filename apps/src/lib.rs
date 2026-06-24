@@ -417,9 +417,12 @@ pub extern "C" fn entry() -> ! {
         smp::wake_aps();
 
         // 12. Spawn shell as a real scheduler task FIRST (before timer starts)
-        let _shell_tid = scheduler::create_task(shell_task, 65536);
-
-        both!(serial, hhdm_offset, "[OK] Shell task spawned\n");
+        let shell_tid = scheduler::create_task(shell_task, 65536);
+        if shell_tid == 0 {
+            both!(serial, hhdm_offset, "[FAIL] Shell task creation failed!\n");
+        } else {
+            both!(serial, hhdm_offset, "[OK] Shell task spawned (tid={shell_tid})\n");
+        }
 
         // 12a. Start the init system — spawn all registered services
         zenus_sched::init::init_system_start();
@@ -437,7 +440,10 @@ pub extern "C" fn entry() -> ! {
         interrupts::apic::init_timer(48);
         serial.write_str("[TMR] Timer started, entering idle\n");
 
-        // 14. Become idle — let the scheduler run the shell task
+        // 14. Flush any remaining boot output before entering idle
+        zenus_console::serial::flush_output();
+
+        // 15. Become idle — let the scheduler run the shell task
         scheduler::idle();
     }
 }

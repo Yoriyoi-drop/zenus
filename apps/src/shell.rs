@@ -116,6 +116,7 @@ impl Shell {
             }
             let mut w = self.writer();
             w.write_str(PROMPT);
+            zenus_console::serial::flush_output();
             let line = match self.read_line() {
                 Some(l) => l,
                 None => continue,
