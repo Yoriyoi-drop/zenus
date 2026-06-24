@@ -144,7 +144,7 @@ core::arch::global_asm!(
     ".intel_syntax noprefix",
     ".globl apic_timer_isr_stub",
     "apic_timer_isr_stub:",
-    "  push rax",
+  "  push rax",
     "  push rcx",
     "  push rdx",
     "  push rbx",
@@ -811,25 +811,6 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     zenus_arch::watchdog::watchdog_tick();
     zenus_arch::watchdog::watchdog_pet();
 
-    // Guard: if running on the boot stack (not yet in the idle task),
-    // skip context switching. This prevents the timer from trying to
-    // save/restore the idle task's RSP while it's still on the boot stack.
-    if cpu == 0 {
-        let current = CURRENT_TASK[0].load(Ordering::Relaxed);
-        if current == 0 {
-            let tasks = TASKS.lock();
-            if let Some(ref idle_task) = tasks.tasks[0] {
-                let base = idle_task.stack_alloc;
-                let size = idle_task.stack_size;
-                if size > 0 && (current_rsp < base || current_rsp >= base.wrapping_add(size as u64)) {
-                    drop(tasks);
-                    return 0;
-                }
-            }
-            drop(tasks);
-        }
-    }
-
     let count = TASK_COUNT.load(Ordering::Acquire);
     if count <= 1 {
         return 0;
@@ -852,7 +833,17 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         false
     };
 
-    if !expired {
+    let next = find_next_ready(&tasks, current, cpu);
+    if next == current {
+        if current != 0 {
+            // Flush output buffer so the current task's output is not
+            // delayed indefinitely when no task switch occurs.
+            zenus_console::serial::flush_output();
+        }
+        return 0;
+    }
+
+    if tasks.tasks[next as usize].is_none() {
         return 0;
     }
 
@@ -870,20 +861,23 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         return 0;
     }
 
-    let next = find_next_ready(&tasks, current, cpu);
-    if next == current {
-        return 0;
-    }
-
-    if tasks.tasks[next as usize].is_none() {
-        return 0;
-    }
-
-    if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
+    if let Some(ref mut current_task) = tasks.tasks[current as usize] {
         current_task.state = TaskState::Ready;
         current_task.cr3 = current_cr3_raw;
     } else {
         return 0;
+    }
+
+    // Flush the outgoing task's output to the UART before switching.
+    // This guarantees each task's output is atomically committed to the
+    // serial line before the next task runs — no interleaving.
+    zenus_console::serial::flush_output();
+
+    // Insert task-boundary separator so each task's output starts on a
+    // fresh line. This is the key UX improvement over Linux's serial
+    // console, where output from different writers lands on the same line.
+    if current != 0 && next != 0 {
+        zenus_console::serial::write_task_boundary();
     }
 
     let new_rsp = match tasks.tasks[next as usize].as_mut() {
@@ -921,40 +915,20 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     new_rsp
 }
 
-core::arch::global_asm!(
-    ".section .text._sched_idle_asm, \"ax\"",
-    ".globl _sched_idle_asm",
-    ".type _sched_idle_asm, @function",
-    "_sched_idle_asm:",
-    "cli",
-    "mov rax, qword ptr [rip + {idle}]",
-    "mov rsp, rax",
-    "sti",
-    "hlt",
-    "0:",
-    "sti",
-    "hlt",
-    "jmp 0b",
-    idle = sym IDLE_RSP,
-);
-
-extern "C" {
-    fn _sched_idle_asm() -> !;
-}
-
-/// Opaque reference that ThinLTO cannot devirtualize.
-/// Stored as a raw pointer so the compiler sees an indirect call.
-struct SyncPtr(*const ());
-unsafe impl Sync for SyncPtr {}
-
-#[used]
-#[link_section = ".text._sched_idle_ref"]
-static SCHED_IDLE_KEEP: SyncPtr = SyncPtr(_sched_idle_asm as *const () as *const ());
-
 pub fn idle() -> ! {
-    let p = unsafe { core::ptr::read_volatile(&SCHED_IDLE_KEEP).0 };
-    let f: unsafe extern "C" fn() -> ! = unsafe { core::mem::transmute(p) };
-    unsafe { f() }
+    unsafe {
+        core::arch::asm!(
+            "cli",
+            "mov rax, qword ptr [rip + {idle}]",
+            "mov rsp, rax",
+            "2:",
+            "sti",
+            "hlt",
+            "jmp 2b",
+            idle = sym IDLE_RSP,
+            options(noreturn)
+        );
+    }
 }
 
 pub fn ap_idle() -> ! {

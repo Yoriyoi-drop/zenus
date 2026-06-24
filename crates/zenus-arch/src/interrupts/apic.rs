@@ -77,11 +77,14 @@ pub extern "C" fn apic_timer_eoi() {
 
 pub fn init_timer(vector: u8) {
     lapic_write(0x3E0, 0xB);          // divide by 1
-    // Use conservative count that works across QEMU (TCG/KVM) and real HW:
-    // - 100MHz bus (QEMU TCG): ~1ms per tick (1000 Hz)
-    // - 2-3GHz bus (KVM/real): ~33-50μs per tick (20-30 KHz)
-    // Both are fine for preemptive multitasking with TIME_SLICE=5.
-    lapic_write(0x380, 100_000);
+    // Use a count large enough that the timer NEVER fires during the ISR.
+    // On QEMU KVM the APIC timer runs at TSC frequency (~2 GHz), so each
+    // tick is 50 μs with INITCNT=100_000 — shorter than the ISR execution
+    // time. This causes a nested timer interrupt between popfq and jmp rax
+    // in the ISR return path, corrupting the target task's saved RIP.
+    // With 50_000_000 ticks: 25 ms at 2 GHz, 500 ms at 100 MHz.
+    // TIME_SLICE=5 → every task runs for ~125 ms, which is still snappy.
+    lapic_write(0x380, 50_000_000);
     lapic_write(0x320, vector as u32 | 0x20000); // periodic mode, unmasked
 }
 
