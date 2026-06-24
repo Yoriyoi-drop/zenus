@@ -1,6 +1,5 @@
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::Ordering;
 
-use zenus_console::serial::SerialPort;
 use zenus_mem::paging;
 use crate::QUEUE_SIZE;
 

@@ -337,7 +337,7 @@ V.   SUBSISTEM JARINGAN (zenus-net)
      [OK] RX/TX ring buffer
      [OK] Link status detection
      [KRITIK] Hanya PIO mode — tidak ada bus master DMA
-     [KRITIK] Hanya mendukung RTL8139 — tidak ada e1000, virtio, etc.
+      [OK] Virtio-net berjalan bersama RTL8139
      [KRITIK] Tidak ada multi-queue support
      [KRITIK] Tidak ada checksum offloading
      [KRITIK] Driver monolithic di crate zenus-net — tidak pluggable
@@ -652,7 +652,7 @@ XIV.  KEKURANGAN KRITIS (CRITICAL SHORTCOMINGS)
 ================================================================================
 
   [KRITIS]   ❌ Hanya mendukung x86_64 — tidak ada portabilitas
-  [KRITIS]   ❌ Tidak ada driver virtio — tidak bisa jalan di cloud VM efisien
+  [OK]       ✅ Driver virtio-net, virtio-blk, virtio-balloon via PCI transport
   [KRITIS]   ❌ ATA PIO-only (tanpa DMA) — performa storage sangat buruk
   [KRITIS]   ❌ Network driver PIO-only (RTL8139) — performa jaringan buruk
   [KRITIS]   ❌ Tidak ada dynamic memory management (swap, OOM, page reclaim)
@@ -733,14 +733,14 @@ KELEMAHAN UTAMA:
   - Tidak ada dynamic memory management (swap, OOM)
   - User space sangat primitif (no libc, no fork/exec)
   - Syscall API sangat terbatas (22 dari 300+ yang dibutuhkan)
-  - Tidak ada driver untuk hardware modern (virtio, NVMe, AHCI, e1000)
+  - Driver virtio sudah ada (net, blk, balloon) — NVMe/AHCI/e1000 belum
   - Keamanan minimal (no SMAP/SMEP, no KPTI)
   - Dokumentasi sangat kurang
 
 PROYEKSI:
   Untuk mencapai beta, diperlukan setidaknya:
-  1. Driver AHCI/SATA dan virtio-blk (DMA)
-  2. Driver virtio-net (DMA)
+  1. ✅ Virtio drivers (net, blk, balloon) jalan — AHCI/SATA dan NVMe berikutnya
+  2. DMA untuk ATA dan RTL8139 — virtio sudah DMA via MMIO
   3. Shared library support (dynamic linker + subset libc)
   4. fork/exec/wait/exit system calls
   5. Init system (PID 1)

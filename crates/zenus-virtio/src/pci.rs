@@ -1,8 +1,9 @@
 use core::ptr;
+use x86_64::VirtAddr;
+use x86_64::PhysAddr;
 use zenus_arch::pci::PciDevice;
-use zenus_console::serial::SerialPort;
 use zenus_mem::paging;
-use crate::{serial, VIRTIO_VENDOR_ID};
+use crate::serial;
 
 pub const PCI_CAP_ID_VNDR: u8 = 0x09;
 
@@ -45,9 +46,19 @@ unsafe fn read_bar_phys(dev: &PciDevice, bar_idx: u8) -> u64 {
         _ => return 0,
     };
     if raw & 1 == 1 {
-        (raw & 0xFFFC) as u64
+        return (raw & 0xFFFC) as u64;
+    }
+    let is_64bit = (raw & 0x06) == 0x04;
+    let low = (raw & 0xFFFFFFF0) as u64;
+    if is_64bit && bar_idx < 5 {
+        let high_raw = match bar_idx + 1 {
+            0 => dev.bar0, 1 => dev.bar1, 2 => dev.bar2,
+            3 => dev.bar3, 4 => dev.bar4, 5 => dev.bar5,
+            _ => return low,
+        };
+        low | ((high_raw as u64) << 32)
     } else {
-        (raw & 0xFFFFFFF0) as u64
+        low
     }
 }
 
@@ -72,8 +83,8 @@ unsafe fn pci_read_cap_bytes(dev: &PciDevice, cap_offset: u8, buf: &mut [u8]) {
 fn find_virtio_caps(dev: &PciDevice) -> [Option<VirtioPciCap>; 6] {
     let mut caps: [Option<VirtioPciCap>; 6] = [None; 6];
     unsafe {
-        let status = pci_read_config(dev.bus, dev.device, dev.function, 0x06);
-        if (status >> 4) & 1 == 0 {
+        let status_word = pci_read_config(dev.bus, dev.device, dev.function, 0x06);
+        if (status_word & (1 << 20)) == 0 {
             return caps;
         }
         let cap_ptr_reg = pci_read_config(dev.bus, dev.device, dev.function, 0x34);
@@ -82,10 +93,10 @@ fn find_virtio_caps(dev: &PciDevice) -> [Option<VirtioPciCap>; 6] {
             return caps;
         }
         loop {
-            let cap_id = (pci_read_config(dev.bus, dev.device, dev.function, cap_off) & 0xFF) as u8;
-            if cap_id == 0 {
-                break;
-            }
+            let dword = pci_read_config(dev.bus, dev.device, dev.function, cap_off);
+            let cap_id = (dword & 0xFF) as u8;
+            let next = ((dword >> 8) & 0xFF) as u8;
+            if cap_id == 0 { break; }
             if cap_id == PCI_CAP_ID_VNDR {
                 let mut hdr = [0u8; 16];
                 pci_read_cap_bytes(dev, cap_off, &mut hdr);
@@ -100,10 +111,7 @@ fn find_virtio_caps(dev: &PciDevice) -> [Option<VirtioPciCap>; 6] {
                     caps[idx] = Some(cap);
                 }
             }
-            let next = (pci_read_config(dev.bus, dev.device, dev.function, cap_off + 1) & 0xFF) as u8;
-            if next == 0 || next < 0x40 {
-                break;
-            }
+            if next == 0 || next < 0x40 { break; }
             cap_off = next;
         }
     }
@@ -114,6 +122,13 @@ pub unsafe fn init_device(dev: &PciDevice) -> Option<VirtioPciTransport> {
     let s = serial();
     let caps = find_virtio_caps(dev);
 
+    if caps[VIRTIO_PCI_CAP_COMMON as usize].is_none()
+        || caps[VIRTIO_PCI_CAP_NOTIFY as usize].is_none()
+        || caps[VIRTIO_PCI_CAP_ISR as usize].is_none()
+    {
+        return None;
+    }
+
     let common = caps[VIRTIO_PCI_CAP_COMMON as usize]?;
     let notify = caps[VIRTIO_PCI_CAP_NOTIFY as usize]?;
     let isr = caps[VIRTIO_PCI_CAP_ISR as usize]?;
@@ -121,6 +136,19 @@ pub unsafe fn init_device(dev: &PciDevice) -> Option<VirtioPciTransport> {
     let hhdm = paging::hhdm_offset();
 
     let bar_phys = read_bar_phys(dev, common.bar);
+
+    // Map BAR pages (HHDM may not cover PCI MMIO regions)
+    {
+        use x86_64::structures::paging::PageTableFlags;
+        let mmio_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_CACHE | PageTableFlags::NO_EXECUTE;
+        let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
+        for page_off in (0..0x4000u64).step_by(0x1000) {
+            let virt = VirtAddr::new(bar_phys + page_off + hhdm);
+            let phys = PhysAddr::new(bar_phys + page_off);
+            paging::map_page(virt, phys, mmio_flags, &mut *allocator);
+        }
+    }
 
     let common_base = bar_phys + common.offset as u64 + hhdm;
     let notify_base = bar_phys + notify.offset as u64 + hhdm;
@@ -130,7 +158,8 @@ pub unsafe fn init_device(dev: &PciDevice) -> Option<VirtioPciTransport> {
         .unwrap_or(0);
 
     let notify_off_multiplier = if notify.length >= 4 {
-        ptr::read_volatile((notify_base) as *const u32)
+        let raw = ptr::read_volatile(notify_base as *const u32);
+        raw.wrapping_add(2)
     } else {
         0
     };
@@ -139,7 +168,7 @@ pub unsafe fn init_device(dev: &PciDevice) -> Option<VirtioPciTransport> {
         dev: *dev,
         common_base,
         notify_base,
-        notify_off_multiplier: notify_off_multiplier.wrapping_add(2),
+        notify_off_multiplier,
         isr_base,
         device_base,
     };
@@ -153,13 +182,6 @@ pub unsafe fn init_device(dev: &PciDevice) -> Option<VirtioPciTransport> {
     s.write_str(" (0x");
     s.write_hex(dev.device_id as u64);
     s.write_str(")\n");
-    s.write_str("[VIRTIO] common=0x");
-    s.write_hex(common_base);
-    s.write_str(" notify=0x");
-    s.write_hex(notify_base);
-    s.write_str(" isr=0x");
-    s.write_hex(isr_base);
-    s.write_str("\n");
 
     Some(trans)
 }
@@ -215,11 +237,11 @@ impl VirtioPciTransport {
     }
 
     pub unsafe fn device_status(&self) -> u8 {
-        self.common_read8(4)
+        self.common_read8(0x14)
     }
 
     pub unsafe fn set_device_status(&self, status: u8) {
-        self.common_write8(4, status);
+        self.common_write8(0x14, status);
     }
 
     pub unsafe fn reset(&self) {
@@ -229,31 +251,30 @@ impl VirtioPciTransport {
         }
     }
 
-    pub unsafe fn negotiate_features(&self, device_features: u64) -> u64 {
-        self.common_write32(0x10, (device_features & 0xFFFFFFFF) as u32);
-        self.common_write32(0x14, ((device_features >> 32) & 0xFFFFFFFF) as u32);
-        let lo = self.common_read32(0x10);
-        let hi = self.common_read32(0x14);
+    pub unsafe fn negotiate_features(&self, select: u64) -> u64 {
+        self.common_write32(0x08, 0);
+        self.common_write32(0x0C, (select & 0xFFFFFFFF) as u32);
+        self.common_write32(0x08, 1);
+        self.common_write32(0x0C, ((select >> 32) & 0xFFFFFFFF) as u32);
+        self.common_write32(0x08, 0);
+        let lo = self.common_read32(0x0C);
+        self.common_write32(0x08, 1);
+        let hi = self.common_read32(0x0C);
         (hi as u64) << 32 | lo as u64
     }
 
     pub unsafe fn setup_queue(&self, queue_idx: u16, desc_phys: u64, avail_phys: u64, used_phys: u64) -> u16 {
-        self.common_write16(0x08, queue_idx);
-        let size = self.common_read16(0x06);
+        self.common_write16(0x16, queue_idx);
+        let size = self.common_read16(0x18);
         if size == 0 {
             return 0;
         }
-        self.common_write64(0x18, desc_phys);
-        self.common_write16(0x1e, 0);
-        self.common_write16(0x20, 0);
-        self.common_write16(0x22, 0);
-        self.common_write16(0x24, 0);
-        self.common_write32(0x28, avail_phys as u32);
-        self.common_write32(0x2c, (avail_phys >> 32) as u32);
-        self.common_write32(0x30, used_phys as u32);
-        self.common_write32(0x34, (used_phys >> 32) as u32);
-        self.common_write16(0x08, queue_idx);
-        let enabled = self.common_read16(0x0e);
+        self.common_write64(0x20, desc_phys);
+        self.common_write64(0x28, avail_phys);
+        self.common_write64(0x30, used_phys);
+        self.common_write16(0x1C, 1);
+        self.common_write16(0x16, queue_idx);
+        let enabled = self.common_read16(0x1C);
         if enabled == 0 {
             0
         } else {
@@ -279,15 +300,17 @@ impl VirtioPciTransport {
 
     pub fn read_device_features(&self) -> u64 {
         unsafe {
-            let lo = self.common_read32(0x00);
+            self.common_write32(0x00, 0);
+            let lo = self.common_read32(0x04);
+            self.common_write32(0x00, 1);
             let hi = self.common_read32(0x04);
             (hi as u64) << 32 | lo as u64
         }
     }
 
     pub unsafe fn get_queue_size(&self, queue_idx: u16) -> u16 {
-        self.common_write16(8, queue_idx);
-        self.common_read16(6)
+        self.common_write16(0x16, queue_idx);
+        self.common_read16(0x18)
     }
 
     pub unsafe fn get_device_config_space(&self) -> u64 {

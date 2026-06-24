@@ -1,7 +1,6 @@
-use core::sync::atomic::Ordering;
+use core::ptr;
 use alloc::format;
 use alloc::boxed::Box;
-use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 use zenus_mem::paging;
 use zenus_fs::devfs::{self, BlockDeviceOps};
@@ -60,6 +59,24 @@ impl VirtioBlk {
     pub unsafe fn new(transport: VirtioPciTransport) -> Option<Self> {
         let s = serial();
         s.write_str("[VIRTIO-BLK] Initializing...\n");
+
+        transport.set_device_status(0);
+        while transport.device_status() != 0 { core::hint::spin_loop(); }
+        transport.set_device_status(transport.device_status() | 1);
+        transport.set_device_status(transport.device_status() | 2);
+
+        let device_features = transport.read_device_features();
+        let _negotiated = transport.negotiate_features(device_features);
+
+        transport.set_device_status(transport.device_status() | 8);
+        if transport.device_status() & 8 == 0 {
+            s.write_str("[VIRTIO-BLK] FEATURES_OK rejected, status=");
+            s.write_hex(transport.device_status() as u64);
+            s.write_str("\n");
+            return None;
+        }
+
+
 
         let cr3 = paging::kernel_cr3();
         let queue_mem: &'static mut VirtioQueueMem = &mut BLK_QUEUE_MEM;
@@ -127,11 +144,7 @@ impl VirtioBlk {
         let buf_virt = &mut BLK_BUFS[buf_off] as *mut u8 as u64;
         let buf_phys = paging::virt_to_phys_raw(cr3, buf_virt).unwrap_or(0);
 
-        let mut hdr = VirtioBlkReqHdr {
-            type_: VIRTIO_BLK_T_IN,
-            reserved: 0,
-            sector: lba,
-        };
+        let mut hdr = VirtioBlkReqHdr { type_: VIRTIO_BLK_T_IN, reserved: 0, sector: lba };
         let mut resp = VirtioBlkResp { status: 0xFF, padding: [0; 15] };
         let hdr_virt = &mut hdr as *mut VirtioBlkReqHdr as u64;
         let hdr_phys = paging::virt_to_phys_raw(cr3, hdr_virt).unwrap_or(0);
@@ -150,7 +163,7 @@ impl VirtioBlk {
             flags: VRING_DESC_F_WRITE | VRING_DESC_F_NEXT, next: d2,
         };
         self.queue.mem.desc[d2 as usize] = VirtioDesc {
-            addr: resp_phys, len: 16, flags: VRING_DESC_F_WRITE, next: 0,
+            addr: resp_phys, len: 1, flags: VRING_DESC_F_WRITE, next: 0,
         };
 
         self.queue.submit(d0);
@@ -164,7 +177,8 @@ impl VirtioBlk {
         }
 
         BLK_BUF_BUSY[buf_idx as usize] = false;
-        if resp.status == STATUS_OK {
+        let status = ptr::read_volatile(&resp.status as *const u8);
+        if status == STATUS_OK {
             let copy_len = core::cmp::min((count as usize) * 512, buf.len());
             buf[..copy_len].copy_from_slice(&BLK_BUFS[buf_off..buf_off + copy_len]);
             true
@@ -213,7 +227,7 @@ impl VirtioBlk {
             flags: VRING_DESC_F_NEXT, next: d2,
         };
         self.queue.mem.desc[d2 as usize] = VirtioDesc {
-            addr: resp_phys, len: 16, flags: VRING_DESC_F_WRITE, next: 0,
+            addr: resp_phys, len: 1, flags: VRING_DESC_F_WRITE, next: 0,
         };
 
         self.queue.submit(d0);
@@ -227,7 +241,7 @@ impl VirtioBlk {
         }
 
         BLK_BUF_BUSY[buf_idx as usize] = false;
-        resp.status == STATUS_OK
+        ptr::read_volatile(&resp.status as *const u8) == STATUS_OK
     }
 }
 

@@ -1,9 +1,7 @@
-use core::sync::atomic::Ordering;
-use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 use zenus_mem::paging;
 use crate::pci::VirtioPciTransport;
-use crate::queue::{VirtioQueue, VirtioQueueMem, VirtioAvail, VirtioDesc, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+use crate::queue::{VirtioQueue, VirtioQueueMem, VirtioAvail, VirtioDesc, VRING_DESC_F_WRITE};
 use crate::{serial, QUEUE_SIZE};
 
 const VIRTIO_NET_F_MAC: u64 = 5;
@@ -64,7 +62,7 @@ static NET_LOCK: SpinLock<()> = SpinLock::new(());
 
 impl VirtioNet {
     pub fn base_offset() -> u16 {
-        20
+        0
     }
 
     pub unsafe fn new(transport: VirtioPciTransport) -> Option<Self> {
@@ -81,7 +79,7 @@ impl VirtioNet {
             feats |= 1 << VIRTIO_NET_F_STATUS;
         }
 
-        let negotiated = transport.negotiate_features(feats);
+        let _negotiated = transport.negotiate_features(feats);
 
         let cr3 = paging::kernel_cr3();
         let rx_mem: &'static mut VirtioQueueMem = &mut RX_QUEUE_MEM;
@@ -118,12 +116,12 @@ impl VirtioNet {
 
         net.setup_rx_bufs();
 
-        s.write_str("[VIRTIO-NET] MAC ");
-        for b in &mac {
+        s.write_str("[VIRTIO-NET] Ready (MAC ");
+        for (i, b) in mac.iter().enumerate() {
+            if i > 0 { s.write_str(":"); }
             s.write_hex(*b as u64);
-            s.write_str(":");
         }
-        s.write_str("\n[VIRTIO-NET] Ready\n");
+        s.write_str(")\n");
 
         Some(net)
     }
