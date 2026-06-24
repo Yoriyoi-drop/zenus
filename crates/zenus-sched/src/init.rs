@@ -93,6 +93,10 @@ pub fn init_system_start() -> bool {
                 serial().write_str("[INIT] Failed to start ");
                 serial().write_str(name);
                 serial().write_str("\n");
+                let mut services = SERVICES.lock();
+                if let Some(ref mut s) = services.services[idx] {
+                    s.state = ServiceState::Failed;
+                }
             }
         }
     }

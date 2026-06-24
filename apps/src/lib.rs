@@ -421,7 +421,9 @@ pub extern "C" fn entry() -> ! {
         if shell_tid == 0 {
             both!(serial, hhdm_offset, "[FAIL] Shell task creation failed!\n");
         } else {
-            both!(serial, hhdm_offset, "[OK] Shell task spawned (tid={shell_tid})\n");
+            both!(serial, hhdm_offset, "[OK] Shell task spawned (tid=");
+            serial.write_u64(shell_tid);
+            serial.write_str(")\n");
         }
 
         // 12a. Start the init system — spawn all registered services
