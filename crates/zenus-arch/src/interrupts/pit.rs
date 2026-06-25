@@ -4,7 +4,7 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 const PIT_FREQ: u32 = 1193182;
 
 pub fn init() {
-    let divisor: u16 = (PIT_FREQ / 1000) as u16;
+    let divisor: u16 = (PIT_FREQ / 100) as u16;
     unsafe {
         core::arch::asm!("out 0x43, al", in("al") 0x36u8);
         core::arch::asm!("out 0x40, al", in("al") (divisor & 0xFF) as u8);

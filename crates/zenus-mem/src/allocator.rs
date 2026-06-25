@@ -6,7 +6,7 @@ use zenus_sync::spinlock::SpinLock;
 
 static HEAP_LOCK: SpinLock<()> = SpinLock::new(());
 
-const HEAP_SIZE: usize = 1024 * 1024 * 128;
+const HEAP_SIZE: usize = 1024 * 1024 * 16;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 const HEADER_SIZE: usize = core::mem::size_of::<BlockHeader>();

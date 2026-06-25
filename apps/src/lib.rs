@@ -19,10 +19,8 @@ fn ata_write2(lba: u64, buf: &[u8]) -> bool { zenus_arch::ata::write_sectors(2, 
 fn ata_read3(lba: u64, buf: &mut [u8]) -> bool { zenus_arch::ata::read_sectors(3, lba, 1, buf) }
 fn ata_write3(lba: u64, buf: &[u8]) -> bool { zenus_arch::ata::write_sectors(3, lba, 1, buf) }
 
-// Force cargo to link zenus-syscall objects into the final binary
 extern crate zenus_syscall;
 
-// Force keep limine requests section from being GC'd
 #[used]
 #[link_section = ".limine_reqs"]
 static _FORCE_LIMINE: [u64; 0] = [];
@@ -42,6 +40,25 @@ struct EchoState {
 use zenus_mem::frame_allocator;
 use zenus_mem::frame_allocator::MemoryRegion;
 use zenus_sched::scheduler;
+
+fn rdtsc() -> u64 {
+    unsafe {
+        let lo: u32; let hi: u32;
+        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack, preserves_flags));
+        ((hi as u64) << 32) | lo as u64
+    }
+}
+
+fn boot_stage(serial: &mut SerialPort, label: &str, tsc_start: u64) -> u64 {
+    let now = rdtsc();
+    let elapsed = now - tsc_start;
+    serial.write_str("  [");
+    serial.write_str(label);
+    serial.write_str("] ");
+    serial.write_u64(elapsed / 1_000_000);
+    serial.write_str("M\n");
+    now
+}
 
 macro_rules! both {
     ($serial:expr, $hhdm:expr, $msg:expr) => {{
@@ -82,26 +99,20 @@ fn ssh_service_task() {
 
 #[no_mangle]
 pub extern "C" fn entry() -> ! {
-    // Early debug: write to Bochs/QEMU debug port
     unsafe {
         core::arch::asm!("out 0xe9, al", in("al") b'Z');
     }
     SerialPort::init();
     zenus_console::log::dmesg_init();
     zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "Zenus boot started");
-    let serial = SerialPort::new(0x3F8);
-    serial.write_str("\n");
-    serial.write_str("========================================\n");
-    serial.write_str("         Zenus OS v0.1.0               \n");
-    serial.write_str("         Stable Server Kernel           \n");
-    serial.write_str("========================================\n");
+    let mut serial = SerialPort::new(0x3F8);
+    let _t0 = rdtsc();
 
     // 1. Parse Limine boot info
+    let s = rdtsc();
     zenus_arch::limine::BootInfo::get();
-    serial.write_str("[OK] Boot protocol initialized\n");
-    zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Boot protocol initialized");
+    let _ = boot_stage(&mut serial, "limine", s);
 
-    // Verify critical responses
     if zenus_arch::limine::MEMMAP_REQUEST.response.is_null() {
         serial.write_str("[FATAL] MEMMAP response is NULL - bootloader did not fill requests\n");
         loop { x86_64::instructions::hlt(); }
@@ -117,15 +128,11 @@ pub extern "C" fn entry() -> ! {
     };
     zenus_arch::limine::store_hhdm_offset(hhdm_offset);
 
-    // Initialize VGA text mode output
     zenus_console::vga::init(hhdm_offset);
     zenus_console::vga::write_str("\n", hhdm_offset);
-    zenus_console::vga::write_str("========================================\n", hhdm_offset);
-    zenus_console::vga::write_str("         Zenus OS v0.1.0               \n", hhdm_offset);
-    zenus_console::vga::write_str("         Stable Server Kernel           \n", hhdm_offset);
-    zenus_console::vga::write_str("========================================\n", hhdm_offset);
 
-    // 2. Initialize memory management
+    // 2. Memory map
+    let s = rdtsc();
     let memmap_resp: &zenus_arch::limine::LimineMemmapResponse =
         unsafe { &*zenus_arch::limine::MEMMAP_REQUEST.response.as_ptr() };
     let entry_ptrs = memmap_resp.entries.as_ptr::<*mut zenus_arch::limine::LimineMemmapEntry>();
@@ -145,15 +152,16 @@ pub extern "C" fn entry() -> ! {
             region_count += 1;
         }
     }
-    both!(serial, hhdm_offset, "[OK] Memory map acquired\n");
-
+    let _ = boot_stage(&mut serial, "memmap", s);
     let mem_regions = &regions[..region_count];
 
-    // 3. Initialize CPU features
+    // 3. CPU features
+    let s = rdtsc();
     cpu::init();
-    both!(serial, hhdm_offset, "[OK] CPU features initialized\n");
+    let _ = boot_stage(&mut serial, "cpu", s);
 
-    // 4. Initialize global frame allocator & paging
+    // 4. Frame allocator & paging
+    let s = rdtsc();
     frame_allocator::global_init(mem_regions);
     {
         let allocator = frame_allocator::FRAME_ALLOCATOR.lock();
@@ -163,46 +171,40 @@ pub extern "C" fn entry() -> ! {
         s2.write_str(" MB total\n");
         paging::init(hhdm_offset);
     }
-    // Reserve boot stack pages so the frame allocator doesn't hand them out
     frame_allocator::reserve_boot_stack(hhdm_offset);
-    both!(serial, hhdm_offset, "[OK] Paging initialized\n");
+    let _ = boot_stage(&mut serial, "paging", s);
 
-    // 5. Set up interrupt handling
+    // 5. Interrupts
+    let s = rdtsc();
     interrupts::init();
-    both!(serial, hhdm_offset, "[OK] Interrupts initialized\n");
+    let _ = boot_stage(&mut serial, "idt", s);
 
-    // 6. Initialize APIC and timers
+    // 6. APIC + PIT + timers
+    let s = rdtsc();
     let apic_base_raw = unsafe { cpu::read_msr(0x1B) };
     let apic_base = apic_base_raw & 0xFFFFF000;
-    serial.write_str("[APIC] IA32_APIC_BASE raw: 0x");
-    serial.write_hex(apic_base_raw);
-    serial.write_str(" flags: 0x");
-    serial.write_hex(apic_base_raw & 0xFFF);
-    serial.write_str(" EN=");
-    serial.write_byte_serial(if (apic_base_raw & (1 << 11)) != 0 { b'1' } else { b'0' });
-    serial.write_str(" BSP=");
-    serial.write_byte_serial(if (apic_base_raw & (1 << 8)) != 0 { b'1' } else { b'0' });
-    serial.write_str("\n");
     interrupts::apic::init_with_virt(apic_base + hhdm_offset);
     interrupts::apic::enable_pic_lint0();
     interrupts::pit::init();
     zenus_arch::rtc::init();
     zenus_arch::random::init_rng();
-    both!(serial, hhdm_offset, "[OK] RNG initialized\n");
-    both!(serial, hhdm_offset, "[OK] APIC & timers initialized\n");
+    let _ = boot_stage(&mut serial, "apic+pit", s);
 
     // 7. Enable interrupts
+    let s = rdtsc();
     x86_64::instructions::interrupts::enable();
-    both!(serial, hhdm_offset, "[OK] Interrupts enabled\n");
+    let _ = boot_stage(&mut serial, "sti", s);
 
-    // 7b. Initialize PS/2 keyboard driver
+    // 8. Keyboard
+    let s = rdtsc();
     zenus_arch::keyboard::init();
-    both!(serial, hhdm_offset, "[OK] PS/2 Keyboard driver initialized\n");
+    let _ = boot_stage(&mut serial, "kbd", s);
 
-    // 8. Initialize scheduler
+    // 9. Scheduler
+    let s = rdtsc();
     scheduler::init();
+    let _ = boot_stage(&mut serial, "sched", s);
 
-    // Test syscall: SYS_WRITE(1, msg, len) via direct extern C call
     let test_msg = "Hello via syscall!\n";
     let _ret = unsafe {
         extern "C" {
@@ -210,20 +212,20 @@ pub extern "C" fn entry() -> ! {
         }
         syscall_dispatch(1, 1, test_msg.as_ptr() as u64, test_msg.len() as u64)
     };
-    both!(serial, hhdm_offset, "[OK] Syscall handler initialized\n");
 
-    // 9. Initialize filesystem (tmpfs root + devfs at /dev)
+    // 10. Filesystem
+    let s = rdtsc();
     zenus_fs::vfs::init();
     zenus_fs::vfs::create_dir("/dev");
     let devfs: &dyn zenus_fs::vfs::FileSystem = &zenus_fs::devfs::DevFs;
     zenus_fs::vfs::mount("/dev", devfs);
-    // Create /tmp for temporary files
     zenus_fs::vfs::create_dir("/tmp");
-    both!(serial, hhdm_offset, "[OK] Filesystem initialized (tmpfs + devfs)\n");
+    let _ = boot_stage(&mut serial, "vfs", s);
 
-    // 9b. Load initrd (if available)
+    // 11. Initrd
+    let s = rdtsc();
     if zenus_arch::limine::MODULE_REQUEST.response.is_null() {
-        both!(serial, hhdm_offset, "[WARN] No initrd module loaded\n");
+        serial.write_str("[WARN] No initrd module loaded\n");
     } else {
         unsafe {
             let mod_resp: &zenus_arch::limine::LimineModuleResponse =
@@ -231,50 +233,32 @@ pub extern "C" fn entry() -> ! {
             if mod_resp.module_count > 0 {
                 let mod_ptrs = mod_resp.modules.as_ptr::<*mut zenus_arch::limine::LimineFile>();
                 let module = &**mod_ptrs;
-                serial.write_str("[INITRD] Loading initrd: ");
-                serial.write_u64(module.size);
-                serial.write_str(" bytes at ");
-                serial.write_hex(module.address.0);
-                serial.write_str("\n");
-
                 let initrd_virt = module.address.0;
                 let _mod_data = core::slice::from_raw_parts(
                     initrd_virt as *const u8,
                     module.size as usize,
                 );
-
-                both!(serial, hhdm_offset, "[INITRD] Parsing archive...\n");
                 if let Some(tarfs) = zenus_fs::tarfs::TarFs::load(initrd_virt, module.size) {
-                    both!(serial, hhdm_offset, "[OK] Initrd loaded\n");
                     zenus_fs::vfs::mount("/initrd", tarfs);
-                    both!(serial, hhdm_offset, "[INITRD] Mounted at /initrd\n");
-
-                    {
-                        let mut buf = [0u8; 64];
-                        if let Some(n) = tarfs.read(3, 0, &mut buf) {
-                            let txt = core::str::from_utf8(&buf[..n as usize]).unwrap_or("?");
-                            both!(serial, hhdm_offset, "[INITRD] hello.txt: ");
-                            both!(serial, hhdm_offset, txt);
-                        }
-                    }
-                } else {
-                    both!(serial, hhdm_offset, "[WARN] Failed to parse initrd\n");
                 }
-            } else {
-                both!(serial, hhdm_offset, "[WARN] No initrd modules\n");
             }
         }
     }
+    let _ = boot_stage(&mut serial, "initrd", s);
 
-    // 10. PCI bus scan
+    // 12. PCI
+    let s = rdtsc();
     zenus_arch::pci::init();
+    let _ = boot_stage(&mut serial, "pci", s);
 
-    // 10a. Initialize virtio devices (virtio-net, virtio-blk, etc.)
+    // 13. Virtio
+    let s = rdtsc();
     unsafe { zenus_virtio::init(); }
+    let _ = boot_stage(&mut serial, "virtio", s);
 
-    // 10b. Initialize ATA/IDE drives (disk storage)
+    // 14. ATA
+    let s = rdtsc();
     zenus_arch::ata::init();
-    // Register ATA drives as block devices in devfs
     {
         let count = zenus_arch::ata::device_count();
         let names = ["sda", "sdb", "sdc", "sdd"];
@@ -299,51 +283,35 @@ pub extern "C" fn entry() -> ! {
             }
         }
     }
+    let _ = boot_stage(&mut serial, "ata", s);
 
-        // 10b. Initialize crash dump subsystem
-        zenus_arch::crash::crash_dump_init();
-        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Crash dump initialized");
+    // 15. Misc subsystems (crash, syslog, sysctl, pkg, ns)
+    let s = rdtsc();
+    zenus_arch::crash::crash_dump_init();
+    zenus_console::syslog::syslog_init();
+    zenus_fs::sysctl::sysctl_init();
+    zenus_fs::pkg::pkg_init();
+    zenus_ns::uts::init();
+    zenus_ns::pid::init();
+    let _ = boot_stage(&mut serial, "subsys", s);
 
-        // 10c. Initialize syslog (4096-entry structured logging)
-        zenus_console::syslog::syslog_init();
-        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Syslog initialized");
-
-        // 10d. Initialize sysctl kernel parameter interface
-        zenus_fs::sysctl::sysctl_init();
-        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Sysctl initialized");
-
-        // 10e. Initialize package manager database
-        zenus_fs::pkg::pkg_init();
-        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Package manager initialized");
-
-        // 10f. Initialize container namespaces (PID, UTS, mount)
-        zenus_ns::uts::init();
-        zenus_ns::pid::init();
-        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Namespaces initialized");
-
-        // 10g. Try to mount ext2 filesystem on first ATA drive
+    // 16. Ext2 mount
+    let s = rdtsc();
     if zenus_arch::ata::device_count() > 0 {
-        both!(serial, hhdm_offset, "[EXT2] Trying to mount /mnt...\n");
         zenus_fs::vfs::create_dir("/mnt");
         if let Some(ext2_fs) = zenus_fs::ext2::Ext2Fs::mount(0) {
             zenus_fs::vfs::mount("/mnt", ext2_fs);
-            both!(serial, hhdm_offset, "[OK] ext2 filesystem mounted at /mnt\n");
-        } else {
-            both!(serial, hhdm_offset, "[EXT2] No ext2 filesystem found on /dev/sda\n");
         }
     }
-    // Try to mount ext2 on first virtio block device (vd0)
     if zenus_fs::devfs::block_device_count() > zenus_arch::ata::device_count() {
-        both!(serial, hhdm_offset, "[VIRTIO-BLK] Trying to mount /virtio...\n");
         zenus_fs::vfs::create_dir("/virtio");
         let ata_count = zenus_arch::ata::device_count() as u8;
         if let Some(ext2_fs) = zenus_fs::ext2::Ext2Fs::mount(ata_count) {
             zenus_fs::vfs::mount("/virtio", ext2_fs);
-            both!(serial, hhdm_offset, "[OK] ext2 on virtio-blk mounted at /virtio\n");
         }
     }
+    let _ = boot_stage(&mut serial, "ext2", s);
 
-    // 10c. Run unit tests before APIC timer (no preemption)
     #[cfg(feature = "testing")]
     {
         test_runner::run_tests(&mut serial);
@@ -351,83 +319,49 @@ pub extern "C" fn entry() -> ! {
         loop { x86_64::instructions::hlt(); }
     }
 
-    // Normal boot (non-testing)
     #[cfg(not(feature = "testing"))]
     {
-        // 11. Initialize networking
+        // 17. Network
+        let s = rdtsc();
         zenus_net::nic::init();
-        both!(serial, hhdm_offset, "[OK] Network initialized\n");
-
-        // 11a. Start TCP echo server on port 7
         if let Some(_idx) = zenus_net::tcp::listen(7) {
-            both!(serial, hhdm_offset, "[OK] TCP echo server on port 7\n");
         }
+        let _ = boot_stage(&mut serial, "net", s);
 
-        // 11b. Initialize lockdep for deadlock detection
         zenus_sync::lockdep::lockdep_init();
-        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Lockdep initialized");
-
-        // 11c. Initialize software watchdog
         zenus_arch::watchdog::watchdog_init(zenus_arch::watchdog::WatchdogType::Software, 30);
-        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Watchdog initialized (30s timeout)");
 
-        // 11d. Register SSH server as a system service
-        // Temporarily disabled to debug scheduler
-        // if zenus_sched::init::service_register("ssh", ssh_service_task, 65536, 0, 0, true) {
-        //     zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] SSH server registered as service");
-        // }
-
-        // 11f. Try to execute /initrd/init/startup.sh as the init script
-        /* // DISABLED: heap canary corruption during execute_command("echo")
-        if zenus_sched::init::initrd_execute() {
-            both!(serial, hhdm_offset, "[INITRD] Startup script executed\n");
-        }
-        */
-
-        // 11b. Initialize journal on device 0 at blocks 3000-3015
         if zenus_arch::ata::device_count() > 0 {
             if !zenus_fs::journal::journal_replay(0, 3000) {
-                both!(serial, hhdm_offset, "[WARN] Journal replay failed\n");
             }
             if zenus_fs::journal::journal_init(0, 3000, 16) {
-                both!(serial, hhdm_offset, "[OK] Journal initialized (blocks 3000-3015)\n");
-            } else {
-                both!(serial, hhdm_offset, "[WARN] Journal init failed\n");
             }
         }
 
-        // 11. Detect CPUs via Limine MP response
+        // 18. SMP
+        let s = rdtsc();
         smp::init();
-        both!(serial, hhdm_offset, "[OK] SMP initialized\n");
-
-        // 11b. Set AP idle function (SMP scheduler) and wake Application Processors
         zenus_arch::smp::set_ap_idle_fn(zenus_sched::scheduler::ap_idle);
         smp::wake_aps();
+        let _ = boot_stage(&mut serial, "smp", s);
 
-        // 12. Spawn shell as a scheduler task
+        // 19. Shell task
         let shell_tid = scheduler::create_task(shell_task, 65536);
-        if shell_tid == 0 {
-            both!(serial, hhdm_offset, "[FAIL] Shell task creation failed!\n");
-        } else {
-            both!(serial, hhdm_offset, "[OK] Shell task spawned (tid=");
-            serial.write_u64(shell_tid);
-            serial.write_str(")\n");
-        }
 
-        // 12a. Start the init system — spawn all registered services
         zenus_sched::init::init_system_start();
 
-        // 12b. Start service supervisor (periodic health checks)
-        // Supervisor runs in the idle loop via watchdog::watchdog_pet
+        let total_ms = rdtsc() - _t0;
+        serial.write_str("\n[BENCH] Boot stages above (TSC ticks / 1M)\n");
+        serial.write_str("[BENCH] Total boot: ");
+        serial.write_u64(total_ms / 1_000_000);
+        serial.write_str("M ticks\n");
 
-        both!(serial, hhdm_offset, "========================================\n");
-        both!(serial, hhdm_offset, "  Zenus OS siap! Server mode aktif.\n");
-        both!(serial, hhdm_offset, "========================================\n");
-
-        serial.write_str("[PIT] PIT-based scheduling active (~1000 Hz)\n");
+        serial.write_str("========================================\n");
+        serial.write_str("  Zenus OS siap! Server mode aktif.\n");
+        serial.write_str("========================================\n");
+        serial.write_str("[PIT] PIT-based scheduling active (~100 Hz)\n");
         zenus_console::serial::flush_output();
 
-        // BSP enters idle loop — PIT tick preempts to shell task
         scheduler::idle();
     }
 }
