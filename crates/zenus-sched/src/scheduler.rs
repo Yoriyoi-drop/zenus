@@ -287,7 +287,7 @@ pub fn init() {
     }
     let idle_initial_rsp = idle_sp as u64;
 
-    let mut idle_task = Task::new(0, idle_initial_rsp);
+    let mut idle_task = Task::new(0, idle_initial_rsp, "idle");
     idle_task.rsp = idle_initial_rsp;
     idle_task.stack_alloc = idle_stack_base;
     idle_task.stack_size = 16384;
@@ -385,7 +385,7 @@ pub fn clone_task(
         }
         let initial_rsp = sp as u64;
 
-        let mut task = Task::new(id, initial_rsp);
+        let mut task = Task::new(id, initial_rsp, core::str::from_utf8(&parent.name).unwrap_or(""));
         task.rsp = initial_rsp;
         task.stack_alloc = stack_base;
         task.stack_size = stack_size as u64;
@@ -437,7 +437,7 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64, 
     }
     let id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
     let stack_top = stack_base + stack_size as u64;
-    let cpu = 0u32;
+    let cpu = least_loaded_cpu();
 
     let aslr_user_rsp = if user_rsp == 0 {
         let slide = zenus_arch::random::get_random_page_aligned(0, 0x2000_0000u64);
@@ -467,7 +467,7 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64, 
         }
         let initial_rsp = sp as u64;
 
-        let mut task = Task::new(id, initial_rsp);
+        let mut task = Task::new(id, initial_rsp, "user");
         task.rsp = initial_rsp;
         task.stack_alloc = stack_base;
         task.stack_size = stack_size as u64;
@@ -494,7 +494,25 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64, 
     id
 }
 
+fn least_loaded_cpu() -> u32 {
+    let total_cpus = zenus_arch::smp::cpu_count().max(1);
+    let mut best = 0u32;
+    let mut best_count = u32::MAX;
+    for cpu in 0..total_cpus.min(8) {
+        let count = CPU_TASK_COUNT[cpu as usize].load(Ordering::Acquire);
+        if count < best_count {
+            best_count = count;
+            best = cpu;
+        }
+    }
+    best
+}
+
 pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
+    create_task_named(entry, stack_size, "")
+}
+
+pub fn create_task_named(entry: fn(), stack_size: usize, name: &str) -> u64 {
     let (stack_base, _stack_layout) = unsafe { alloc_stack(stack_size) };
     if stack_base == 0 {
         return 0;
@@ -502,7 +520,7 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
     let id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
     let stack_top = stack_base + stack_size as u64;
 
-    let cpu = 0u32;
+    let cpu = least_loaded_cpu();
 
     unsafe {
         let mut sp = stack_top as *mut u64;
@@ -515,7 +533,7 @@ pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
         }
         let initial_rsp = sp as u64;
 
-        let mut task = Task::new(id, initial_rsp);
+        let mut task = Task::new(id, initial_rsp, name);
         task.rsp = initial_rsp;
         task.stack_alloc = stack_base;
         task.stack_size = stack_size as u64;
@@ -730,6 +748,7 @@ pub fn list_tasks() -> [Option<TaskInfo>; MAX_TASKS] {
                 gid: task.gid,
                 uts_ns: task.uts_ns,
                 pid_ns: task.pid_ns,
+                name: task.name,
             });
         }
     }

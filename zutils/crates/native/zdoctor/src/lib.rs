@@ -1,15 +1,11 @@
-#![no_std>
-
-extern crate alloc;
+#![no_std]
 
 use zutils_common::{Args, Writer};
-use zenus_fs::ext2_fsck;
-use zenus_fs::block_cache;
 
 pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     w.write_str("=== Zenus Health Check ===\r\n");
 
-    let (hits, misses) = block_cache::bc_stats();
+    let (hits, misses) = zenus_fs::block_cache::bc_stats();
     let total_io = hits + misses;
     w.write_str("Block cache:  ");
     w.write_u64(hits);
@@ -23,8 +19,8 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     }
     w.write_str("\r\n");
 
+    let result = zenus_fs::ext2_fsck::fsck(0);
     w.write_str("Ext2 fsck:    ");
-    let result = ext2_fsck::fsck(0);
     if result.passed() {
         w.write_str("PASSED");
     } else {
@@ -35,12 +31,6 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     w.write_str(" errors, ");
     w.write_u64(result.warnings as u64);
     w.write_str(" warnings)\r\n");
-
-    let tasks = zenus_sched::scheduler::list_tasks();
-    let active = tasks.iter().flatten().filter(|t| t.state == zenus_sched::task::TaskState::Ready || t.state == zenus_sched::task::TaskState::Running).count();
-    w.write_str("Active tasks: ");
-    w.write_u64(active as u64);
-    w.write_str("\r\n");
 
     if zenus_arch::watchdog::watchdog_is_active() {
         w.write_str("Watchdog:     OK\r\n");

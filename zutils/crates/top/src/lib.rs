@@ -13,9 +13,9 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     w.write_str("Tasks: ");
     w.write_u64(tasks.iter().flatten().count() as u64);
     w.write_str("  Heap: ");
-    w.write_u64(used);
+    w.write_u64(used as u64);
     w.write_str("/");
-    w.write_u64(total);
+    w.write_u64(total as u64);
     w.write_str("\r\n\r\n");
     w.write_str("PID\tState\t\tCPU\tUID\tGID\r\n");
     for info in tasks.iter().flatten() {

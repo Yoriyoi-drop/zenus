@@ -56,10 +56,14 @@ pub struct Task {
     pub uts_ns: NsId,
     pub pid_ns: NsId,
     pub mnt_ns: NsId,
+    pub name: [u8; 32],
 }
 
 impl Task {
-    pub fn new(id: u64, stack: u64) -> Self {
+    pub fn new(id: u64, stack: u64, name: &str) -> Self {
+        let mut name_buf = [0u8; 32];
+        let len = name.as_bytes().len().min(31);
+        name_buf[..len].copy_from_slice(&name.as_bytes()[..len]);
         Task {
             id,
             state: TaskState::Ready,
@@ -80,6 +84,7 @@ impl Task {
             uts_ns: 0,
             pid_ns: 0,
             mnt_ns: 0,
+            name: name_buf,
         }
     }
 
@@ -100,4 +105,5 @@ pub struct TaskInfo {
     pub gid: u32,
     pub uts_ns: NsId,
     pub pid_ns: NsId,
+    pub name: [u8; 32],
 }

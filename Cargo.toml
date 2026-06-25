@@ -41,6 +41,18 @@ members = [
     "zutils/crates/df",
     "zutils/crates/du",
     "zutils/crates/chown",
+    "zutils/crates/pgrep",
+    "zutils/crates/top",
+    "zutils/crates/uptime",
+    "zutils/crates/which",
+    "zutils/crates/native/zbench",
+    "zutils/crates/native/zdiag",
+    "zutils/crates/native/zdoctor",
+    "zutils/crates/native/zinfo",
+    "zutils/crates/native/zmem",
+    "zutils/crates/native/zpkg",
+    "zutils/crates/native/zsys",
+    "zutils/crates/native/ztrace",
 ]
 resolver = "2"
 

@@ -1,6 +1,9 @@
 #![no_std]
 
+extern crate alloc;
+
 use zutils_common::{Args, Writer};
+use alloc::vec::Vec;
 
 const KNOWN_COMMANDS: &[&str] = &[
     "help", "echo", "ls", "cat", "clear", "timer", "ps", "pgrep", "top", "uptime",

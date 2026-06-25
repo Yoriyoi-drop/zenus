@@ -22,9 +22,9 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     w.write_hex(hhdm);
     w.write_str("\r\n");
     w.write_str("Heap:         ");
-    w.write_u64(used);
+    w.write_u64(used as u64);
     w.write_str("/");
-    w.write_u64(total);
+    w.write_u64(total as u64);
     w.write_str("\r\n");
     w.write_str("System ticks: ");
     w.write_u64(ticks);

@@ -48,6 +48,18 @@ zutils_grep = { path = "../zutils/crates/grep" }
 zutils_find = { path = "../zutils/crates/find" }
 zutils_du = { path = "../zutils/crates/du" }
 zutils_chown = { path = "../zutils/crates/chown" }
+zutils_pgrep = { path = "../zutils/crates/pgrep" }
+zutils_top = { path = "../zutils/crates/top" }
+zutils_uptime = { path = "../zutils/crates/uptime" }
+zutils_which = { path = "../zutils/crates/which" }
+zutils_zbench = { path = "../zutils/crates/native/zbench" }
+zutils_zdiag = { path = "../zutils/crates/native/zdiag" }
+zutils_zdoctor = { path = "../zutils/crates/native/zdoctor" }
+zutils_zinfo = { path = "../zutils/crates/native/zinfo" }
+zutils_zmem = { path = "../zutils/crates/native/zmem" }
+zutils_zpkg = { path = "../zutils/crates/native/zpkg" }
+zutils_zsys = { path = "../zutils/crates/native/zsys" }
+zutils_ztrace = { path = "../zutils/crates/native/ztrace" }
 
 [features]
 default = ["smp"]

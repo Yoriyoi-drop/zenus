@@ -281,6 +281,18 @@ impl Shell {
             "find" => zutils_find::execute(args, w),
             "du" => zutils_du::execute(args, w),
             "chown" => zutils_chown::execute(args, w),
+            "pgrep" => zutils_pgrep::execute(args, w),
+            "top" => zutils_top::execute(args, w),
+            "uptime" => zutils_uptime::execute(args, w),
+            "which" => zutils_which::execute(args, w),
+            "zbench" => zutils_zbench::execute(args, w),
+            "zdiag" => zutils_zdiag::execute(args, w),
+            "zdoctor" => zutils_zdoctor::execute(args, w),
+            "zinfo" => zutils_zinfo::execute(args, w),
+            "zmem" => zutils_zmem::execute(args, w),
+            "zpkg" => zutils_zpkg::execute(args, w),
+            "zsys" => zutils_zsys::execute(args, w),
+            "ztrace" => zutils_ztrace::execute(args, w),
             _ => return false,
         }
         true

@@ -235,7 +235,7 @@ pub extern "C" fn entry() -> ! {
         zenus_arch::smp::set_ap_idle_fn(zenus_sched::scheduler::ap_idle);
         smp::wake_aps();
 
-        let shell_tid = scheduler::create_task(shell_task, 65536);
+        let shell_tid = scheduler::create_task_named(shell_task, 65536, "shell");
         zenus_sched::init::init_system_start();
 
         let mut serial = SerialPort::new(0x3F8);

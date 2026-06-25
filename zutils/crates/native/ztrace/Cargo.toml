@@ -1,0 +1,9 @@
+[package]
+name = "zutils_ztrace"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zutils_common = { path = "../../common" }
+zenus-syscall = { path = "../../../../crates/zenus-syscall" }
+zenus-sched = { path = "../../../../crates/zenus-sched" }

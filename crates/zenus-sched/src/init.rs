@@ -76,7 +76,7 @@ pub fn init_system_start() -> bool {
             pending
         };
         for (idx, entry, stack_size, name) in snapshot {
-            let pid = scheduler::create_task(entry, stack_size);
+            let pid = scheduler::create_task_named(entry, stack_size, name);
             serial().write_str("[INIT] create_task returned pid=");
             serial().write_u64(pid);
             serial().write_str("\n");
