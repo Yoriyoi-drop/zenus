@@ -1,0 +1,10 @@
+[package]
+name = "zutils_zdoctor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zutils_common = { path = "../../common" }
+zenus-arch = { path = "../../../../crates/zenus-arch" }
+zenus-fs = { path = "../../../../crates/zenus-fs" }
+zenus-sched = { path = "../../../../crates/zenus-sched" }

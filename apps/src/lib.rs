@@ -36,6 +36,11 @@ use zenus_mem::frame_allocator;
 use zenus_mem::frame_allocator::MemoryRegion;
 use zenus_sched::scheduler;
 
+struct EchoState {
+    listen_fds: [Option<usize>; 8],
+    client_fds: [Option<usize>; 16],
+}
+
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let mut serial = SerialPort::new(0x3F8);

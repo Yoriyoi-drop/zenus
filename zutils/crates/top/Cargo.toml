@@ -1,0 +1,9 @@
+[package]
+name = "zutils_top"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zutils_common = { path = "../common" }
+zenus-sched = { path = "../../../crates/zenus-sched" }
+zenus-mem = { path = "../../../crates/zenus-mem" }
