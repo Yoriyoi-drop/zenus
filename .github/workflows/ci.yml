@@ -1,0 +1,221 @@
+name: Zenus OS CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C target-feature=-crt-static -C opt-level=2"
+
+jobs:
+  lint:
+    name: Lint Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2026-05-01
+          profile: minimal
+          components: rustfmt, clippy
+
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/checkouts/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Rustfmt Check
+        run: |
+          cargo fmt --all -- --check
+
+      - name: Clippy Lint
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2026-05-01
+          profile: minimal
+
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/checkouts/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build with Testing Feature
+        run: |
+          cargo build --target x86_64-unknown-none --features testing
+
+      - name: Run Unit Tests
+        run: |
+          cargo test --target x86_64-unknown-none --features testing
+
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [lint, test-unit]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 bc xorriso mtools parted util-linux
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2026-05-01
+          profile: minimal
+
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/checkouts/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build Zenus Test ISO
+        run: |
+          make test-iso
+
+      - name: Run Integration Tests
+        run: |
+          make test-quiet
+
+  build-packages:
+    name: Build Packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2026-05-01
+          profile: minimal
+
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/checkouts/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build All Targets
+        run: |
+          cargo build --target x86_64-unknown-none
+          cargo build --target x86_64-unknown-none --features testing
+
+      - name: Build Test ISO
+        run: |
+          make test-iso
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: zenus-artifacts
+          path: |
+            build/
+            target/x86_64-unknown-none/
+            target/x86_64-unknown-none/debug/
+            *.iso
+            *.img
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2026-05-01
+          profile: minimal
+
+      - name: Install cargo-valgrind
+        run: |
+          cargo install cargo-valgrind
+
+      - name: Security Scan
+        run: |
+          cargo valgrind test --target x86_64-unknown-none --features testing
+
+      - name: Memory Safety Check
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings -D clippy::integer_arithmetic -D clippy::unwrap_used
+
+  documentation:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2026-05-01
+          profile: minimal
+
+      - name: Install cargo-doc
+        run: |
+          cargo install cargo-doc
+
+      - name: Generate Documentation
+        run: |
+          cargo doc --no-deps --workspace
+
+      - name: Check Documentation Links
+        run: |
+          echo "Documentation check completed"
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true

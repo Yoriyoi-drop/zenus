@@ -496,6 +496,13 @@ pub fn handle_receive(
                             retry_ticks: RETRY_INTERVAL,
                             last_ack: 0,
                             time_wait_ticks: 0,
+                            cwnd: INIT_CWND,
+                            ssthresh: INIT_SSTHRESH,
+                            dupack_count: 0,
+                            last_ack_seq: 0,
+                            keepalive_probes: 0,
+                            keepalive_time: 0,
+                            sack_blocks: [(0, 0); 4],
                         });
                     }
                 }

@@ -14,7 +14,7 @@ ISO := $(BUILD_DIR)/zenus.iso
 IMG := $(BUILD_DIR)/zenus.hdd
 LD := ld.lld
 
-.PHONY: all clean run run-qemu run-qemu-gdb run-bios run-uefi iso img test test-quiet
+.PHONY: all clean run run-qemu run-qemu-gdb run-bios run-uefi iso img test test-quiet bochs
 
 all: $(KERNEL)
 
@@ -83,7 +83,7 @@ img: $(KERNEL) $(INITRD)
 run: run-qemu
 
 run-bios: $(ISO)
-	qemu-system-x86_64 -serial stdio -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
+	qemu-system-x86_64 -nographic -serial stdio -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 run-uefi: $(ISO)
@@ -91,6 +91,9 @@ run-uefi: $(ISO)
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 run-qemu: run-bios
+
+bochs: $(ISO)
+	bochs -f bochsrc -q
 
 run-qemu-gdb: $(ISO)
 	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(ISO) -s -S -no-reboot \

@@ -1,0 +1,23 @@
+*Zenus OS Kernel Development*
+
+Primary maintainers of the Zenus OS project with responsibility for core kernel development, architecture decisions, and critical security fixes.
+
+**Reviewers:**
+- Core Kernel Team: Responsible for architecture, basic functionality, and security
+- Documentation Team: Responsible for user-facing documentation and guides
+- CI/CD Team: Responsible for build and test infrastructure
+
+**Approved Changes:**
+- System call interface changes
+- Memory management modifications
+- Scheduler improvements
+- Filesystem driver updates
+- Networking stack changes
+- Security hardening
+- Build system modifications
+
+**Changes Requiring Additional Review:**
+- User space functionality (command line tools)
+- Documentation updates
+- CI/CD pipeline modifications
+- Testing framework changes

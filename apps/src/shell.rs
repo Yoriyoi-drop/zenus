@@ -1,3 +1,4 @@
+use alloc::format;
 use zutils_common::{Args, Writer};
 use zenus_console::serial::SerialPort;
 
@@ -115,10 +116,38 @@ impl Shell {
     pub fn run(&mut self) -> ! {
         let mut yield_count = 0u64;
         loop {
-            yield_count += 1;
-            if yield_count % 10 == 0 {
-                zenus_sched::scheduler::yield_now();
+            // Print prompt immediately, before any yielding
+            let mut w = self.writer();
+            w.write_str(PROMPT);
+            zenus_console::serial::flush_output();
+
+            let line = match self.read_line() {
+                Some(l) => l,
+                None => {
+                    // housekeeping on empty input
+                    yield_count += 1;
+                    if yield_count % 5 == 0 {
+                        zenus_net::nic::net_poll();
+                        self.echo_server_poll();
+                    }
+                    if yield_count % 50 == 0 {
+                        zenus_arch::watchdog::watchdog_pet();
+                        zenus_sched::init::service_supervise();
+                    }
+                    continue;
+                }
+            };
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
             }
+
+            self.execute(trimmed);
+            zenus_console::serial::flush_output();
+
+            // housekeeping after command
+            yield_count += 1;
             if yield_count % 5 == 0 {
                 zenus_net::nic::net_poll();
                 self.echo_server_poll();
@@ -127,19 +156,7 @@ impl Shell {
                 zenus_arch::watchdog::watchdog_pet();
                 zenus_sched::init::service_supervise();
             }
-            let mut w = self.writer();
-            w.write_str(PROMPT);
-            zenus_console::serial::flush_output();
-            let line = match self.read_line() {
-                Some(l) => l,
-                None => continue,
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            self.execute(trimmed);
-            zenus_console::serial::flush_output();
+            zenus_sched::scheduler::yield_now();
         }
     }
 
@@ -158,16 +175,16 @@ impl Shell {
                 let b = zenus_arch::keyboard::read_key().unwrap_or(0);
                 Some(b)
             } else {
-                zenus_sched::scheduler::yield_now();
+                x86_64::instructions::hlt();
                 None
             };
 
             if let Some(c) = c {
                 match c {
                     b'\r' | b'\n' => {
-                        let mut w = self.writer();
-                        w.write_str("\r\n");
-                        zenus_console::serial::flush_output();
+                        self.serial.write_byte_serial(b'\r');
+                        self.serial.write_byte_serial(b'\n');
+                        zenus_console::vga::write_str("\r\n", self.hhdm_offset);
                         unsafe {
                             let s = core::str::from_utf8(&BUF[..POS]).unwrap_or("");
                             POS = 0;
@@ -177,8 +194,10 @@ impl Shell {
                     b'\x7F' | b'\x08' => {
                         if unsafe { POS > 0 } {
                             unsafe { POS -= 1 };
-                            self.writer().write_str("\x08 \x08");
-                            zenus_console::serial::flush_output();
+                            self.serial.write_byte_serial(b'\x08');
+                            self.serial.write_byte_serial(b' ');
+                            self.serial.write_byte_serial(b'\x08');
+                            zenus_console::vga::write_str("\x08 \x08", self.hhdm_offset);
                         }
                     }
                     0x20..=0x7E => {
@@ -186,8 +205,11 @@ impl Shell {
                             if POS < MAX_LINE - 1 {
                                 BUF[POS] = c;
                                 POS += 1;
-                                self.writer().write_byte(c);
-                                zenus_console::serial::flush_output();
+                                self.serial.write_byte_serial(c);
+                                zenus_console::vga::write_str(
+                                    core::str::from_utf8(&[c]).unwrap_or(""),
+                                    self.hhdm_offset
+                                );
                             }
                         }
                     }
@@ -203,9 +225,6 @@ impl Shell {
                 }
                 if idle_count % 50 == 0 {
                     zenus_arch::watchdog::watchdog_pet();
-                }
-                if !zenus_arch::keyboard::is_key_available() {
-                    zenus_sched::scheduler::yield_now();
                 }
             }
         }

@@ -1,0 +1,28 @@
+megs: 2048
+romimage: file=/home/whale-d/.local/share/bochs/BIOS-bochs-latest
+vgaromimage: file=/home/whale-d/.local/share/bochs/VGABIOS-lgpl-latest
+
+boot: cdrom
+ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14
+ata0-master: type=cdrom, path=build/zenus.iso, status=inserted
+
+pci: enabled=1, chipset=i440fx
+cpu: count=1, ips=100000000
+cpuid: level=6, x86_64=1, apic=xapic, sep=1, aes=1
+
+clock: sync=realtime, time0=local
+
+com1: enabled=1, mode=file, dev=/dev/stdout
+
+display_library: sdl2, options="gui_debug"
+vga: extension=vbe, update_freq=60
+
+log: /dev/stderr
+logprefix: %t%e%d
+debug: action=ignore
+info:  action=report
+error: action=report
+panic: action=ask
+
+mouse: enabled=0
+keyboard: type=mf, serial_delay=200, paste_delay=100000
