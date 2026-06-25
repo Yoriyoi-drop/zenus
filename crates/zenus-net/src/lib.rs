@@ -15,3 +15,4 @@ pub mod dhcp_server;
 pub mod dns;
 pub mod route;
 pub mod ssh;
+pub mod firewall;

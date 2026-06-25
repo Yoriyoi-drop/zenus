@@ -164,6 +164,10 @@ pub extern "C" fn entry() -> ! {
     zenus_fs::pkg::pkg_init();
     zenus_ns::uts::init();
     zenus_ns::pid::init();
+    zenus_ns::mnt::init();
+    zenus_ns::net::init();
+    zenus_ns::user::init();
+    zenus_ns::ipc::init();
 
     #[cfg(not(feature = "testing"))]
     {

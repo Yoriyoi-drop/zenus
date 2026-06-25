@@ -23,6 +23,12 @@ const TCP_FLAG_ACK: u8 = 0x10;
 pub const MAX_CONNS: usize = 256;
 const MAX_RETRIES: u8 = 5;
 const RETRY_INTERVAL: u8 = 10;
+const MSS: u16 = 1460;
+const INIT_CWND: u16 = 1460;
+const INIT_SSTHRESH: u16 = 65535;
+const KEEPALIVE_IDLE: u64 = 7200;
+const KEEPALIVE_PROBE_INTERVAL: u64 = 75;
+const KEEPALIVE_PROBES: u8 = 9;
 
 #[derive(Clone, Copy)]
 struct Tcb {
@@ -44,6 +50,13 @@ struct Tcb {
     retry_ticks: u8,
     last_ack: u32,
     time_wait_ticks: u8,
+    cwnd: u16,
+    ssthresh: u16,
+    dupack_count: u8,
+    last_ack_seq: u32,
+    keepalive_probes: u8,
+    keepalive_time: u64,
+    sack_blocks: [(u32, u32); 4],
 }
 
 struct TcpState {
@@ -133,6 +146,98 @@ pub fn build_segment(
     seg
 }
 
+fn build_syn_segment(
+    src_port: u16, dst_port: u16,
+    seq: u32, ack: u32,
+    flags: u8, window: u16,
+) -> [u8; 1500] {
+    let mut seg = build_segment(src_port, dst_port, seq, ack, flags, window, &[]);
+    seg[20] = 2; seg[21] = 4;
+    seg[22] = (MSS >> 8) as u8; seg[23] = (MSS & 0xFF) as u8;
+    seg[24] = 3; seg[25] = 3; seg[26] = 7;
+    seg[27] = 4; seg[28] = 2;
+    seg[29] = 1; seg[30] = 1; seg[31] = 1;
+    seg[12] = 0x80;
+    seg
+}
+
+fn add_sack_block(blocks: &mut [(u32, u32); 4], left: u32, right: u32) {
+    let mut new_left = left;
+    let mut new_right = right;
+    for i in 0..4 {
+        let (l, r) = blocks[i];
+        if l == 0 && r == 0 { continue; }
+        if r >= new_left && l <= new_right {
+            new_left = core::cmp::min(new_left, l);
+            new_right = core::cmp::max(new_right, r);
+            blocks[i] = (0, 0);
+        }
+    }
+    for i in 0..4 {
+        if blocks[i].0 == 0 && blocks[i].1 == 0 {
+            blocks[i] = (new_left, new_right);
+            return;
+        }
+    }
+    for i in 0..3 {
+        blocks[i] = blocks[i + 1];
+    }
+    blocks[3] = (new_left, new_right);
+}
+
+fn send_sack_ack(
+    iface_idx: usize,
+    src_ip: [u8; 4], dst_ip: [u8; 4],
+    src_port: u16, dst_port: u16,
+    seq: u32, ack: u32,
+    window: u16,
+    sack_blocks: &[(u32, u32); 4],
+) {
+    let mut seg = [0u8; 1500];
+    seg[0..2].copy_from_slice(&src_port.to_be_bytes());
+    seg[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    seg[4..8].copy_from_slice(&seq.to_be_bytes());
+    seg[8..12].copy_from_slice(&ack.to_be_bytes());
+    seg[12] = 0x50;
+    seg[13] = TCP_FLAG_ACK;
+    seg[14..16].copy_from_slice(&window.to_be_bytes());
+
+    let mut n = 0;
+    for i in 0..4 {
+        if sack_blocks[i].0 != 0 || sack_blocks[i].1 != 0 {
+            n += 1;
+        }
+    }
+
+    let mut hdr_len = 20;
+    if n > 0 {
+        let opt_len = 2 + n * 8;
+        let padded = (opt_len + 3) & !3;
+        hdr_len = 20 + padded;
+        seg[20] = 5;
+        seg[21] = opt_len as u8;
+        let mut off = 22;
+        for i in 0..4 {
+            let (l, r) = sack_blocks[i];
+            if l != 0 || r != 0 {
+                seg[off..off + 4].copy_from_slice(&l.to_be_bytes());
+                seg[off + 4..off + 8].copy_from_slice(&r.to_be_bytes());
+                off += 8;
+            }
+        }
+        while off < hdr_len {
+            seg[off] = 1;
+            off += 1;
+        }
+        seg[12] = ((hdr_len >> 2) as u8) << 4;
+    }
+
+    let csum = checksum(src_ip, dst_ip, &seg[..hdr_len]);
+    seg[16] = (csum >> 8) as u8;
+    seg[17] = (csum & 0xFF) as u8;
+    ipv4::send(iface_idx, dst_ip, ipv4::PROTO_TCP, &seg[..hdr_len]);
+}
+
 fn rand_isn() -> u32 {
     let r = zenus_arch::random::get_random_u64();
     let lo: u32;
@@ -171,6 +276,13 @@ pub fn listen(port: u16) -> Option<usize> {
             retry_ticks: 0,
             last_ack: 0,
             time_wait_ticks: 0,
+            cwnd: INIT_CWND,
+            ssthresh: INIT_SSTHRESH,
+            dupack_count: 0,
+            last_ack_seq: 0,
+            keepalive_probes: 0,
+            keepalive_time: 0,
+            sack_blocks: [(0, 0); 4],
         });
         Some(idx)
 }
@@ -186,17 +298,16 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
     }
     let isn = rand_isn();
 
-    let mut seg = build_segment(
+    let mut seg = build_syn_segment(
         local_port, dst_port,
         isn, 0,
         TCP_FLAG_SYN,
         65535,
-        &[],
     );
-    let csum = checksum(local_ip, dst_ip, &seg[..20]);
+    let csum = checksum(local_ip, dst_ip, &seg[..32]);
     seg[16] = (csum >> 8) as u8;
     seg[17] = (csum & 0xFF) as u8;
-    let sent = ipv4::send(iface_idx, dst_ip, ipv4::PROTO_TCP, &seg[..20]);
+    let sent = ipv4::send(iface_idx, dst_ip, ipv4::PROTO_TCP, &seg[..32]);
     if !sent {
         return None;
     }
@@ -220,6 +331,13 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
             retry_ticks: RETRY_INTERVAL,
             last_ack: 0,
             time_wait_ticks: 0,
+            cwnd: INIT_CWND,
+            ssthresh: INIT_SSTHRESH,
+            dupack_count: 0,
+            last_ack_seq: 0,
+            keepalive_probes: 0,
+            keepalive_time: 0,
+            sack_blocks: [(0, 0); 4],
         });
 
         let s = SerialPort::new(0x3F8);

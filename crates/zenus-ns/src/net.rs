@@ -89,7 +89,7 @@ pub fn get_interfaces(id: NsId) -> [u8; 8] {
 }
 
 pub fn add_interface(id: NsId, iface_idx: u8) -> bool {
-    if iface_idx as usize >= 64 {
+    if iface_idx >= 64 {
         return false;
     }
     let mut table = NET_TABLE.lock();

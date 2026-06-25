@@ -79,6 +79,19 @@ impl Writer for ShellWriter {
     }
 }
 
+fn parse_ip(s: &str) -> Option<[u8; 4]> {
+    let mut parts = [0u8; 4];
+    let mut i = 0;
+    for octet in s.split('.') {
+        if i >= 4 { return None; }
+        let val = octet.parse::<u16>().ok()?;
+        if val > 255 { return None; }
+        parts[i] = val as u8;
+        i += 1;
+    }
+    if i != 4 { None } else { Some(parts) }
+}
+
 pub struct Shell {
     serial: SerialPort,
     hhdm_offset: u64,
@@ -293,6 +306,9 @@ impl Shell {
             "zpkg" => zutils_zpkg::execute(args, w),
             "zsys" => zutils_zsys::execute(args, w),
             "ztrace" => zutils_ztrace::execute(args, w),
+            "firewall-list" => self.cmd_firewall_list(w),
+            "firewall-add" => self.cmd_firewall_add(line, w),
+            "firewall-remove" => self.cmd_firewall_remove(line, w),
             _ => return false,
         }
         true
@@ -871,21 +887,30 @@ impl Shell {
         let uts_ns = zenus_sched::scheduler::current_uts_ns();
         let pid_ns = zenus_sched::scheduler::current_pid_ns();
         let mnt_ns = zenus_sched::scheduler::current_mnt_ns();
+        let net_ns = zenus_sched::scheduler::current_net_ns();
+        let user_ns = zenus_sched::scheduler::current_user_ns();
+        let ipc_ns = zenus_sched::scheduler::current_ipc_ns();
         let local_pid = zenus_sched::scheduler::current_local_pid();
         let global_pid = zenus_sched::scheduler::current_task_id();
         let hostname = zenus_ns::uts::get_hostname(uts_ns);
         let hlen = hostname.iter().position(|&b| b == 0).unwrap_or(64);
-        w.write_str("PID namespace: ");
+        w.write_str("PID namespace:  ");
         w.write_u64(pid_ns as u64);
-        w.write_str("\r\nUTS namespace: ");
+        w.write_str("\r\nUTS namespace:  ");
         w.write_u64(uts_ns as u64);
-        w.write_str("\r\nMNT namespace: ");
+        w.write_str("\r\nMNT namespace:  ");
         w.write_u64(mnt_ns as u64);
-        w.write_str("\r\nGlobal PID:    ");
+        w.write_str("\r\nNET namespace:  ");
+        w.write_u64(net_ns as u64);
+        w.write_str("\r\nUSER namespace: ");
+        w.write_u64(user_ns as u64);
+        w.write_str("\r\nIPC namespace:  ");
+        w.write_u64(ipc_ns as u64);
+        w.write_str("\r\nGlobal PID:     ");
         w.write_u64(global_pid);
-        w.write_str("\r\nLocal PID:     ");
+        w.write_str("\r\nLocal PID:      ");
         w.write_u64(local_pid);
-        w.write_str("\r\nHostname:      ");
+        w.write_str("\r\nHostname:       ");
         if hlen > 0 {
             w.write_str(core::str::from_utf8(&hostname[..hlen]).unwrap_or("?"));
         }
@@ -914,11 +939,148 @@ impl Shell {
         if args.has_flag("--uts") || args.has_flag("uts") { flags |= zenus_ns::CLONE_NEWUTS; }
         if args.has_flag("--pid") || args.has_flag("pid") { flags |= zenus_ns::CLONE_NEWPID; }
         if args.has_flag("--mnt") || args.has_flag("mnt") { flags |= zenus_ns::CLONE_NEWNS; }
+        if args.has_flag("--net") || args.has_flag("net") { flags |= zenus_ns::CLONE_NEWNET; }
+        if args.has_flag("--user") || args.has_flag("user") { flags |= zenus_ns::CLONE_NEWUSER; }
+        if args.has_flag("--ipc") || args.has_flag("ipc") { flags |= zenus_ns::CLONE_NEWIPC; }
         w.write_str("Cloning with flags: 0x");
         w.write_hex(flags);
         w.write_str("\r\n");
         let _ = zenus_sched::scheduler::clone_task(flags, 0, 65536, 0, 0, 0, 0x6000_0000_0000);
         w.write_str("Clone attempted\r\n");
+    }
+
+    fn cmd_firewall_list(&mut self, w: &mut ShellWriter) {
+        let rules = zenus_net::firewall::firewall_list_rules();
+        let mut found = false;
+        for i in 0..zenus_net::firewall::MAX_RULES {
+            if let Some(r) = rules[i] {
+                found = true;
+                w.write_str("  [");
+                w.write_u64(i as u64);
+                w.write_str("] ");
+                let name_len = r.name.iter().position(|&b| b == 0).unwrap_or(32);
+                if name_len > 0 {
+                    w.write_str(core::str::from_utf8(&r.name[..name_len]).unwrap_or("?"));
+                }
+                w.write_str(if r.enabled { " ENABLED  " } else { " DISABLED " });
+                match r.action {
+                    zenus_net::firewall::FirewallAction::Accept => w.write_str("ACCEPT "),
+                    zenus_net::firewall::FirewallAction::Drop => w.write_str("DROP   "),
+                    zenus_net::firewall::FirewallAction::Reject => w.write_str("REJECT "),
+                }
+                match r.proto {
+                    zenus_net::firewall::FirewallProto::Any => w.write_str("any  "),
+                    zenus_net::firewall::FirewallProto::Tcp => w.write_str("tcp  "),
+                    zenus_net::firewall::FirewallProto::Udp => w.write_str("udp  "),
+                    zenus_net::firewall::FirewallProto::Icmp => w.write_str("icmp "),
+                }
+                w.write_ip(r.src_ip);
+                w.write_str("/");
+                w.write_ip(r.src_mask);
+                w.write_str(" -> ");
+                w.write_ip(r.dst_ip);
+                w.write_str("/");
+                w.write_ip(r.dst_mask);
+                w.write_str(" :");
+                w.write_u64(r.src_port as u64);
+                w.write_str(" -> :");
+                w.write_u64(r.dst_port as u64);
+                if r.established { w.write_str(" EST"); }
+                w.write_str(" pkts:");
+                w.write_u64(r.packets_matched);
+                w.write_str("\r\n");
+            }
+        }
+        if !found {
+            w.write_str("  (no firewall rules)\r\n");
+        }
+        let conns = zenus_net::firewall::firewall_conn_count();
+        w.write_str("Connection tracking entries: ");
+        w.write_u64(conns as u64);
+        w.write_str("\r\n");
+    }
+
+    fn cmd_firewall_add(&mut self, line: &str, w: &mut ShellWriter) {
+        let args = Args::parse(line);
+        if args.args().len() < 7 {
+            w.write_str("Usage: firewall-add <action> <proto> <src> <src_mask> <dst> <dst_mask> <src_port> <dst_port> [established]\r\n");
+            w.write_str("  action: accept|drop|reject\r\n");
+            w.write_str("  proto: any|tcp|udp|icmp\r\n");
+            return;
+        }
+        let action_str = args.get(1).unwrap_or("");
+        let proto_str = args.get(2).unwrap_or("");
+        let src_str = args.get(3).unwrap_or("");
+        let srcm_str = args.get(4).unwrap_or("");
+        let dst_str = args.get(5).unwrap_or("");
+        let dstm_str = args.get(6).unwrap_or("");
+        let src_port = args.get(7).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
+        let dst_port = args.get(8).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
+        let established = args.has_flag("established");
+
+        let action = match action_str {
+            "accept" => zenus_net::firewall::FirewallAction::Accept,
+            "drop" => zenus_net::firewall::FirewallAction::Drop,
+            "reject" => zenus_net::firewall::FirewallAction::Reject,
+            _ => { w.write_str("firewall-add: invalid action\r\n"); return; }
+        };
+        let proto = match proto_str {
+            "any" => zenus_net::firewall::FirewallProto::Any,
+            "tcp" => zenus_net::firewall::FirewallProto::Tcp,
+            "udp" => zenus_net::firewall::FirewallProto::Udp,
+            "icmp" => zenus_net::firewall::FirewallProto::Icmp,
+            _ => { w.write_str("firewall-add: invalid proto\r\n"); return; }
+        };
+
+        let src_ip = parse_ip(src_str);
+        let src_mask = parse_ip(srcm_str);
+        let dst_ip = parse_ip(dst_str);
+        let dst_mask = parse_ip(dstm_str);
+        if src_ip.is_none() || src_mask.is_none() || dst_ip.is_none() || dst_mask.is_none() {
+            w.write_str("firewall-add: invalid IP address\r\n");
+            return;
+        }
+
+        let idx = zenus_net::firewall::firewall_rule_count();
+        let mut name = [0u8; 32];
+        let name_str = format!("rule-{}", idx);
+        let nb = name_str.as_bytes();
+        let nlen = nb.len().min(31);
+        name[..nlen].copy_from_slice(&nb[..nlen]);
+
+        let rule = zenus_net::firewall::FirewallRule {
+            name,
+            enabled: true,
+            action,
+            proto,
+            src_ip: src_ip.unwrap(),
+            src_mask: src_mask.unwrap(),
+            dst_ip: dst_ip.unwrap(),
+            dst_mask: dst_mask.unwrap(),
+            src_port,
+            dst_port,
+            established,
+            packets_matched: 0,
+        };
+
+        if zenus_net::firewall::firewall_add_rule(rule) {
+            w.write_str("firewall-add: rule added\r\n");
+        } else {
+            w.write_str("firewall-add: rule table full (max 32)\r\n");
+        }
+    }
+
+    fn cmd_firewall_remove(&mut self, line: &str, w: &mut ShellWriter) {
+        let args = Args::parse(line);
+        let idx = match args.get(1).and_then(|s| s.parse::<usize>().ok()) {
+            Some(i) => i,
+            None => { w.write_str("Usage: firewall-remove <index>\r\n"); return; }
+        };
+        if zenus_net::firewall::firewall_remove_rule(idx) {
+            w.write_str("firewall-remove: rule removed\r\n");
+        } else {
+            w.write_str("firewall-remove: no rule at that index\r\n");
+        }
     }
 
     fn echo_server_poll(&mut self) {

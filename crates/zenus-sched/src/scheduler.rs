@@ -347,6 +347,9 @@ pub fn clone_task(
     let mut new_uts_ns = parent.uts_ns;
     let mut new_pid_ns = parent.pid_ns;
     let mut new_mnt_ns = parent.mnt_ns;
+    let mut new_net_ns = parent.net_ns;
+    let mut new_user_ns = parent.user_ns;
+    let mut new_ipc_ns = parent.ipc_ns;
 
     // Create new namespaces if requested
     if flags & zenus_ns::CLONE_NEWUTS != 0 {
@@ -369,6 +372,24 @@ pub fn clone_task(
                     return 0;
                 }
             }
+            None => return 0,
+        }
+    }
+    if flags & zenus_ns::CLONE_NEWNET != 0 {
+        match zenus_ns::net::create() {
+            Some(id) => new_net_ns = id,
+            None => return 0,
+        }
+    }
+    if flags & zenus_ns::CLONE_NEWUSER != 0 {
+        match zenus_ns::user::create() {
+            Some(id) => new_user_ns = id,
+            None => return 0,
+        }
+    }
+    if flags & zenus_ns::CLONE_NEWIPC != 0 {
+        match zenus_ns::ipc::create() {
+            Some(id) => new_ipc_ns = id,
             None => return 0,
         }
     }
@@ -401,6 +422,9 @@ pub fn clone_task(
         task.uts_ns = new_uts_ns;
         task.pid_ns = new_pid_ns;
         task.mnt_ns = new_mnt_ns;
+        task.net_ns = new_net_ns;
+        task.user_ns = new_user_ns;
+        task.ipc_ns = new_ipc_ns;
 
         let mut tasks = TASKS.lock();
         match tasks.find_free() {
@@ -748,6 +772,9 @@ pub fn list_tasks() -> [Option<TaskInfo>; MAX_TASKS] {
                 gid: task.gid,
                 uts_ns: task.uts_ns,
                 pid_ns: task.pid_ns,
+                net_ns: task.net_ns,
+                user_ns: task.user_ns,
+                ipc_ns: task.ipc_ns,
                 name: task.name,
             });
         }
@@ -777,6 +804,30 @@ pub fn current_uts_ns() -> NsId {
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
     tasks.tasks[idx as usize].as_ref().map(|t| t.uts_ns).unwrap_or(0)
+}
+
+/// Get the NET namespace of the current task.
+pub fn current_net_ns() -> NsId {
+    let cpu = current_cpu();
+    let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    let tasks = TASKS.lock();
+    tasks.tasks[idx as usize].as_ref().map(|t| t.net_ns).unwrap_or(0)
+}
+
+/// Get the USER namespace of the current task.
+pub fn current_user_ns() -> NsId {
+    let cpu = current_cpu();
+    let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    let tasks = TASKS.lock();
+    tasks.tasks[idx as usize].as_ref().map(|t| t.user_ns).unwrap_or(0)
+}
+
+/// Get the IPC namespace of the current task.
+pub fn current_ipc_ns() -> NsId {
+    let cpu = current_cpu();
+    let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    let tasks = TASKS.lock();
+    tasks.tasks[idx as usize].as_ref().map(|t| t.ipc_ns).unwrap_or(0)
 }
 
 /// Get the local PID for the current task within its PID namespace.

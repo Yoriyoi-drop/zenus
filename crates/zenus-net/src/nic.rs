@@ -130,14 +130,48 @@ fn poll_packet(data: &[u8]) {
         }
         crate::ethernet::ETH_IPV4 => {
             if let Some((ip_hdr, ip_payload)) = crate::ipv4::parse(eth_payload) {
-                match ip_hdr.protocol {
-                    crate::ipv4::PROTO_TCP => {
-                        crate::tcp::handle_receive(1, ip_hdr.src_ip, ip_hdr.dst_ip, ip_payload);
+                let pkt_proto = match ip_hdr.protocol {
+                    crate::ipv4::PROTO_TCP => crate::firewall::FirewallProto::Tcp,
+                    crate::ipv4::PROTO_UDP => crate::firewall::FirewallProto::Udp,
+                    crate::ipv4::PROTO_ICMP => crate::firewall::FirewallProto::Icmp,
+                    _ => crate::firewall::FirewallProto::Any,
+                };
+                let (src_port, dst_port) = if ip_payload.len() >= 4 {
+                    let sp = u16::from_be_bytes([ip_payload[0], ip_payload[1]]);
+                    let dp = u16::from_be_bytes([ip_payload[2], ip_payload[3]]);
+                    (sp, dp)
+                } else {
+                    (0, 0)
+                };
+                let pkt = crate::firewall::PacketInfo {
+                    src_ip: ip_hdr.src_ip,
+                    dst_ip: ip_hdr.dst_ip,
+                    src_port,
+                    dst_port,
+                    proto: pkt_proto,
+                };
+                if crate::firewall::firewall_check(&pkt) == crate::firewall::FirewallAction::Accept {
+                    let ticks = zenus_arch::interrupts::pit::get_ticks();
+                    let conn_state = crate::firewall::ConnState::Established;
+                    let ct = crate::firewall::ConnTrack {
+                        src_ip: ip_hdr.src_ip,
+                        dst_ip: ip_hdr.dst_ip,
+                        src_port,
+                        dst_port,
+                        proto: pkt_proto,
+                        state: conn_state,
+                        last_seen: ticks,
+                    };
+                    crate::firewall::firewall_track_connection(ct);
+                    match ip_hdr.protocol {
+                        crate::ipv4::PROTO_TCP => {
+                            crate::tcp::handle_receive(1, ip_hdr.src_ip, ip_hdr.dst_ip, ip_payload);
+                        }
+                        crate::ipv4::PROTO_UDP => {
+                            crate::udp::handle_receive(1, ip_hdr.src_ip, ip_hdr.dst_ip, ip_payload);
+                        }
+                        _ => {}
                     }
-                    crate::ipv4::PROTO_UDP => {
-                        crate::udp::handle_receive(1, ip_hdr.src_ip, ip_hdr.dst_ip, ip_payload);
-                    }
-                    _ => {}
                 }
             }
         }

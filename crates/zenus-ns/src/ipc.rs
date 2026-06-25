@@ -1,48 +1,48 @@
 use zenus_sync::spinlock::SpinLock;
 use crate::{NsId, alloc_ns_id, NS_ROOT};
 
-const MAX_MNT_NAMESPACES: usize = 16;
+const MAX_IPC_NAMESPACES: usize = 16;
 
 #[derive(Clone, Copy)]
-struct MntNamespace {
+struct IpcNamespace {
     id: NsId,
 }
 
-impl MntNamespace {
+impl IpcNamespace {
     const fn new(id: NsId) -> Self {
-        MntNamespace { id }
+        IpcNamespace { id }
     }
 }
 
-struct MntTable {
-    namespaces: [Option<MntNamespace>; MAX_MNT_NAMESPACES],
+struct IpcTable {
+    namespaces: [Option<IpcNamespace>; MAX_IPC_NAMESPACES],
     count: usize,
 }
 
-impl MntTable {
+impl IpcTable {
     const fn new() -> Self {
-        MntTable {
-            namespaces: [None; MAX_MNT_NAMESPACES],
+        IpcTable {
+            namespaces: [None; MAX_IPC_NAMESPACES],
             count: 0,
         }
     }
 }
 
-static MNT_TABLE: SpinLock<MntTable> = SpinLock::new(MntTable::new());
+static IPC_TABLE: SpinLock<IpcTable> = SpinLock::new(IpcTable::new());
 
 pub fn init() {
-    let mut table = MNT_TABLE.lock();
-    table.namespaces[0] = Some(MntNamespace::new(NS_ROOT));
+    let mut table = IPC_TABLE.lock();
+    table.namespaces[0] = Some(IpcNamespace::new(NS_ROOT));
     table.count = 1;
 }
 
 pub fn create() -> Option<NsId> {
-    let mut table = MNT_TABLE.lock();
-    if table.count >= MAX_MNT_NAMESPACES {
+    let mut table = IPC_TABLE.lock();
+    if table.count >= MAX_IPC_NAMESPACES {
         return None;
     }
     let id = alloc_ns_id();
-    let ns = MntNamespace::new(id);
+    let ns = IpcNamespace::new(id);
     let idx = table.count;
     table.namespaces[idx] = Some(ns);
     table.count += 1;
@@ -50,7 +50,7 @@ pub fn create() -> Option<NsId> {
 }
 
 pub fn destroy(id: NsId) {
-    let mut table = MNT_TABLE.lock();
+    let mut table = IPC_TABLE.lock();
     let idx = match find_idx(&table, id) {
         Some(i) => i,
         None => return,
@@ -61,7 +61,7 @@ pub fn destroy(id: NsId) {
     table.count = table.count.saturating_sub(1);
 }
 
-fn find_idx(table: &MntTable, id: NsId) -> Option<usize> {
+fn find_idx(table: &IpcTable, id: NsId) -> Option<usize> {
     for i in 0..table.count {
         if let Some(ref ns) = table.namespaces[i] {
             if ns.id == id {
@@ -73,6 +73,6 @@ fn find_idx(table: &MntTable, id: NsId) -> Option<usize> {
 }
 
 pub fn exists(id: NsId) -> bool {
-    let table = MNT_TABLE.lock();
+    let table = IPC_TABLE.lock();
     find_idx(&table, id).is_some()
 }

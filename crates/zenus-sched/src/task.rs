@@ -56,6 +56,9 @@ pub struct Task {
     pub uts_ns: NsId,
     pub pid_ns: NsId,
     pub mnt_ns: NsId,
+    pub net_ns: NsId,
+    pub user_ns: NsId,
+    pub ipc_ns: NsId,
     pub name: [u8; 32],
 }
 
@@ -84,6 +87,9 @@ impl Task {
             uts_ns: 0,
             pid_ns: 0,
             mnt_ns: 0,
+            net_ns: 0,
+            user_ns: 0,
+            ipc_ns: 0,
             name: name_buf,
         }
     }
@@ -105,5 +111,8 @@ pub struct TaskInfo {
     pub gid: u32,
     pub uts_ns: NsId,
     pub pid_ns: NsId,
+    pub net_ns: NsId,
+    pub user_ns: NsId,
+    pub ipc_ns: NsId,
     pub name: [u8; 32],
 }
