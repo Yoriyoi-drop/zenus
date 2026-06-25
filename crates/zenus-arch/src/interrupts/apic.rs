@@ -62,15 +62,21 @@ fn enable_lapic() {
     s.write_str("[APIC] SVR after enable=0x");
     s.write_hex(svr2 as u64);
     s.write_str("\n");
-    // Mask all LVT entries to prevent spurious interrupts
+    // Mask all LVT entries (APs call this too — keep LINT0 masked for them)
     lapic_write(0x2F0, 0x0100FF);      // CMCI: masked
     lapic_write(0x320, 0x00010000);    // Timer: masked
     lapic_write(0x330, 0x0100FF);      // Thermal: masked
     lapic_write(0x340, 0x0100FF);      // Performance Counter: masked
-    lapic_write(0x350, 0x0100FF);      // LINT0: masked (bit 16), vector 0xFF
+    lapic_write(0x350, 0x0100FF);      // LINT0: masked by default; BSP calls enable_pic_lint0()
     lapic_write(0x360, 0x0100FF);      // LINT1: masked (bit 16), vector 0xFF
     lapic_write(0x370, 0x0100FF);      // Error: masked
     lapic_write(0x380, 0);             // Timer initial count = 0 (no fire)
+}
+
+/// Enable LINT0 in ExtINT mode to accept PIC interrupts.
+/// Only call on BSP; APs keep LINT0 masked.
+pub fn enable_pic_lint0() {
+    lapic_write(0x350, 0x700 | 32);    // LINT0: ExtINT mode, unmasked
 }
 
 pub fn lapic_read_reg(reg: u32) -> u32 {
@@ -79,6 +85,10 @@ pub fn lapic_read_reg(reg: u32) -> u32 {
 
 pub fn eoi() {
     lapic_write(0xB0, 0);
+}
+
+pub fn lapic_write_reg(reg: u32, val: u32) {
+    lapic_write(reg, val);
 }
 
 #[no_mangle]
@@ -132,8 +142,8 @@ fn remap_pic() {
         core::arch::asm!("out 0xA1, al", in("al") 0x02u8);
         core::arch::asm!("out 0xA1, al", in("al") 0x01u8);
 
-        // Mask all IRQs — we use APIC timer, not PIC
-        core::arch::asm!("out 0x21, al", in("al") 0xFFu8);
+        // Keep IRQ0 (PIT) unmasked; mask everything else
+        core::arch::asm!("out 0x21, al", in("al") 0xFEu8);
         core::arch::asm!("out 0xA1, al", in("al") 0xFFu8);
     }
 }

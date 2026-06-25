@@ -10,6 +10,9 @@ static IDLE_RSP: AtomicU64 = AtomicU64::new(0);
 pub const TIME_SLICE: u64 = 5;
 const MAX_CPUS: usize = 8;
 
+pub const IDLE_TASK_IDX: u32 = u32::MAX;
+
+#[no_mangle]
 static CURRENT_TASK: [AtomicU32; MAX_CPUS] = [
     AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
     AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
@@ -146,8 +149,14 @@ core::arch::global_asm!(
     "  test byte ptr [rsp + 8], 3",
     "  jnz 3f",
     // Kernel task (3-item frame: RIP, CS, RFLAGS)
+    // Same IF-clearing fix as apic_timer_isr_stub — see comment there
     "  pop rax",
     "  add rsp, 8",
+    "  push rax",
+    "  mov rax, [rsp+8]",
+    "  and rax, 0xFFFFFFFFFFFFFDFF",
+    "  mov [rsp+8], rax",
+    "  pop rax",
     "  popfq",
     "  jmp rax",
     // User task (5-item frame: RIP, CS, RFLAGS, RSP, SS)
@@ -165,9 +174,31 @@ core::arch::global_asm!(
 
 core::arch::global_asm!(
     ".intel_syntax noprefix",
+    ".globl uart_dbg_putchar",
+    "uart_dbg_putchar:",
+    "  mov al, dil",
+    "  mov dx, 0x3F8",
+    "  out dx, al",
+    "  ret",
+    ".att_syntax prefix",
+);
+
+core::arch::global_asm!(
+    ".intel_syntax noprefix",
+    ".globl bochs_putchar",
+    "bochs_putchar:",
+    "  mov al, dil",
+    "  mov dx, 0xE9",               // Bochs/QEMU debug port
+    "  out dx, al",
+    "  ret",
+    ".att_syntax prefix",
+);
+
+core::arch::global_asm!(
+    ".intel_syntax noprefix",
     ".globl apic_timer_isr_stub",
     "apic_timer_isr_stub:",
-  "  push rax",
+    "  push rax",
     "  push rcx",
     "  push rdx",
     "  push rbx",
@@ -205,9 +236,13 @@ core::arch::global_asm!(
     "  pop rax",
     "  test byte ptr [rsp + 8], 3",
     "  jnz timer_user_ret",
-    // Kernel return — use pop+popf+jmp to avoid iretq's 5-item frame
     "  pop rax",
     "  add rsp, 8",
+    "  push rax",
+    "  mov rax, [rsp+8]",
+    "  and rax, 0xFFFFFFFFFFFFFDFF",
+    "  mov [rsp+8], rax",
+    "  pop rax",
     "  popfq",
     "  jmp rax",
     "timer_user_ret:",
@@ -647,8 +682,8 @@ pub fn check_yield() {
 }
 
 fn find_next_ready(tasks: &TaskArray, current: u32, cpu: u32) -> u32 {
-    for i in 1..MAX_TASKS as u32 {
-        let idx = (current + i) % MAX_TASKS as u32;
+    // Linear scan: if shell at index 1 is active, return it
+    for idx in 1..MAX_TASKS as u32 {
         if let Some(ref task) = tasks.tasks[idx as usize] {
             if task.is_active() && task.cpu == cpu { return idx; }
         }
@@ -808,138 +843,111 @@ pub fn set_task_heap_brk(id: u64, brk: u64) {
     }
 }
 
-static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Called from APIC timer ISR. Interrupts disabled (interrupt gate).
-/// Sends EOI, tries to acquire TASKS lock (returns 0 if contended),
-/// saves current RSP, finds next task on this CPU, returns its RSP.
 #[no_mangle]
 pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
-    extern "C" { fn apic_timer_eoi(); }
-    unsafe { apic_timer_eoi(); }
-
-    let cpu = current_cpu();
-    if (cpu as usize) >= MAX_CPUS {
-        return 0;
-    }
-
-    TICK_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    zenus_arch::watchdog::watchdog_tick();
-    zenus_arch::watchdog::watchdog_pet();
-
-    let count = TASK_COUNT.load(Ordering::Acquire);
-    if count <= 1 {
-        return 0;
-    }
-
-    let current = CURRENT_TASK[cpu as usize].load(Ordering::Relaxed);
-    let mut tasks = match TASKS.try_lock() {
-        Some(t) => t,
-        None => return 0,
-    };
-
-    if tasks.tasks[current as usize].is_none() {
-        return 0;
-    }
-
-    let expired = if let Some(ref mut task) = tasks.tasks[current as usize] {
-        task.ticks_left = task.ticks_left.saturating_sub(1);
-        task.ticks_left == 0
-    } else {
-        false
-    };
-
-    // Flush output buffer on every tick so the current task's output
-    // doesn't stall indefinitely.  This call is fast (just drains a
-    // SpinLock-guarded buffer to the UART) and prevents echo lag.
+    // PIC EOI (master)
+    unsafe { core::arch::asm!("out 0x20, al", in("al") 0x20u8); }
+    // APIC EOI (for ExtINT via LINT0)
+    zenus_arch::interrupts::apic::eoi();
+    zenus_arch::interrupts::pit::tick();
     zenus_console::serial::flush_output();
 
-    if !expired {
-        return 0;
-    }
+    let cpu = current_cpu();
+    if (cpu as usize) >= MAX_CPUS { return 0; }
+    let count = TASK_COUNT.load(Ordering::Acquire);
+    if count <= 1 { return 0; }
 
-    let current_cr3_raw = zenus_mem::paging::get_level4_addr().as_u64();
-    if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
-        current_task.rsp = current_rsp;
-        current_task.cr3 = current_cr3_raw;
-        let cs_on_stack = unsafe { core::ptr::read_volatile((current_rsp + 128) as *const u64) };
-        if (cs_on_stack & 3) == 3 {
-            current_task.user_rsp = unsafe { core::ptr::read_volatile((current_rsp + 144) as *const u64) };
-        } else {
-            current_task.user_rsp = zenus_arch::cpu::get_percpu_user_rsp(cpu);
-        }
-    } else {
-        return 0;
+    let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    let mut tasks = TASKS.lock();
+
+    // Handle idle task — current is IDLE_TASK_IDX (u32::MAX), not a real task entry
+    if current != IDLE_TASK_IDX {
+        if tasks.tasks[current as usize].is_none() { return 0; }
     }
 
     let next = find_next_ready(&tasks, current, cpu);
-    if next == current {
-        return 0;
+    if next == current || next == IDLE_TASK_IDX { return 0; }
+
+    if tasks.tasks[next as usize].is_none() { return 0; }
+
+    // Validate next task's stack
+    if let Some(ref next_task) = tasks.tasks[next as usize] {
+        if next_task.stack_alloc != 0 && next_task.stack_size > 0 {
+            let rsp = next_task.rsp;
+            let stack_bottom = next_task.stack_alloc;
+            let stack_top = stack_bottom + next_task.stack_size as u64;
+            let margin = 256u64;
+            if rsp < stack_bottom + margin || rsp >= stack_top {
+                return 0;
+            }
+        }
     }
 
-    if tasks.tasks[next as usize].is_none() {
-        return 0;
+    let current_cr3_raw = zenus_mem::paging::get_level4_addr().as_u64();
+
+    // Save current task state (skip idle — not a real task)
+    if current != IDLE_TASK_IDX {
+        if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
+            current_task.state = TaskState::Ready;
+            current_task.rsp = current_rsp;
+            current_task.cr3 = current_cr3_raw;
+        }
     }
 
-    if let Some(ref mut current_task) = tasks.tasks[current as usize] {
-        current_task.state = TaskState::Ready;
-        current_task.cr3 = current_cr3_raw;
-    } else {
-        return 0;
-    }
-
-    // Flush the outgoing task's output to the UART before switching.
-    // This guarantees each task's output is atomically committed to the
-    // serial line before the next task runs — no interleaving.
-    // Already flushed above, but flush again to catch anything written
-    // by the save-and-find logic above.
-    zenus_console::serial::flush_output();
-
-    // Insert task-boundary separator so each task's output starts on a
-    // fresh line. This is the key UX improvement over Linux's serial
-    // console, where output from different writers lands on the same line.
-    if current != 0 && next != 0 {
-        zenus_console::serial::write_task_boundary();
-    }
-
-    let new_rsp = match tasks.tasks[next as usize].as_mut() {
-        Some(nt) => {
-            nt.state = TaskState::Running;
-            nt.ticks_left = TIME_SLICE;
-
-            if nt.user_rsp != 0 {
-                zenus_arch::cpu::set_percpu_user_rsp(cpu, nt.user_rsp);
-            } else {
-                zenus_arch::cpu::set_percpu_user_rsp(cpu, 0);
-            }
-
-            let next_cr3 = nt.cr3;
-            if next_cr3 != 0 && next_cr3 != current_cr3_raw {
-                zenus_mem::paging::set_cr3(next_cr3);
-            }
-
-            CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
-
-            if nt.kernel_rsp_top != 0 {
-                zenus_arch::cpu::set_percpu_kernel_rsp(cpu, nt.kernel_rsp_top);
-            }
-
-            if nt.kernel_rsp_top != 0 {
-                zenus_arch::gdt::set_tss_stack(x86_64::VirtAddr::new(nt.kernel_rsp_top));
-            }
-
-            nt.rsp
+    let (next_rsp, next_cr3) = match tasks.tasks[next as usize].as_mut() {
+        Some(next_task) => {
+            next_task.state = TaskState::Running;
+            next_task.ticks_left = TIME_SLICE;
+            (next_task.rsp, next_task.cr3)
         }
         None => return 0,
     };
 
+    // Save user_rsp from PerCpu
+    if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
+        current_task.user_rsp = zenus_arch::cpu::get_percpu_user_rsp(cpu);
+    }
+
+    CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
+
+    let next_kernel_rsp = tasks.tasks[next as usize].as_ref()
+        .map(|t| t.kernel_rsp_top).unwrap_or(0);
+    let next_user_rsp = tasks.tasks[next as usize].as_ref()
+        .map(|t| t.user_rsp).unwrap_or(0);
+
+    // Close IRQ window before releasing lock
+    x86_64::instructions::interrupts::disable();
     drop(tasks);
-    new_rsp
+    x86_64::instructions::interrupts::disable();
+
+    // Restore next task's PerCpu state
+    if next_user_rsp != 0 {
+        zenus_arch::cpu::set_percpu_user_rsp(cpu, next_user_rsp);
+    } else {
+        zenus_arch::cpu::set_percpu_user_rsp(cpu, 0);
+    }
+
+    if next_cr3 != 0 && next_cr3 != current_cr3_raw {
+        zenus_mem::paging::set_cr3(next_cr3);
+    }
+
+    if next_kernel_rsp != 0 {
+        zenus_arch::cpu::set_percpu_kernel_rsp(cpu, next_kernel_rsp);
+        zenus_arch::gdt::set_tss_stack(x86_64::VirtAddr::new(next_kernel_rsp));
+    }
+
+    unsafe {
+        let percpu_addr = zenus_arch::cpu::percpu_virt_addr(cpu);
+        zenus_arch::cpu::write_msr(0xC0000102, percpu_addr);
+    }
+
+    next_rsp
 }
 
 pub fn idle() -> ! {
     zenus_console::serial::flush_output();
+    let cpu = current_cpu() as usize;
+    CURRENT_TASK[cpu].store(IDLE_TASK_IDX, Ordering::Release);
     unsafe {
         core::arch::asm!(
             "cli",

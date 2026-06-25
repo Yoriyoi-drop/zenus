@@ -59,20 +59,19 @@ pub fn init() {
     idt.virtualization.set_handler_fn(virtualization_handler);
 
     // IRQ 0-15 mapped to vectors 32-47
-    idt[32].set_handler_fn(super::handler::interrupt_timer);
+    // Vector 32: PIT timer → apic_timer_isr_stub for preemptive scheduling
+    unsafe {
+        extern "C" { static apic_timer_isr_stub: u8; }
+        let addr = &apic_timer_isr_stub as *const u8 as u64;
+        idt[32].set_handler_addr(x86_64::VirtAddr::new(addr))
+            .disable_interrupts(true)
+            .set_privilege_level(x86_64::PrivilegeLevel::Ring0);
+    }
     idt[33].set_handler_fn(super::handler::interrupt_keyboard);
     idt[39].set_handler_fn(super::handler::interrupt_spurious);
 
     // NIC interrupt (vector 43 = IRQ 11)
     idt[43].set_handler_fn(super::handler::interrupt_nic);
-
-    unsafe {
-        extern "C" { static apic_timer_isr_stub: u8; }
-        let addr = &apic_timer_isr_stub as *const u8 as u64;
-        idt[48].set_handler_addr(x86_64::VirtAddr::new(addr))
-            .disable_interrupts(true)
-            .set_privilege_level(x86_64::PrivilegeLevel::Ring0);
-    }
 
     idt.load();
 }

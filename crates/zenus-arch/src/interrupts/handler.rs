@@ -22,8 +22,13 @@ pub fn set_nic_irq_handler(handler: fn()) {
 
 #[no_mangle]
 pub extern "x86-interrupt" fn interrupt_timer(_frame: InterruptStackFrame) {
+    // PIC EOI (master)
+    unsafe { core::arch::asm!("out 0x20, al", in("al") 0x20u8); }
+    // APIC EOI (for ExtINT via LINT0)
     crate::interrupts::apic::eoi();
     crate::interrupts::pit::tick();
+    // Flush serial output buffer so shell output appears in real time
+    zenus_console::serial::flush_output();
 }
 
 #[no_mangle]

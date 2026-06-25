@@ -73,27 +73,11 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 fn shell_task() {
-    let s = zenus_console::serial::SerialPort::new(0x3F8);
-    s.write_str("[SH] IN SHELL_TASK\n");
-    let mut sh = shell::Shell::new();
-    s.write_str("[SH] Shell created\n");
-    sh.run();
+    let mut shell = shell::Shell::new();
+    shell.run();
 }
 
 fn ssh_service_task() {
-    if !zenus_net::ssh::SshServer::start(1, 22) {
-        zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Warn, "[SSH] Failed to start SSH server (no network?)");
-        return;
-    }
-    zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[SSH] SSH server task started on port 22");
-    loop {
-        // SSH server poll uses the static SSH_SERVER
-        zenus_net::nic::net_poll();
-        zenus_arch::watchdog::watchdog_pet();
-        for _ in 0..10 {
-            zenus_sched::scheduler::yield_now();
-        }
-    }
 }
 
 #[no_mangle]
@@ -200,6 +184,7 @@ pub extern "C" fn entry() -> ! {
     serial.write_byte_serial(if (apic_base_raw & (1 << 8)) != 0 { b'1' } else { b'0' });
     serial.write_str("\n");
     interrupts::apic::init_with_virt(apic_base + hhdm_offset);
+    interrupts::apic::enable_pic_lint0();
     interrupts::pit::init();
     zenus_arch::rtc::init();
     zenus_arch::random::init_rng();
@@ -387,14 +372,17 @@ pub extern "C" fn entry() -> ! {
         zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] Watchdog initialized (30s timeout)");
 
         // 11d. Register SSH server as a system service
-        if zenus_sched::init::service_register("ssh", ssh_service_task, 65536, 0, 0, true) {
-            zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] SSH server registered as service");
-        }
+        // Temporarily disabled to debug scheduler
+        // if zenus_sched::init::service_register("ssh", ssh_service_task, 65536, 0, 0, true) {
+        //     zenus_console::log::dmesg_push(zenus_console::log::LogLevel::Info, "[OK] SSH server registered as service");
+        // }
 
         // 11f. Try to execute /initrd/init/startup.sh as the init script
+        /* // DISABLED: heap canary corruption during execute_command("echo")
         if zenus_sched::init::initrd_execute() {
             both!(serial, hhdm_offset, "[INITRD] Startup script executed\n");
         }
+        */
 
         // 11b. Initialize journal on device 0 at blocks 3000-3015
         if zenus_arch::ata::device_count() > 0 {
@@ -416,7 +404,7 @@ pub extern "C" fn entry() -> ! {
         zenus_arch::smp::set_ap_idle_fn(zenus_sched::scheduler::ap_idle);
         smp::wake_aps();
 
-        // 12. Spawn shell as a real scheduler task FIRST (before timer starts)
+        // 12. Spawn shell as a scheduler task
         let shell_tid = scheduler::create_task(shell_task, 65536);
         if shell_tid == 0 {
             both!(serial, hhdm_offset, "[FAIL] Shell task creation failed!\n");
@@ -432,20 +420,14 @@ pub extern "C" fn entry() -> ! {
         // 12b. Start service supervisor (periodic health checks)
         // Supervisor runs in the idle loop via watchdog::watchdog_pet
 
-        // Print banner BEFORE starting the APIC timer (VGA scroll uses function pointers
-        // that may be corrupted if the timer interrupt fires during VGA operations).
         both!(serial, hhdm_offset, "========================================\n");
         both!(serial, hhdm_offset, "  Zenus OS siap! Server mode aktif.\n");
         both!(serial, hhdm_offset, "========================================\n");
 
-        // 13. Start APIC timer for preemptive multitasking AFTER boot init is fully complete.
-        interrupts::apic::init_timer(48);
-        serial.write_str("[TMR] Timer started, entering idle\n");
-
-        // 14. Flush any remaining boot output before entering idle
+        serial.write_str("[PIT] PIT-based scheduling active (~1000 Hz)\n");
         zenus_console::serial::flush_output();
 
-        // 15. Become idle — let the scheduler run the shell task
+        // BSP enters idle loop — PIT tick preempts to shell task
         scheduler::idle();
     }
 }

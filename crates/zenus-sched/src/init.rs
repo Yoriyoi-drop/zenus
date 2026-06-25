@@ -77,6 +77,9 @@ pub fn init_system_start() -> bool {
         };
         for (idx, entry, stack_size, name) in snapshot {
             let pid = scheduler::create_task(entry, stack_size);
+            serial().write_str("[INIT] create_task returned pid=");
+            serial().write_u64(pid);
+            serial().write_str("\n");
             let mut services = SERVICES.lock();
             if pid > 0 {
                 if let Some(ref mut s) = services.services[idx] {
@@ -93,9 +96,8 @@ pub fn init_system_start() -> bool {
                 serial().write_str("[INIT] Failed to start ");
                 serial().write_str(name);
                 serial().write_str("\n");
-                let mut services = SERVICES.lock();
                 if let Some(ref mut s) = services.services[idx] {
-                    s.state = ServiceState::Failed;
+                    s.state = ServiceState::Stopped;
                 }
             }
         }

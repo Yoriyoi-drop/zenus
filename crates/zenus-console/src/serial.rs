@@ -32,16 +32,21 @@ impl OutBuf {
     }
 }
 
+core::arch::global_asm!(
+    ".intel_syntax noprefix",
+    ".globl uart_putchar",
+    "uart_putchar:",
+    "  mov al, dil",
+    "  mov dx, 0x3F8",
+    "  out dx, al",
+    "  ret",
+    ".att_syntax prefix",
+);
+
 fn uart_write_byte(byte: u8) {
-    let port = 0x3F8u16;
     unsafe {
-        let mut status: u8;
-        loop {
-            core::arch::asm!("in al, dx", out("al") status, in("dx") port + 5, options(nostack, preserves_flags));
-            if status & 0x20 != 0 { break; }
-            core::hint::spin_loop();
-        }
-        core::arch::asm!("out dx, al", in("dx") port, in("al") byte, options(nostack, preserves_flags));
+        extern "C" { fn uart_putchar(c: u8); }
+        uart_putchar(byte);
     }
 }
 
