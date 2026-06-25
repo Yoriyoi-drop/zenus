@@ -5,7 +5,7 @@ use zenus_sync::spinlock::SpinLock;
 
 use crate::paging::PAGE_SIZE;
 
-const FREE_STACK_SIZE: usize = 4096;
+const FREE_STACK_SIZE: usize = 16384;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

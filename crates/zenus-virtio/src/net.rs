@@ -9,8 +9,8 @@ const VIRTIO_NET_F_STATUS: u64 = 16;
 const VIRTIO_NET_F_MQ: u64 = 17;
 
 const MAX_QUEUE_PAIRS: usize = 2;
-const RX_BUF_COUNT: usize = 16;
-const TX_BUF_COUNT: usize = 16;
+const RX_BUF_COUNT: usize = 64;
+const TX_BUF_COUNT: usize = 64;
 const BUF_SIZE: usize = 2048;
 
 static mut RX_BUFS: [u8; RX_BUF_COUNT * BUF_SIZE] = [0u8; RX_BUF_COUNT * BUF_SIZE];
