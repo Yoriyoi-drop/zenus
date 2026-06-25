@@ -6,6 +6,7 @@ use zenus_mem::allocator::ALLOCATOR;
 use zenus_ns::{NsId, NS_ROOT};
 
 static IDLE_RSP: AtomicU64 = AtomicU64::new(0);
+static NEXT_CPU: AtomicU32 = AtomicU32::new(0);
 
 pub const TIME_SLICE: u64 = 5;
 const MAX_CPUS: usize = 8;
@@ -592,6 +593,9 @@ pub fn yield_now() {
         return;
     }
 
+    // Migrate to this CPU if stolen from another
+    migrate_task_to_cpu(&mut tasks, next, cpu);
+
     if let Some(ref next_task) = tasks.tasks[next as usize] {
         if next_task.stack_alloc != 0 && next_task.stack_size > 0 {
             let rsp = next_task.rsp;
@@ -682,13 +686,28 @@ pub fn check_yield() {
 }
 
 fn find_next_ready(tasks: &TaskArray, current: u32, cpu: u32) -> u32 {
-    // Linear scan: if shell at index 1 is active, return it
+    // First pass: prefer tasks already assigned to this CPU
     for idx in 1..MAX_TASKS as u32 {
         if let Some(ref task) = tasks.tasks[idx as usize] {
             if task.is_active() && task.cpu == cpu { return idx; }
         }
     }
+    // Second pass: steal from other CPUs
+    for idx in 1..MAX_TASKS as u32 {
+        if let Some(ref task) = tasks.tasks[idx as usize] {
+            if task.is_active() { return idx; }
+        }
+    }
     current
+}
+
+/// Update a stolen task's CPU affinity when it's migrated to a new CPU.
+/// The caller should hold the TASKS lock and call this after find_next_ready
+/// when the returned idx belongs to a different CPU.
+fn migrate_task_to_cpu(tasks: &mut TaskArray, idx: u32, cpu: u32) {
+    if let Some(ref mut task) = tasks.tasks[idx as usize] {
+        task.cpu = cpu;
+    }
 }
 
 pub fn current_task_id() -> u64 {
@@ -870,6 +889,9 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 
     if tasks.tasks[next as usize].is_none() { return 0; }
 
+    // Migrate to this CPU if stolen from another
+    migrate_task_to_cpu(&mut tasks, next, cpu);
+
     // Validate next task's stack
     if let Some(ref next_task) = tasks.tasks[next as usize] {
         if next_task.stack_alloc != 0 && next_task.stack_size > 0 {
@@ -903,9 +925,11 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         None => return 0,
     };
 
-    // Save user_rsp from PerCpu
-    if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
-        current_task.user_rsp = zenus_arch::cpu::get_percpu_user_rsp(cpu);
+    // Save user_rsp from PerCpu (skip idle)
+    if current != IDLE_TASK_IDX {
+        if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
+            current_task.user_rsp = zenus_arch::cpu::get_percpu_user_rsp(cpu);
+        }
     }
 
     CURRENT_TASK[cpu as usize].store(next, Ordering::Release);

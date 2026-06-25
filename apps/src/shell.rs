@@ -126,6 +126,7 @@ impl Shell {
                 continue;
             }
             self.execute(trimmed);
+            zenus_console::serial::flush_output();
         }
     }
 
@@ -153,6 +154,7 @@ impl Shell {
                     b'\r' | b'\n' => {
                         let mut w = self.writer();
                         w.write_str("\r\n");
+                        zenus_console::serial::flush_output();
                         unsafe {
                             let s = core::str::from_utf8(&BUF[..POS]).unwrap_or("");
                             POS = 0;
@@ -163,6 +165,7 @@ impl Shell {
                         if unsafe { POS > 0 } {
                             unsafe { POS -= 1 };
                             self.writer().write_str("\x08 \x08");
+                            zenus_console::serial::flush_output();
                         }
                     }
                     0x20..=0x7E => {
@@ -171,6 +174,7 @@ impl Shell {
                                 BUF[POS] = c;
                                 POS += 1;
                                 self.writer().write_byte(c);
+                                zenus_console::serial::flush_output();
                             }
                         }
                     }

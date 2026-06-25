@@ -79,7 +79,7 @@ img: $(KERNEL) $(INITRD)
 run: run-qemu
 
 run-bios: $(ISO)
-	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
+	qemu-system-x86_64 -serial stdio -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 run-uefi: $(ISO)
