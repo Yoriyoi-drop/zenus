@@ -4,7 +4,7 @@ use crate::vfs::{self, FileSystem, FileType, FileStat, DirEntry};
 
 const MAX_NODES: usize = 128;
 const MAX_NAME: usize = 64;
-const MAX_FILE_SIZE: usize = 4096;
+const MAX_FILE_SIZE: usize = 1024;
 const MAX_DIR_ENTRIES: usize = 256;
 
 #[derive(Clone, Copy)]

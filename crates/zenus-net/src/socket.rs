@@ -6,8 +6,8 @@ pub const SOCK_STREAM: u8 = 1;
 pub const SOCK_DGRAM: u8 = 2;
 pub const SOL_SOCKET: u8 = 1;
 
-const MAX_SOCKETS: usize = 32;
-const MAX_UDP_RECV: usize = 8;
+const MAX_SOCKETS: usize = 16;
+const MAX_UDP_RECV: usize = 2;
 
 #[derive(Clone, Copy, PartialEq)]
 enum SocketState {

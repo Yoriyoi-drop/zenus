@@ -20,7 +20,7 @@ const TCP_FLAG_RST: u8 = 0x04;
 const TCP_FLAG_PSH: u8 = 0x08;
 const TCP_FLAG_ACK: u8 = 0x10;
 
-pub const MAX_CONNS: usize = 64;
+pub const MAX_CONNS: usize = 256;
 const MAX_RETRIES: u8 = 5;
 const RETRY_INTERVAL: u8 = 10;
 

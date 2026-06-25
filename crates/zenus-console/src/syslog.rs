@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::log::{LogLevel, dmesg_push};
 use zenus_sync::spinlock::SpinLock;
 
-pub const SYSLOG_MAX_ENTRIES: usize = 4096;
+pub const SYSLOG_MAX_ENTRIES: usize = 1024;
 pub const SYSLOG_PATH: &str = "/var/log/syslog";
 
 #[derive(Debug, Clone, Copy)]

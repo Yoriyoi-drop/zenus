@@ -39,7 +39,11 @@ $(INITRD): mkinitrd.sh
 $(ISO): $(KERNEL) $(INITRD)
 	rm -rf $(ISO_DIR)
 	mkdir -p $(ISO_DIR)/boot/limine
-	cp $(KERNEL) $(ISO_DIR)/boot/
+	$(LD) --strip-debug --gc-sections -T apps/src/linker.ld -o $(ISO_DIR)/boot/zenus \
+		--nmagic -n \
+		--whole-archive \
+		target/$(TARGET)/$(PROFILE_DIR)/libzenus.a \
+		--no-whole-archive
 	cp $(INITRD) $(ISO_DIR)/boot/
 	cp limine.conf $(ISO_DIR)/boot/limine/
 	cp $(LIMINE_DIR)/limine-bios.sys $(ISO_DIR)/boot/limine/
