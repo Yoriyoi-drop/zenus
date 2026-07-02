@@ -97,6 +97,7 @@ static SYSLOG: SpinLock<Syslog> = SpinLock::new(Syslog::new());
 
 pub fn syslog_init() {
     SYSLOG_INIT.store(true, Ordering::Release);
+    crate::kinfo!("Syslog initialized");
 }
 
 pub fn syslog_write(level: LogLevel, module: &str, msg: &str) {

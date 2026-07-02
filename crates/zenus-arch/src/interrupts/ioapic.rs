@@ -29,14 +29,7 @@ pub fn init() {
     let ioapic_id = ioapic_read(0x00);
     let ioapic_version = ioapic_read(0x01);
     let max_redir_entries = ((ioapic_version >> 16) & 0xFF) as u8;
-    let s = zenus_console::serial::SerialPort::new(0x3F8);
-    s.write_str("[IOAPIC] ID=0x");
-    s.write_hex(ioapic_id as u64);
-    s.write_str(" version=0x");
-    s.write_hex(ioapic_version as u64);
-    s.write_str(" max_redir=");
-    s.write_u64(max_redir_entries as u64);
-    s.write_str("\n");
+    zenus_console::kinfo!("IOAPIC ID={:#x} version={:#x} max_redir={}", ioapic_id, ioapic_version, max_redir_entries);
     core::sync::atomic::AtomicBool::store(&IOAPIC_INITIALIZED, true, core::sync::atomic::Ordering::Relaxed);
 }
 

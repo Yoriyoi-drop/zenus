@@ -49,13 +49,12 @@ fn serial() -> SerialPort {
 }
 
 pub fn init_system_start() -> bool {
-    let s = serial();
     if INIT_STARTED.swap(true, Ordering::SeqCst) {
-        s.write_str("[INIT] Already started\n");
+        zenus_console::kinfo!("Init already started");
         return false;
     }
 
-    s.write_str("[INIT] Starting system services...\n");
+    zenus_console::kinfo!("Starting system services...");
     loop {
         let snapshot = {
             let services = SERVICES.lock();
@@ -369,7 +368,7 @@ pub fn init_shutdown() -> ! {
         }
     }
 
-    s.write_str("[INIT] System halted\n");
+    zenus_console::kpanic_code!(zenus_console::error::codes::KRN_STACK_OVERFLOW, "System halted");
     loop {
         x86_64::instructions::hlt();
     }
@@ -415,7 +414,7 @@ pub fn initrd_execute() -> bool {
     match node.fs.read(node.inode, 0, &mut buf) {
         Some(n) if n as usize == size => {}
         _ => {
-            s.write_str("[INITRD] Read failed\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::FS_MOUNT_FAILED, "Initrd read failed");
             return false;
         }
     }
@@ -523,7 +522,7 @@ fn execute_command(cmdline: &str) {
             if zenus_fs::vfs::create_dir(parts[1]) {
                 s.write_str("ok\n");
             } else {
-                s.write_str("mkdir: failed\n");
+                zenus_console::kwarn!("mkdir: failed");
             }
         }
         "touch" => {
@@ -534,7 +533,7 @@ fn execute_command(cmdline: &str) {
             if zenus_fs::vfs::create_file(parts[1]) {
                 s.write_str("ok\n");
             } else {
-                s.write_str("touch: failed\n");
+                zenus_console::kwarn!("touch: failed");
             }
         }
         "sleep" => {

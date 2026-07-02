@@ -1,5 +1,4 @@
 use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
-use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 use super::task::{Task, TaskInfo, TaskState, MAX_TASKS};
 use zenus_mem::allocator::ALLOCATOR;
@@ -295,8 +294,7 @@ pub fn init() {
     IDLE_RSP.store(idle_stack_top, Ordering::Release);
     TASK_COUNT.store(1, Ordering::Release);
 
-    let s = SerialPort::new(0x3F8);
-    s.write_str("[OK] Scheduler initialized\n");
+    zenus_console::kinfo!("Scheduler initialized");
 }
 
 fn current_cpu() -> u32 {

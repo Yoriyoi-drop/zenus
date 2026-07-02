@@ -2,7 +2,7 @@ use zenus_sync::spinlock::SpinLock;
 use zenus_mem::paging;
 use crate::pci::VirtioPciTransport;
 use crate::queue::{VirtioQueue, VirtioQueueMem, VirtioAvail, VirtioDesc, VRING_DESC_F_WRITE};
-use crate::{serial, QUEUE_SIZE};
+use crate::QUEUE_SIZE;
 
 const VIRTIO_NET_F_MAC: u64 = 5;
 const VIRTIO_NET_F_STATUS: u64 = 16;
@@ -66,8 +66,7 @@ static NET_LOCK: SpinLock<()> = SpinLock::new(());
 
 impl VirtioNet {
     pub unsafe fn new(transport: VirtioPciTransport) -> Option<Self> {
-        let s = serial();
-        s.write_str("[VIRTIO-NET] Initializing...\n");
+        zenus_console::kinfo!("VIRTIO-NET: Initializing...");
 
         transport.set_device_status(0);
         while transport.device_status() != 0 { core::hint::spin_loop(); }
@@ -89,7 +88,7 @@ impl VirtioNet {
 
         transport.set_device_status(transport.device_status() | 8);
         if transport.device_status() & 8 == 0 {
-            s.write_str("[VIRTIO-NET] FEATURES_OK rejected\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-NET: FEATURES_OK rejected");
             return None;
         }
 
@@ -100,9 +99,7 @@ impl VirtioNet {
             1
         };
 
-        s.write_str("[VIRTIO-NET] ");
-        s.write_u64(num_pairs as u64);
-        s.write_str(" queue pair(s)\n");
+        zenus_console::kinfo!("VIRTIO-NET: {} queue pair(s)", num_pairs);
 
         let mac = {
             let mut m = [0u8; 6];
@@ -125,7 +122,7 @@ impl VirtioNet {
             let rx_up = rx_ap + core::mem::size_of::<VirtioAvail>() as u64;
             let rx_qsize = transport.setup_queue(rx_idx, rx_dp, rx_ap, rx_up);
             if rx_qsize == 0 {
-                s.write_str("[VIRTIO-NET] RX queue setup failed\n");
+                zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-NET: RX queue setup failed");
                 continue;
             }
 
@@ -135,7 +132,7 @@ impl VirtioNet {
             let tx_up = tx_ap + core::mem::size_of::<VirtioAvail>() as u64;
             let tx_qsize = transport.setup_queue(tx_idx, tx_dp, tx_ap, tx_up);
             if tx_qsize == 0 {
-                s.write_str("[VIRTIO-NET] TX queue setup failed\n");
+                zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-NET: TX queue setup failed");
                 continue;
             }
 
@@ -161,12 +158,7 @@ impl VirtioNet {
 
         net.setup_rx_bufs();
 
-        s.write_str("[VIRTIO-NET] Ready (MAC ");
-        for (i, b) in mac.iter().enumerate() {
-            if i > 0 { s.write_str(":"); }
-            s.write_hex(*b as u64);
-        }
-        s.write_str(")\n");
+        zenus_console::kinfo!("VIRTIO-NET: Ready (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
         Some(net)
     }

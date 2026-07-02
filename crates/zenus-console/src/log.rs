@@ -3,17 +3,17 @@ use crate::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 
 #[allow(dead_code)]
-struct LogBuf {
+pub struct LogBuf {
     buf: [u8; 256],
     pos: usize,
 }
 
 #[allow(dead_code)]
 impl LogBuf {
-    fn new() -> Self {
+    pub fn new() -> Self {
         LogBuf { buf: [0u8; 256], pos: 0 }
     }
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         core::str::from_utf8(&self.buf[..self.pos]).unwrap_or("")
     }
 }
@@ -30,24 +30,31 @@ impl core::fmt::Write for LogBuf {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
 pub enum LogLevel {
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Error,
-    Critical,
+    Trace    = 0,
+    Debug    = 1,
+    Notice   = 2,
+    Info     = 3,
+    Warn     = 4,
+    Error    = 5,
+    Critical = 6,
+    Fatal    = 7,
+    Panic    = 8,
 }
 
 impl LogLevel {
     pub fn prefix(self) -> &'static str {
         match self {
-            LogLevel::Trace => "TRACE",
-            LogLevel::Debug => "DEBUG",
-            LogLevel::Info => "INFO ",
-            LogLevel::Warn => "WARN ",
-            LogLevel::Error => "ERROR",
+            LogLevel::Trace    => "TRACE",
+            LogLevel::Debug    => "DEBUG",
+            LogLevel::Notice   => "NOTICE",
+            LogLevel::Info     => "INFO ",
+            LogLevel::Warn     => "WARN ",
+            LogLevel::Error    => "ERROR",
             LogLevel::Critical => "CRIT ",
+            LogLevel::Fatal    => "FATAL",
+            LogLevel::Panic    => "PANIC",
         }
     }
 }
@@ -228,5 +235,68 @@ macro_rules! kcrit {
         let mut _buf = $crate::log::LogBuf::new();
         let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
         $crate::log::log($crate::log::LogLevel::Critical, module_path!(), _buf.as_str());
+    }};
+}
+
+/// Log an error with a structured error code (compact format)
+#[macro_export]
+macro_rules! kerror_code {
+    ($code:expr, $($arg:tt)*) => {{
+        let mut _buf = $crate::log::LogBuf::new();
+        let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
+        let _msg = _buf.as_str();
+        let _level = $code.severity;
+        $crate::log::log(_level, module_path!(), _msg);
+        $crate::error::record_error(_level, Some($code.code), module_path!(), _msg, file!(), line!());
+    }};
+}
+
+/// Log an error with full detailed output (error code card)
+#[macro_export]
+macro_rules! kerror_detail {
+    ($code:expr, $($arg:tt)*) => {{
+        let mut _buf = $crate::log::LogBuf::new();
+        let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
+        let _msg = _buf.as_str();
+        let _level = $code.severity;
+        let mut _s = $crate::serial::SerialPort::new(0x3F8);
+        $crate::error::write_detailed(&mut _s, &$code, _msg, file!(), line!());
+        $crate::log::dmesg_push(_level, _msg);
+        $crate::error::record_error(_level, Some($code.code), module_path!(), _msg, file!(), line!());
+    }};
+}
+
+/// Fatal error (system cannot continue) — logs, records, does NOT halt
+#[macro_export]
+macro_rules! kfatal {
+    ($($arg:tt)*) => {{
+        let mut _buf = $crate::log::LogBuf::new();
+        let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
+        let _msg = _buf.as_str();
+        $crate::log::log($crate::log::LogLevel::Fatal, module_path!(), _msg);
+        $crate::error::record_error($crate::log::LogLevel::Fatal, None, module_path!(), _msg, file!(), line!());
+    }};
+}
+
+/// Fatal error with structured error code — logs, dumps detailed card, returns
+#[macro_export]
+macro_rules! kfatal_code {
+    ($code:expr, $($arg:tt)*) => {{
+        let mut _buf = $crate::log::LogBuf::new();
+        let _ = core::fmt::write(&mut _buf, format_args!($($arg)*));
+        let _msg = _buf.as_str();
+        let mut _s = $crate::serial::SerialPort::new(0x3F8);
+        $crate::error::write_detailed(&mut _s, &$code, _msg, file!(), line!());
+        $crate::log::dmesg_push($code.severity, _msg);
+        $crate::error::record_error($code.severity, Some($code.code), module_path!(), _msg, file!(), line!());
+    }};
+}
+
+/// Panic with structured error code — logs, dumps detailed card, then halts
+#[macro_export]
+macro_rules! kpanic_code {
+    ($code:expr, $($arg:tt)*) => {{
+        $crate::kfatal_code!($code, $($arg)*);
+        loop { x86_64::instructions::hlt(); }
     }};
 }

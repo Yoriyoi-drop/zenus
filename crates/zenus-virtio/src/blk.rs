@@ -6,7 +6,7 @@ use zenus_mem::paging;
 use zenus_fs::devfs::{self, BlockDeviceOps};
 use crate::pci::VirtioPciTransport;
 use crate::queue::{VirtioQueue, VirtioQueueMem, VirtioAvail, VirtioDesc, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
-use crate::{serial, QUEUE_SIZE};
+use crate::QUEUE_SIZE;
 
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
@@ -57,8 +57,7 @@ static BLK_LOCK: SpinLock<()> = SpinLock::new(());
 
 impl VirtioBlk {
     pub unsafe fn new(transport: VirtioPciTransport) -> Option<Self> {
-        let s = serial();
-        s.write_str("[VIRTIO-BLK] Initializing...\n");
+        zenus_console::kinfo!("VIRTIO-BLK: Initializing...");
 
         transport.set_device_status(0);
         while transport.device_status() != 0 { core::hint::spin_loop(); }
@@ -70,9 +69,7 @@ impl VirtioBlk {
 
         transport.set_device_status(transport.device_status() | 8);
         if transport.device_status() & 8 == 0 {
-            s.write_str("[VIRTIO-BLK] FEATURES_OK rejected, status=");
-            s.write_hex(transport.device_status() as u64);
-            s.write_str("\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-BLK: FEATURES_OK rejected");
             return None;
         }
 
@@ -87,7 +84,7 @@ impl VirtioBlk {
 
         let size = transport.setup_queue(0, dp, ap, up);
         if size == 0 {
-            s.write_str("[VIRTIO-BLK] Queue setup failed\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-BLK: Queue setup failed");
             return None;
         }
 
@@ -96,7 +93,7 @@ impl VirtioBlk {
         let capacity = {
             let cfg_base = transport.get_device_config_space();
             if cfg_base == 0 {
-                s.write_str("[VIRTIO-BLK] No device config space\n");
+                zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-BLK: No device config space");
                 return None;
             }
             let cap = cfg_base as *const u64;
@@ -115,14 +112,7 @@ impl VirtioBlk {
             size: capacity * 512,
         });
 
-        s.write_str("[VIRTIO-BLK] Capacity: ");
-        s.write_u64(capacity);
-        s.write_str(" sectors (");
-        s.write_u64(capacity / 2048);
-        s.write_str(" MB)\n");
-        s.write_str("[VIRTIO-BLK] Registered as /dev/");
-        s.write_str(name_str);
-        s.write_str("\n");
+        zenus_console::kinfo!("VIRTIO-BLK: Capacity: {} sectors ({} MB) registered as /dev/{}", capacity, capacity / 2048, name_str);
 
         Some(VirtioBlk { capacity, transport, queue, dev_idx })
     }

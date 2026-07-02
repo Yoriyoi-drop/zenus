@@ -48,6 +48,7 @@ pub fn init() {
     root.domainname[..dlen].copy_from_slice(&domainname[..dlen]);
     table.namespaces[0] = Some(root);
     table.count = 1;
+    zenus_console::kinfo!("UTS namespace initialized");
 }
 
 pub fn create() -> Option<NsId> {

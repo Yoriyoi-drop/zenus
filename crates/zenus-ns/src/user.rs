@@ -44,6 +44,7 @@ pub fn init() {
     root.count = 1;
     table.namespaces[0] = Some(root);
     table.count = 1;
+    zenus_console::kinfo!("User namespace initialized");
 }
 
 pub fn create() -> Option<NsId> {

@@ -1,7 +1,6 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
-use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 
 static HEAP_LOCK: SpinLock<()> = SpinLock::new(());
@@ -56,8 +55,7 @@ impl FreeListAllocator {
         self.free_head.store(heap_start as usize, Ordering::Release);
         self.initialized.store(true, Ordering::Release);
 
-        let s = SerialPort::new(0x3F8);
-        s.write_str("[OK] Heap: 2MB free-list allocator ready\n");
+        zenus_console::kinfo!("Heap: 8MB free-list allocator ready");
     }
 
     fn alloc_mut(&self, layout: Layout) -> *mut u8 {
@@ -124,12 +122,8 @@ impl FreeListAllocator {
             }
         }
 
-        {
-            use core::fmt::Write;
-            let mut s = SerialPort::new(0x3F8);
-            let _ = write!(s, "[OOM] Heap exhausted! free_head=0x{:x}, size_requested={}\n",
-                self.free_head.load(Ordering::Relaxed), size);
-        }
+        zenus_console::kerror_code!(zenus_console::error::codes::MEM_ALLOC_FAILED,
+            "Heap exhausted! free_head={:#x}, size={}", self.free_head.load(Ordering::Relaxed), size);
         ptr::null_mut()
     }
 
@@ -148,10 +142,8 @@ impl FreeListAllocator {
                 return;
             }
             if (*block).canary != CANARY_VALUE {
-                let s = SerialPort::new(0x3F8);
-                s.write_str("[HEAP] Canary corrupted! Block at 0x");
-                s.write_hex(block as usize as u64);
-                s.write_str("\n");
+                zenus_console::kerror_code!(zenus_console::error::codes::MEM_PROTECTION,
+                    "Heap canary corrupted! Block at {:#x}", block as usize);
                 return;
             }
         }

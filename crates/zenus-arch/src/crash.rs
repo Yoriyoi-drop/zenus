@@ -64,6 +64,7 @@ pub fn crash_dump_init() {
     unsafe {
         CRASH_DUMPS[cpu].magic.copy_from_slice(b"ZENUS_CRASH_DUMP");
     }
+    zenus_console::kinfo!("Crash dump handler initialized");
 }
 
 pub fn crash_dump_save(msg: &str) -> &'static CrashDump {

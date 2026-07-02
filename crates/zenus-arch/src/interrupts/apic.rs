@@ -37,31 +37,23 @@ pub fn current_apic_id() -> u32 {
 }
 
 fn enable_lapic() {
-    let s = zenus_console::serial::SerialPort::new(0x3F8);
-
     // Ensure xAPIC mode (not x2APIC): set EN bit 10, clear EXTD bit 11
     let base_raw = unsafe { crate::cpu::read_msr(0x1B) };
     if (base_raw & (1 << 11)) != 0 {
-        s.write_str("[APIC] Switching from x2APIC to xAPIC mode\n");
+        zenus_console::kinfo!("Switching from x2APIC to xAPIC mode");
     }
     if (base_raw & (1 << 10)) == 0 {
-        s.write_str("[APIC] Enabling APIC (IA32_APIC_BASE.EN)\n");
+        zenus_console::kinfo!("Enabling APIC (IA32_APIC_BASE.EN)");
     }
     unsafe { crate::cpu::write_msr(0x1B, (base_raw | (1 << 10)) & !(1 << 11)); }
 
     let val = lapic_read(0xF0);
     let apic_id = lapic_read(0x20) >> 24;
-    s.write_str("[APIC] SVR=0x");
-    s.write_hex(val as u64);
-    s.write_str(" APIC ID=0x");
-    s.write_hex(apic_id as u64);
-    s.write_str("\n");
+    zenus_console::kinfo!("APIC SVR={:#x} APIC ID={:#x}", val, apic_id);
     // Keep APIC enabled, set spurious vector to 39 (our handler)
     lapic_write(0xF0, (val | 0x100) & !0xFF | 39);
     let svr2 = lapic_read(0xF0);
-    s.write_str("[APIC] SVR after enable=0x");
-    s.write_hex(svr2 as u64);
-    s.write_str("\n");
+    zenus_console::kinfo!("APIC SVR after enable={:#x}", svr2);
     // Mask all LVT entries (APs call this too — keep LINT0 masked for them)
     lapic_write(0x2F0, 0x0100FF);      // CMCI: masked
     lapic_write(0x320, 0x00010000);    // Timer: masked

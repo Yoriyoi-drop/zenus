@@ -70,20 +70,7 @@ pub fn init() {
     let boot = read_all();
     *BOOT_TIME.lock() = Some(boot);
     let t = boot;
-    let s = zenus_console::serial::SerialPort::new(0x3F8);
-    s.write_str("[OK] RTC: ");
-    s.write_u64(t.year as u64);
-    s.write_str("-");
-    s.write_u64(t.month as u64);
-    s.write_str("-");
-    s.write_u64(t.day as u64);
-    s.write_str(" ");
-    s.write_u64(t.hour as u64);
-    s.write_str(":");
-    s.write_u64(t.minute as u64);
-    s.write_str(":");
-    s.write_u64(t.second as u64);
-    s.write_str("\n");
+    zenus_console::kinfo!("RTC: {:04}-{:02}-{:02} {:02}:{:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute, t.second);
 }
 
 pub fn read_time() -> RtcTime {

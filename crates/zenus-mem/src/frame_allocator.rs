@@ -1,6 +1,5 @@
 use x86_64::PhysAddr;
 use x86_64::structures::paging::{FrameAllocator as FrameAllocatorTrait, Size4KiB, PhysFrame};
-use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 
 use crate::paging::PAGE_SIZE;
@@ -86,10 +85,7 @@ impl FrameAllocator {
             0
         };
 
-        let s = SerialPort::new(0x3F8);
-        s.write_str("[OK] Memory: ");
-        s.write_u64(allocator.total_memory / (1024 * 1024));
-        s.write_str(" MB total\n");
+        zenus_console::kinfo!("Memory: {} MB total", allocator.total_memory / (1024 * 1024));
 
         allocator
     }
@@ -159,8 +155,7 @@ impl FrameAllocator {
                 self.next_free = a;
             }
         } else {
-            let s = zenus_console::serial::SerialPort::new(0x3F8);
-            s.write_str("[WARN] Frame free stack overflow! Frame lost.\n");
+            zenus_console::kwarn!("Frame free stack overflow! Frame lost. addr={:#x}", a);
         }
         self.used_memory = self.used_memory.saturating_sub(PAGE_SIZE as u64);
     }

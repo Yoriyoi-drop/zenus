@@ -1,5 +1,4 @@
 use core::sync::atomic::{AtomicU32, Ordering};
-use zenus_console::serial::SerialPort;
 
 use crate::limine::{self, LimineMpInfo};
 
@@ -10,10 +9,6 @@ static mut AP_IDLE_FN: Option<fn() -> !> = None;
 
 pub fn set_ap_idle_fn(f: fn() -> !) {
     unsafe { AP_IDLE_FN = Some(f); }
-}
-
-fn serial_write(msg: &str) {
-    SerialPort::new(0x3F8).write_str(msg);
 }
 
 #[repr(C)]
@@ -28,7 +23,7 @@ static mut CPU_TABLE: [CpuInfo; MAX_CPUS] = [CpuInfo { apic_id: 0, cpu_number: 0
 
 pub fn init() {
     if limine::MP_REQUEST.response.is_null() {
-        serial_write("[WARN] MP request not supported, assuming 1 CPU\n");
+        zenus_console::kwarn!("MP request not supported, assuming 1 CPU");
         return;
     }
 
@@ -48,10 +43,7 @@ pub fn init() {
         }
     }
 
-    serial_write("[OK] Detected ");
-    let s = SerialPort::new(0x3F8);
-    s.write_u64(count as u64);
-    s.write_str(" CPU(s)\n");
+    zenus_console::kinfo!("Detected {} CPU(s)", count);
 }
 
 pub fn wake_aps() {
@@ -81,11 +73,11 @@ pub fn wake_aps() {
     core::sync::atomic::fence(Ordering::Release);
 
     let ap_count = (total - 1) as u32;
-    serial_write("[SMP] Waiting for APs to start...\n");
+    zenus_console::kinfo!("Waiting for APs to start...");
     while AP_READY_COUNT.load(Ordering::Acquire) < ap_count {
         core::hint::spin_loop();
     }
-    serial_write("[SMP] All APs started\n");
+    zenus_console::kinfo!("All APs started");
 }
 
 pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
@@ -102,7 +94,7 @@ pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
     crate::interrupts::apic::init_timer_ap(48);
 
     AP_READY_COUNT.fetch_add(1, Ordering::Release);
-    SerialPort::new(0x3F8).write_str("[AP] CPU started\n");
+    zenus_console::kinfo!("AP CPU started");
 
     let idle_fn = unsafe { AP_IDLE_FN };
     if let Some(f) = idle_fn {

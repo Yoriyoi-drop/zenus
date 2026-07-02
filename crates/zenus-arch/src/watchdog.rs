@@ -27,6 +27,7 @@ pub fn watchdog_init(wdt_type: WatchdogType, timeout_secs: u32) -> bool {
         }
     }
     WDT_ENABLED.store(true, Ordering::Release);
+    zenus_console::kinfo!("Watchdog initialized");
     true
 }
 
@@ -69,9 +70,7 @@ pub fn watchdog_tick() {
         let elapsed_ticks = tick_count.wrapping_sub(last);
         let elapsed_secs = (elapsed_ticks / TICKS_PER_SEC) as u32;
         if elapsed_secs >= WDT_TIMEOUT_SECS.load(Ordering::Acquire) {
-            let serial = zenus_console::serial::SerialPort::new(0x3F8);
-            serial.write_str("[WATCHDOG] Timeout! Rebooting...\n");
-            crate::acpi::reboot_via_keyboard();
+            zenus_console::kpanic_code!(zenus_console::error::codes::DRV_COMM_TIMEOUT, "Watchdog timeout! Rebooting...");
         }
     }
 }
@@ -85,7 +84,5 @@ pub fn watchdog_get_timeout() -> u32 {
 }
 
 pub fn watchdog_force_reboot() {
-    let serial = zenus_console::serial::SerialPort::new(0x3F8);
-    serial.write_str("[WATCHDOG] Forced reboot\n");
-    crate::acpi::reboot_via_keyboard();
+    zenus_console::kpanic_code!(zenus_console::error::codes::DRV_COMM_TIMEOUT, "Watchdog forced reboot");
 }

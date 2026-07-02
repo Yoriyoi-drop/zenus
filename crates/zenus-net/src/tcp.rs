@@ -1,5 +1,5 @@
 use crate::ipv4;
-use zenus_console::serial::SerialPort;
+
 use zenus_sync::spinlock::SpinLock;
 
 pub const TCP_CLOSED: u8 = 0;
@@ -340,14 +340,7 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
             sack_blocks: [(0, 0); 4],
         });
 
-        let s = SerialPort::new(0x3F8);
-        s.write_str("[TCP] connect sending SYN from ");
-        s.write_u64(local_port as u64);
-        s.write_str("->");
-        s.write_u64(dst_port as u64);
-        s.write_str(" isn=");
-        s.write_u64(isn as u64);
-        s.write_str("\n");
+        zenus_console::kdebug!("TCP connect sending SYN from {}->{} isn={}", local_port, dst_port, isn);
 
         Some(idx)
 }
@@ -384,30 +377,10 @@ pub fn handle_receive(
     };
 
     if log {
-        let s = SerialPort::new(0x3F8);
-        s.write_str("[TCP-IN] ");
-        s.write_u64(src_ip[0] as u64); s.write_str(".");
-        s.write_u64(src_ip[1] as u64); s.write_str(".");
-        s.write_u64(src_ip[2] as u64); s.write_str(".");
-        s.write_u64(src_ip[3] as u64);
-        s.write_str(":");
-        s.write_u64(src_port as u64);
-        s.write_str("->");
-        s.write_u64(dst_ip[0] as u64); s.write_str(".");
-        s.write_u64(dst_ip[1] as u64); s.write_str(".");
-        s.write_u64(dst_ip[2] as u64); s.write_str(".");
-        s.write_u64(dst_ip[3] as u64);
-        s.write_str(":");
-        s.write_u64(dst_port as u64);
-        s.write_str(" flg=0x");
-        s.write_hex(flags as u64);
-        s.write_str(" seq=");
-        s.write_u64(seq as u64);
-        s.write_str(" ack=");
-        s.write_u64(ack as u64);
-        s.write_str(" plen=");
-        s.write_u64(payload.len() as u64);
-        s.write_str("\n");
+        zenus_console::kdebug!("TCP-IN {}.{}.{}.{}:{}->{}.{}.{}.{}:{} flg=0x{:x} seq={} ack={} plen={}",
+            src_ip[0], src_ip[1], src_ip[2], src_ip[3], src_port,
+            dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port,
+            flags, seq, ack, payload.len());
     }
 
     let conn_idx = {
@@ -530,8 +503,7 @@ pub fn handle_receive(
                     tcb.retry_count = 0;
                     tcb.retry_ticks = 0;
 
-                    let s = SerialPort::new(0x3F8);
-                    s.write_str("[TCP] connection ESTABLISHED\n");
+                    zenus_console::kdebug!("TCP connection ESTABLISHED");
                 } else if (flags & TCP_FLAG_SYN) != 0 {
                     let mut syn_ack = build_segment(
                         dst_port, src_port,
@@ -568,8 +540,7 @@ pub fn handle_receive(
                         tcb.retry_count = 0;
                         tcb.retry_ticks = 0;
 
-                        let s = SerialPort::new(0x3F8);
-                        s.write_str("[TCP] SYN_RCVD->ESTABLISHED\n");
+                        zenus_console::kdebug!("TCP SYN_RCVD->ESTABLISHED");
 
                         if !payload.is_empty() {
                             let copy_len = core::cmp::min(payload.len(), tcb.rx_data.len() - tcb.rx_data_len);
@@ -860,10 +831,7 @@ pub fn poll_retransmit(iface_idx: usize) {
             tcb.retry_ticks = RETRY_INTERVAL;
 
             if tcb.retry_count == 0 {
-                let s = SerialPort::new(0x3F8);
-                s.write_str("[TCP] retry exhausted, closing conn ");
-                s.write_u64(i as u64);
-                s.write_str("\n");
+                zenus_console::kwarn!("TCP retry exhausted, closing conn {}", i);
                 tcb.state = TCP_CLOSED;
             }
         }

@@ -1,6 +1,5 @@
 use x86_64::structures::idt::InterruptStackFrame;
 use core::sync::atomic::AtomicUsize;
-use zenus_console::serial::SerialPort;
 
 static NIC_IRQ_HANDLER: AtomicUsize = AtomicUsize::new(0);
 
@@ -57,5 +56,5 @@ pub extern "x86-interrupt" fn interrupt_nic(_frame: InterruptStackFrame) {
 }
 
 pub fn init() {
-    SerialPort::new(0x3F8).write_str("[OK] Interrupt handlers installed\n");
+    zenus_console::kinfo!("Interrupt handlers installed");
 }

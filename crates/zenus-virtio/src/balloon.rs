@@ -1,7 +1,7 @@
 use zenus_mem::paging;
 use crate::pci::VirtioPciTransport;
 use crate::queue::{VirtioQueue, VirtioQueueMem, VirtioAvail, VirtioDesc};
-use crate::{serial, QUEUE_SIZE};
+use crate::QUEUE_SIZE;
 
 const VIRTIO_BALLOON_F_MUST_TELL_HOST: u64 = 0;
 const VIRTIO_BALLOON_F_STATS_VQ: u64 = 1;
@@ -20,8 +20,7 @@ pub struct VirtioBalloon {
 
 impl VirtioBalloon {
     pub unsafe fn new(transport: VirtioPciTransport) -> Option<Self> {
-        let s = serial();
-        s.write_str("[VIRTIO-BALLOON] Initializing...\n");
+        zenus_console::kinfo!("VIRTIO-BALLOON: Initializing...");
 
         transport.set_device_status(0);
         while transport.device_status() != 0 { core::hint::spin_loop(); }
@@ -32,7 +31,7 @@ impl VirtioBalloon {
         transport.negotiate_features(our_features);
         transport.set_device_status(transport.device_status() | 8);
         if transport.device_status() & 8 == 0 {
-            s.write_str("[VIRTIO-BALLOON] FEATURES_OK rejected\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-BALLOON: FEATURES_OK rejected");
             return None;
         }
 
@@ -44,7 +43,7 @@ impl VirtioBalloon {
 
         let qsize0 = transport.setup_queue(0, inf_dp, inf_ap, inf_up);
         if qsize0 == 0 {
-            s.write_str("[VIRTIO-BALLOON] Inflate queue setup failed\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-BALLOON: Inflate queue setup failed");
             return None;
         }
 
@@ -55,7 +54,7 @@ impl VirtioBalloon {
 
         let qsize1 = transport.setup_queue(1, def_dp, def_ap, def_up);
         if qsize1 == 0 {
-            s.write_str("[VIRTIO-BALLOON] Deflate queue setup failed\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-BALLOON: Deflate queue setup failed");
             return None;
         }
 
@@ -64,7 +63,7 @@ impl VirtioBalloon {
 
         transport.set_device_status(transport.device_status() | 4);
 
-        s.write_str("[VIRTIO-BALLOON] Ready\n");
+        zenus_console::kinfo!("VIRTIO-BALLOON: Ready");
 
         Some(VirtioBalloon {
             transport,

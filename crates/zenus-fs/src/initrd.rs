@@ -1,5 +1,5 @@
 use core::slice;
-use zenus_console::serial::SerialPort;
+
 
 #[repr(C, packed)]
 struct UstarHeader {
@@ -28,12 +28,7 @@ fn parse_octal(buf: &[u8]) -> u64 {
 }
 
 pub fn load_initrd(addr: u64, len: u64) {
-    let s = SerialPort::new(0x3F8);
-    s.write_str("[INITRD] Loading at ");
-    s.write_hex(addr);
-    s.write_str(" size ");
-    s.write_u64(len);
-    s.write_str("...\n");
+    zenus_console::kinfo!("Initrd loading at {:#x} size {}...", addr, len);
 
     let data = unsafe { slice::from_raw_parts(addr as *const u8, len as usize) };
     let mut offset = 0usize;

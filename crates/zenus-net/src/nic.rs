@@ -1,4 +1,4 @@
-use zenus_console::serial::SerialPort;
+
 use crate::rtl8139::Rtl8139;
 use zenus_virtio::net::VirtioNet;
 
@@ -28,8 +28,6 @@ static mut INTERFACES: [Option<NetworkInterface>; MAX_INTERFACES] = [None; MAX_I
 static mut IFACE_COUNT: usize = 0;
 
 pub fn init() {
-    let s = SerialPort::new(0x3F8);
-
     let lo = NetworkInterface {
         nic_type: NicType::Loopback,
         mac: [0; 6],
@@ -62,7 +60,7 @@ pub fn init() {
             INTERFACES[IFACE_COUNT] = Some(iface);
             IFACE_COUNT += 1;
         }
-        s.write_str("[OK] RTL8139 NIC registered\n");
+        zenus_console::kinfo!("RTL8139 NIC registered");
         found_nic = true;
     }
 
@@ -81,7 +79,7 @@ pub fn init() {
             INTERFACES[IFACE_COUNT] = Some(iface);
             IFACE_COUNT += 1;
         }
-        s.write_str("[OK] Virtio-NIC registered\n");
+        zenus_console::kinfo!("Virtio-NIC registered");
         found_nic = true;
     }
 
@@ -96,10 +94,10 @@ pub fn init() {
         );
         crate::route::add_direct([10, 0, 2, 0], [255, 255, 255, 0], 1);
         crate::route::add_default([10, 0, 2, 2], 1);
-        s.write_str("[OK] Routes configured (10.0.2.0/24 + default via 10.0.2.2)\n");
+        zenus_console::kinfo!("Routes configured (10.0.2.0/24 + default via 10.0.2.2)");
     }
 
-    s.write_str("[OK] Network subsystem initialized\n");
+    zenus_console::kinfo!("Network subsystem initialized");
 }
 
 pub fn net_poll() {

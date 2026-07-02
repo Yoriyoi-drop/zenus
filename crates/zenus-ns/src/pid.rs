@@ -49,6 +49,7 @@ pub fn init() {
     let mut table = PID_TABLE.lock();
     table.namespaces[0] = Some(PidNamespace::new(NS_ROOT));
     table.count = 1;
+    zenus_console::kinfo!("PID namespace initialized");
 }
 
 pub fn create() -> Option<NsId> {

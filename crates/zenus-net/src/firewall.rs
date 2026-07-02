@@ -76,6 +76,8 @@ pub fn firewall_init() {
     let mut fw = FIREWALL.lock();
     fw.rules = [None; MAX_RULES];
     fw.conns = [None; MAX_CONNTRACK];
+    drop(fw);
+    zenus_console::kinfo!("Firewall initialized");
 }
 
 pub fn firewall_add_rule(rule: FirewallRule) -> bool {

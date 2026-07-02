@@ -34,6 +34,7 @@ pub fn init() {
     let mut table = IPC_TABLE.lock();
     table.namespaces[0] = Some(IpcNamespace::new(NS_ROOT));
     table.count = 1;
+    zenus_console::kinfo!("IPC namespace initialized");
 }
 
 pub fn create() -> Option<NsId> {

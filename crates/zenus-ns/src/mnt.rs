@@ -34,6 +34,7 @@ pub fn init() {
     let mut table = MNT_TABLE.lock();
     table.namespaces[0] = Some(MntNamespace::new(NS_ROOT));
     table.count = 1;
+    zenus_console::kinfo!("Mount namespace initialized");
 }
 
 pub fn create() -> Option<NsId> {

@@ -1,5 +1,5 @@
 use x86_64::instructions::port::Port;
-use zenus_console::serial::SerialPort;
+
 use zenus_sync::spinlock::SpinLock;
 use crate::ethernet;
 use crate::arp;
@@ -117,8 +117,7 @@ impl Rtl8139 {
         let phys = Self::virt_to_phys(virt);
         // RTL8139 is a 32-bit PCI device — can only DMA to <4GB
         if phys == 0 || phys > 0xFFFF_FFFF {
-            let s = SerialPort::new(0x3F8);
-            s.write_str("[RTL8139] ERROR: RX buffer phys addr >4GB or invalid\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "RTL8139: RX buffer phys addr >4GB");
             return None;
         }
 
@@ -171,30 +170,16 @@ impl Rtl8139 {
 
         match found {
             Some((io_base, mac, irq_line)) => {
-                let s = SerialPort::new(0x3F8);
-                s.write_str("[RTL8139] Found at IO 0x");
-                s.write_hex(io_base as u64);
-                s.write_str(" MAC ");
-                for b in &mac {
-                    s.write_hex(*b as u64);
-                    s.write_str(":");
-                }
-                s.write_str(" IRQ ");
-                s.write_u64(irq_line as u64);
-                s.write_str("\n");
+                zenus_console::kinfo!("RTL8139: Found at IO {:#x} MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} IRQ {}", io_base, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], irq_line);
 
                 // Route NIC IRQ via I/O APIC if available
                 if zenus_arch::interrupts::ioapic::is_initialized() && irq_line > 0 {
                     let vector = 32u8 + irq_line;
                     let apic_id = zenus_arch::interrupts::apic::current_apic_id() as u8;
                     if zenus_arch::interrupts::ioapic::route_irq(irq_line, vector, apic_id) {
-                        s.write_str("[IOAPIC] IRQ ");
-                        s.write_u64(irq_line as u64);
-                        s.write_str(" -> vector ");
-                        s.write_u64(vector as u64);
-                        s.write_str("\n");
+                        zenus_console::kinfo!("IOAPIC: IRQ {} -> vector {}", irq_line, vector);
                     } else {
-                        s.write_str("[IOAPIC] Failed to route IRQ\n");
+                        zenus_console::kwarn!("IOAPIC: Failed to route IRQ {}", irq_line);
                     }
                 }
 
@@ -214,8 +199,7 @@ impl Rtl8139 {
                 }
             }
             None => {
-                let s = SerialPort::new(0x3F8);
-                s.write_str("[RTL8139] No RTL8139 NIC found\n");
+                zenus_console::kwarn!("No RTL8139 NIC found");
                 None
             }
         }
@@ -274,37 +258,20 @@ impl Rtl8139 {
             unsafe { Port::<u8>::new(0x80).read(); }
         }
 
-        let s = SerialPort::new(0x3F8);
-        s.write_str("[RTL8139] Reset done\n");
+        zenus_console::kinfo!("RTL8139: Reset done");
     }
 
     pub fn init_hw(&self) {
-        let s = SerialPort::new(0x3F8);
-        s.write_str("[RTL8139] rx_buf_phys=0x");
-        s.write_hex(self.rx_buf_phys as u64);
-        s.write_str(" virt=0x");
-        s.write_hex(unsafe { RX_BUF.0.as_ptr() as u64 });
-        s.write_str("\n");
+        zenus_console::kdebug!("RTL8139: rx_buf_phys={:#x} virt={:#x}", self.rx_buf_phys, unsafe { RX_BUF.0.as_ptr() as u64 });
         self.write32(RTL_RBSTART, self.rx_buf_phys);
         self.write16(RTL_IMR, ISR_ROK | ISR_TOK | ISR_RER | ISR_TER);
         let rcr = 0x8BD;
         self.write32(RTL_RCR, rcr);
         self.write8(RTL_CR, CR_TE | CR_RE);
 
-        let s = SerialPort::new(0x3F8);
-        s.write_str("[RTL8139] rx_buf_phys=0x");
-        s.write_hex(self.rx_buf_phys as u64);
-        s.write_str(" RB=0x");
-        s.write_hex(self.read32(RTL_RBSTART) as u64);
-        s.write_str(" RCR=0x");
-        s.write_hex(self.read32(RTL_RCR) as u64);
-        s.write_str(" CR=0x");
-        s.write_hex(self.read8(RTL_CR) as u64);
-        s.write_str(" ISR=0x");
-        s.write_hex(self.read16(RTL_ISR) as u64);
-        s.write_str(" CBR=0x");
-        s.write_hex(self.read_cbr() as u64);
-        s.write_str("\n");
+        zenus_console::kdebug!("RTL8139: rx_buf_phys={:#x} RB={:#x} RCR={:#x} CR={:#x} ISR={:#x} CBR={:#x}",
+            self.rx_buf_phys, self.read32(RTL_RBSTART), self.read32(RTL_RCR), self.read8(RTL_CR),
+            self.read16(RTL_ISR), self.read_cbr());
     }
 
     pub fn mac(&self) -> &[u8; 6] { &self.mac }
@@ -372,16 +339,7 @@ impl Rtl8139 {
     pub fn receive_copy(&mut self, buf: &mut [u8]) -> Option<usize> {
         let isr = self.read16(RTL_ISR);
         let cbr = self.read_cbr();
-        {
-            let s = SerialPort::new(0x3F8);
-            s.write_str("[RX] ISR=");
-            s.write_hex(isr as u64);
-            s.write_str(" CAPR=");
-            s.write_hex(cbr as u64);
-            s.write_str(" cur=");
-            s.write_hex(self.rx_cur as u64);
-            s.write_str("\n");
-        }
+        zenus_console::kdebug!("RTL8139 RX: ISR={:#x} CAPR={:#x} cur={:#x}", isr, cbr, self.rx_cur);
         if isr == 0 || (isr & ISR_ROK) == 0 {
             return None;
         }

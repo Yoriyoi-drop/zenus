@@ -128,7 +128,13 @@ fn read_manifest(name: &str) -> Option<PkgInfo> {
 }
 
 pub fn pkg_init() -> bool {
-    ensure_dir(PKG_DB_DIR)
+    let ok = ensure_dir(PKG_DB_DIR);
+    if ok {
+        zenus_console::kinfo!("Package manager initialized");
+    } else {
+        zenus_console::kerror_code!(zenus_console::error::codes::FS_MOUNT_FAILED, "Package manager: failed to create DB dir");
+    }
+    ok
 }
 
 pub fn pkg_install(data: &[u8], _dev_id: usize) -> bool {

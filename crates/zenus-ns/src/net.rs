@@ -38,6 +38,7 @@ pub fn init() {
     let mut table = NET_TABLE.lock();
     table.namespaces[0] = Some(NetNamespace::new(NS_ROOT));
     table.count = 1;
+    zenus_console::kinfo!("Network namespace initialized");
 }
 
 pub fn create() -> Option<NsId> {

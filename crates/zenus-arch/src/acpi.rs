@@ -20,8 +20,6 @@ fn efficient_wait(iterations: u64) {
 }
 
 pub fn reboot_via_keyboard() -> ! {
-    let s = zenus_console::serial::SerialPort::new(0x3F8);
-
     // Try ACPI reset register from FADT
     let fadt_addr = find_fadt();
     if fadt_addr != 0 {
@@ -35,7 +33,7 @@ pub fn reboot_via_keyboard() -> ! {
                     let reg_addr = *(fadt_addr as *const u64).add(120/8);
                     let reset_val = *(fadt_addr as *const u8).add(128);
                     if addr_space_id == 1 && reg_width == 8 && reg_addr != 0 {
-                        s.write_str("[ACPI] Rebooting via ACPI reset register...\n");
+                        zenus_console::kinfo!("Rebooting via ACPI reset register...");
                         let mut p = Port::<u8>::new(reg_addr as u16);
                         p.write(reset_val);
                         efficient_wait(1000);
@@ -47,7 +45,7 @@ pub fn reboot_via_keyboard() -> ! {
 
     // Try Intel reset port 0xCF9
     unsafe {
-        s.write_str("[ACPI] Rebooting via 0xCF9 reset port...\n");
+        zenus_console::kinfo!("Rebooting via 0xCF9 reset port...");
         let mut p = Port::<u8>::new(0xCF9);
         p.write(0x06);
         efficient_wait(1000);
@@ -57,7 +55,7 @@ pub fn reboot_via_keyboard() -> ! {
 
     // Try keyboard controller with proper status check
     unsafe {
-        s.write_str("[ACPI] Rebooting via keyboard controller...\n");
+        zenus_console::kinfo!("Rebooting via keyboard controller...");
         let mut status = Port::<u8>::new(KBD_CMD);
         for _ in 0..100 {
             let st: u8;
@@ -70,7 +68,7 @@ pub fn reboot_via_keyboard() -> ! {
     }
 
     // Triple fault as last resort — load zero IDT to crash
-    s.write_str("[ACPI] Rebooting via triple fault...\n");
+    zenus_console::kinfo!("Rebooting via triple fault...");
     unsafe {
         core::arch::asm!("push 0; push 0; lidt [rsp]; add rsp, 16; ud2");
     }
@@ -78,24 +76,23 @@ pub fn reboot_via_keyboard() -> ! {
 }
 
 pub fn shutdown_via_acpi() -> ! {
-    let s = zenus_console::serial::SerialPort::new(0x3F8);
-    s.write_str("[ACPI] Attempting ACPI shutdown...\n");
+    zenus_console::kinfo!("Attempting ACPI shutdown...");
 
     let fadt_addr = find_fadt();
     if fadt_addr == 0 {
-        s.write_str("[ACPI] FADT not found, shutdown not possible\n");
+        zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "FADT not found, shutdown not possible");
         loop { x86_64::instructions::hlt(); }
     }
     unsafe {
         let header_len = *(fadt_addr as *const u8).add(8) as usize;
         if header_len < 68 {
-            s.write_str("[ACPI] FADT too short for PM1a_CNT_BLK\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "FADT too short for PM1a_CNT_BLK");
             loop { x86_64::instructions::hlt(); }
         }
         let pm1a_cnt_blk = *(fadt_addr as *const u32).add(64/4) as u16;
 
         if pm1a_cnt_blk == 0 {
-            s.write_str("[ACPI] PM1a_CNT_BLK is 0\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "PM1a_CNT_BLK is 0");
             loop { x86_64::instructions::hlt(); }
         }
 
@@ -181,6 +178,5 @@ fn get_rsdp() -> Option<u64> {
 }
 
 pub fn init() {
-    let s = zenus_console::serial::SerialPort::new(0x3F8);
-    s.write_str("[OK] ACPI subsystem initialized\n");
+    zenus_console::kinfo!("ACPI subsystem initialized");
 }

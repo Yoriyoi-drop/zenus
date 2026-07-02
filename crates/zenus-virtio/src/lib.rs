@@ -9,7 +9,7 @@ pub mod blk;
 pub mod console;
 pub mod balloon;
 
-use zenus_console::serial::SerialPort;
+
 
 pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 
@@ -44,13 +44,12 @@ pub fn device_name(device_id: u16) -> &'static str {
 pub const QUEUE_SIZE: usize = 256;
 pub const MAX_QUEUES: usize = 8;
 
-fn serial() -> SerialPort {
-    SerialPort::new(0x3F8)
+pub fn serial() -> zenus_console::serial::SerialPort {
+    zenus_console::serial::SerialPort::new(0x3F8)
 }
 
 pub unsafe fn init() {
-    let s = serial();
-    s.write_str("[VIRTIO] Scanning for devices...\n");
+    zenus_console::kinfo!("Virtio scanning for devices...");
 
     let mut found = 0u32;
     for i in 0..zenus_arch::pci::MAX_PCI_DEVICES {
@@ -66,22 +65,14 @@ pub unsafe fn init() {
             None => continue,
         };
 
-        s.write_str("[VIRTIO] Found ");
-        s.write_str(dev_name);
-        s.write_str(" at ");
-        s.write_hex(dev.bus as u64);
-        s.write_str(":");
-        s.write_hex(dev.device as u64);
-        s.write_str(".");
-        s.write_hex(dev.function as u64);
-        s.write_str("\n");
+        zenus_console::kinfo!("Virtio found {} at {}:{}:{}", dev_name, dev.bus, dev.device, dev.function);
 
         zenus_arch::pci::enable_bus_master(dev.bus, dev.device, dev.function);
 
         let trans = match pci::init_device(dev) {
             Some(t) => t,
             None => {
-                s.write_str("[VIRTIO] Failed to initialize PCI transport\n");
+                zenus_console::kwarn!("Virtio: failed to initialize PCI transport for {}", dev_name);
                 continue;
             }
         };
@@ -106,10 +97,8 @@ pub unsafe fn init() {
     }
 
     if found > 0 {
-        s.write_str("[OK] Virtio: ");
-        s.write_u64(found as u64);
-        s.write_str(" device(s) initialized\n");
+        zenus_console::kinfo!("Virtio: {} device(s) initialized", found);
     } else {
-        s.write_str("[VIRTIO] No virtio devices found\n");
+        zenus_console::kwarn!("No virtio devices found");
     }
 }

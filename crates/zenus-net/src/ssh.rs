@@ -1,6 +1,6 @@
 use crate::nic;
 use crate::socket;
-use zenus_console::serial::SerialPort;
+
 use zenus_sync::spinlock::SpinLock;
 use zutils_common::{Args, Writer, OutputBuf};
 
@@ -114,10 +114,7 @@ impl SshServer {
             server.listen_fd = Some(fd);
             server.running = true;
         }
-        let s = SerialPort::new(0x3F8);
-        s.write_str("[SSH] Server started on port ");
-        s.write_u64(port as u64);
-        s.write_str("\n");
+        zenus_console::kinfo!("SSH server started on port {}", port);
         true
     }
 
@@ -157,15 +154,9 @@ impl SshServer {
                     conn.line_len = 0;
                     conn.output_len = 0;
                     conn.output_sent = 0;
-                    let s = SerialPort::new(0x3F8);
-                    s.write_str("[SSH] Connection #");
-                    s.write_u64(idx as u64);
-                    s.write_str(" accepted (fd=");
-                    s.write_u64(cfd as u64);
-                    s.write_str(")\n");
+                    zenus_console::kinfo!("SSH connection #{} accepted (fd={})", idx, cfd);
                 } else {
-                    let s = SerialPort::new(0x3F8);
-                    s.write_str("[SSH] Too many connections, rejecting\n");
+                    zenus_console::kwarn!("SSH too many connections, rejecting");
                     socket::close(cfd, iface_idx);
                 }
             }
@@ -179,10 +170,7 @@ impl SshServer {
             };
 
             if !socket::is_connected(fd) {
-                let s = SerialPort::new(0x3F8);
-                s.write_str("[SSH] Connection #");
-                s.write_u64(i as u64);
-                s.write_str(" disconnected\n");
+                zenus_console::kinfo!("SSH connection #{} disconnected", i);
                 conn.fd = None;
                 continue;
             }

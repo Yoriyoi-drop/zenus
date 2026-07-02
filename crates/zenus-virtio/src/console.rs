@@ -1,7 +1,7 @@
 use zenus_mem::paging;
 use crate::pci::VirtioPciTransport;
 use crate::queue::{VirtioQueue, VirtioQueueMem, VirtioAvail, VirtioDesc};
-use crate::{serial, QUEUE_SIZE};
+use crate::QUEUE_SIZE;
 
 static mut CONSOLE_BUF: [u8; 4096] = [0u8; 4096];
 static mut RX_QUEUE_MEM: VirtioQueueMem = VirtioQueueMem::new();
@@ -15,8 +15,7 @@ pub struct VirtioConsole {
 
 impl VirtioConsole {
     pub unsafe fn new(transport: VirtioPciTransport) -> Option<Self> {
-        let s = serial();
-        s.write_str("[VIRTIO-CONSOLE] Initializing...\n");
+        zenus_console::kinfo!("VIRTIO-CONSOLE: Initializing...");
 
         transport.set_device_status(0);
         while transport.device_status() != 0 { core::hint::spin_loop(); }
@@ -26,7 +25,7 @@ impl VirtioConsole {
         transport.negotiate_features(0);
         transport.set_device_status(transport.device_status() | 8);
         if transport.device_status() & 8 == 0 {
-            s.write_str("[VIRTIO-CONSOLE] FEATURES_OK rejected\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-CONSOLE: FEATURES_OK rejected");
             return None;
         }
 
@@ -38,7 +37,7 @@ impl VirtioConsole {
 
         let qsize0 = transport.setup_queue(0, rx_dp, rx_ap, rx_up);
         if qsize0 == 0 {
-            s.write_str("[VIRTIO-CONSOLE] RX queue setup failed\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-CONSOLE: RX queue setup failed");
             return None;
         }
 
@@ -49,7 +48,7 @@ impl VirtioConsole {
 
         let qsize1 = transport.setup_queue(1, tx_dp, tx_ap, tx_up);
         if qsize1 == 0 {
-            s.write_str("[VIRTIO-CONSOLE] TX queue setup failed\n");
+            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-CONSOLE: TX queue setup failed");
             return None;
         }
 
@@ -58,7 +57,7 @@ impl VirtioConsole {
 
         transport.set_device_status(transport.device_status() | 4);
 
-        s.write_str("[VIRTIO-CONSOLE] Ready\n");
+        zenus_console::kinfo!("VIRTIO-CONSOLE: Ready");
         Some(VirtioConsole { transport, rx_queue, tx_queue })
     }
 

@@ -1,5 +1,4 @@
 use x86_64::instructions::port::Port;
-use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
 
 const PRIMARY_IO: u16 = 0x1F0;
@@ -148,8 +147,7 @@ fn model_str(model: &[u8; 40]) -> &str {
 }
 
 pub fn init() {
-    let s = SerialPort::new(0x3F8);
-    s.write_str("[ATA] Scanning IDE channels...\n");
+    zenus_console::kinfo!("Scanning IDE channels...");
 
     let channels = [
         (PRIMARY_IO, PRIMARY_CTRL, "primary"),
@@ -172,11 +170,9 @@ pub fn init() {
 
     let count = ATA_COUNT.load(core::sync::atomic::Ordering::Relaxed);
     if count > 0 {
-        s.write_str("[OK] ATA: ");
-        s.write_u64(count as u64);
-        s.write_str(" drive(s) found\n");
+        zenus_console::kinfo!("ATA: {} drive(s) found", count);
     } else {
-        s.write_str("[ATA] No drives found\n");
+        zenus_console::kinfo!("No drives found");
     }
 }
 

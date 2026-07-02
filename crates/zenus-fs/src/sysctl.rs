@@ -133,6 +133,7 @@ pub fn sysctl_init() {
     }
 
     SYSCTL_INIT.store(true, Ordering::Release);
+    zenus_console::kinfo!("Sysctl initialized");
 }
 
 pub fn sysctl_register(name: &'static str, desc: &'static str, initial: SysctlValue) -> usize {

@@ -1,5 +1,4 @@
-use core::fmt::Write;
-use zenus_console::serial::SerialPort;
+
 use zenus_fs::vfs;
 use zenus_sched::scheduler;
 
@@ -277,8 +276,7 @@ fn sys_lseek(fd: u64, offset: u64, whence: u64, _a4: u64, _a5: u64, _a6: u64) ->
 fn sys_ioctl(fd: u64, request: u64, arg: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     match fd_stat(fd) {
         Some(_) => {
-            let mut s = SerialPort::new(0x3F8);
-            let _ = write!(s, "[ioctl] fd={} req=0x{:x} arg=0x{:x}\n", fd, request, arg);
+            zenus_console::kdebug!("sys_ioctl fd={} req=0x{:x} arg=0x{:x}", fd, request, arg);
             0
         }
         None => -1i64 as u64,
@@ -364,8 +362,7 @@ fn sys_brk(addr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
 
 fn sys_exit(_fd: u64, _buf: u64, _count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     let tid = current_task();
-    let mut s = SerialPort::new(0x3F8);
-    let _ = write!(s, "[sys] task {} exit\n", tid);
+    zenus_console::kinfo!("Task {} exit", tid);
     if tid > 0 {
         fd_close_all_for_task(tid);
         scheduler::task_exit();
@@ -501,8 +498,7 @@ pub extern "C" fn syscall_dispatch(
     match SYSCALL_TABLE[num as usize] {
         Some(f) => f(arg1, arg2, arg3, 0, 0, 0),
         None => {
-            let mut s = SerialPort::new(0x3F8);
-            let _ = write!(s, "[sys] unknown syscall {}\n", num);
+            zenus_console::kwarn!("Unknown syscall {}", num);
             -1i64 as u64
         }
     }

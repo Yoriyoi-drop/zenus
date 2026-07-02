@@ -1,4 +1,4 @@
-use zenus_console::serial::SerialPort;
+
 use zenus_sync::spinlock::SpinLock;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -205,8 +205,6 @@ fn find_mount_to_pair(path: &str) -> Option<(&'static (dyn FileSystem + 'static)
 }
 
 pub fn init() {
-    let s = SerialPort::new(0x3F8);
-
     let tmp_fs = crate::tmpfs::TmpFs::new();
     let root = VfsNode {
         fs: tmp_fs,
@@ -222,7 +220,7 @@ pub fn init() {
         mt.count = 1;
     }
 
-    s.write_str("[OK] VFS initialized (tmpfs root)\n");
+    zenus_console::kinfo!("VFS initialized");
 }
 
 pub fn mount(path: &'static str, fs: &'static dyn FileSystem) -> bool {

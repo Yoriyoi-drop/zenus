@@ -43,19 +43,13 @@ struct EchoState {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    let mut serial = SerialPort::new(0x3F8);
-    serial.write_str("!!! KERNEL PANIC !!!\n");
-    use core::fmt::Write;
-    let _ = write!(serial, "{}", info.message());
     if let Some(loc) = info.location() {
-        serial.write_str("File: ");
-        serial.write_str(loc.file());
-        serial.write_str(":");
-        serial.write_u64(loc.line() as u64);
-        serial.write_str("\n");
+        zenus_console::kpanic_code!(zenus_console::error::codes::KRN_UNHANDLED_EXCEPTION,
+            "Panic at {}:{} — {}", loc.file(), loc.line(), info.message());
+    } else {
+        zenus_console::kpanic_code!(zenus_console::error::codes::KRN_UNHANDLED_EXCEPTION,
+            "Panic: {}", info.message());
     }
-    serial.write_str("[PANIC] Attempting reboot...\n");
-    zenus_arch::acpi::reboot_via_keyboard();
 }
 
 fn shell_task() {
@@ -72,10 +66,12 @@ pub extern "C" fn entry() -> ! {
     zenus_console::log::dmesg_init();
 
     if zenus_arch::limine::MEMMAP_REQUEST.response.is_null() {
-        loop { x86_64::instructions::hlt(); }
+        zenus_console::kpanic_code!(zenus_console::error::codes::KRN_PANIC_INVALID_MEM,
+            "MEMMAP_REQUEST response is null");
     }
     if zenus_arch::limine::HHDM_REQUEST.response.is_null() {
-        loop { x86_64::instructions::hlt(); }
+        zenus_console::kpanic_code!(zenus_console::error::codes::KRN_PANIC_INVALID_MEM,
+            "HHDM_REQUEST response is null");
     }
     let hhdm_offset = unsafe {
         let hhdm_resp: &zenus_arch::limine::LimineHhdmResponse =
@@ -242,8 +238,7 @@ pub extern "C" fn entry() -> ! {
         let shell_tid = scheduler::create_task_named(shell_task, 65536, "shell");
         zenus_sched::init::init_system_start();
 
-        let mut serial = SerialPort::new(0x3F8);
-        serial.write_str("Zenus OS booted.\n");
+        zenus_console::kinfo!("Zenus OS booted");
         zenus_console::serial::flush_output();
 
         scheduler::idle();
