@@ -164,6 +164,13 @@ impl FrameAllocator {
     pub fn total_memory(&self) -> u64 { self.total_memory }
     pub fn free_frames_count(&self) -> usize { self.free_count }
 
+    /// Clear all entries from the free stack.
+    /// Used before loading user programs to prevent stale frame reuse
+    /// from previous address space destruction.
+    pub fn clear_free_stack(&mut self) {
+        self.free_count = 0;
+    }
+
     pub fn reserve_region(&mut self, base: u64, length: u64) {
         if length == 0 { return; }
         let end = base + length;

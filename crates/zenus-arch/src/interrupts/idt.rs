@@ -102,6 +102,9 @@ pub fn init() {
     // NIC interrupt (vector 43 = IRQ 11)
     idt[43].set_handler_fn(super::handler::interrupt_nic);
 
+    // Serial (UART) interrupt (vector 36 = IRQ 4 for COM1)
+    idt[36].set_handler_fn(super::handler::interrupt_serial);
+
     idt.load();
 }
 

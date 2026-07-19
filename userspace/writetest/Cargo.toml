@@ -1,0 +1,10 @@
+[package]
+name = "writetest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syscall_core = { path = "../syscall_core" }
+
+[lib]
+crate-type = ["staticlib"]

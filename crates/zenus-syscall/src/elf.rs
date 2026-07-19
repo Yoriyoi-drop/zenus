@@ -44,10 +44,22 @@ pub struct LoadedElf {
     pub cr3: u64,
     pub heap_base: u64,
     pub stack_top: u64,
+    /// Physical address of the first (lowest) stack page.
+    /// Used by boot_run_userspace to write argv directly via HHDM
+    /// without needing virt_to_phys_raw or CR3 switching.
+    pub stack_first_phys: u64,
 }
 
 /// Load ELF from a raw byte slice (for embedded/built-in binaries)
 pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
+    // Clear stale frames from free_stack before user program allocation.
+    // This prevents physical page collisions when a frame freed from a
+    // previous address space is reused for both code AND stack pages.
+    {
+        let mut fa = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
+        fa.clear_free_stack();
+    }
+
     if data.len() < core::mem::size_of::<Elf64Header>() { return None; }
 
     let header: &Elf64Header = unsafe { &*(data.as_ptr() as *const Elf64Header) };
@@ -161,6 +173,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
     let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
 
     let stack_pages = 16;
+    let mut last_stack_phys = 0u64;
     for i in 0..stack_pages {
         let stack_virt = stack_top - ((stack_pages - i) as u64) * paging::PAGE_SIZE as u64;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
@@ -174,6 +187,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         };
         drop(allocator);
         frames.push(frame_phys.as_u64());
+        last_stack_phys = frame_phys.as_u64();
 
         unsafe {
             core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
@@ -191,6 +205,7 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         cr3,
         heap_base,
         stack_top,
+        stack_first_phys: last_stack_phys,
     })
 }
 
@@ -228,6 +243,12 @@ fn wr_str(s: &str) {
 }
 
 pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> {
+    // Clear stale frames from free_stack (same as load_elf_raw)
+    {
+        let mut fa = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
+        fa.clear_free_stack();
+    }
+
     // Validate entry is a canonical user-space virtual address, not a physical address
     if entry < 0x1000 || entry >= 0x0000_8000_0000_0000 {
         return None;
@@ -364,6 +385,7 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         cr3,
         heap_base,
         stack_top,
+        stack_first_phys: 0,
     })
 }
 
@@ -379,6 +401,12 @@ fn free_frames_raw(frames: &[u64]) {
 }
 
 pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
+    // Clear stale frames from free_stack (same as load_elf_raw)
+    {
+        let mut fa = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
+        fa.clear_free_stack();
+    }
+
     let node = vfs::open(path)?;
     let stat = node.fs.stat(node.inode);
     if stat.size < 64 { return None; }
@@ -503,6 +531,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
     let stack_top = zenus_arch::random::get_random_page_aligned(stack_min, stack_max);
 
     let stack_pages = 16;
+    let mut last_stack_phys = 0u64;
     for i in 0..stack_pages {
         let stack_virt = stack_top - ((stack_pages - i) as u64) * paging::PAGE_SIZE as u64;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
@@ -516,6 +545,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         };
         drop(allocator);
         frames.push(frame_phys.as_u64());
+        last_stack_phys = frame_phys.as_u64();
 
         unsafe {
             core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
@@ -533,5 +563,6 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         cr3,
         heap_base,
         stack_top,
+        stack_first_phys: last_stack_phys,
     })
 }

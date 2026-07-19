@@ -1,0 +1,7 @@
+[package]
+name = "pipe_test"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+syscall_core = { path = "../syscall_core" }

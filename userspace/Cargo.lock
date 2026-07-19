@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "args"
+version = "0.1.0"
+
+[[package]]
 name = "cat"
 version = "0.1.0"
 
@@ -19,5 +23,23 @@ name = "hello"
 version = "0.1.0"
 
 [[package]]
+name = "minimal"
+version = "0.1.0"
+
+[[package]]
+name = "pipe_test"
+version = "0.1.0"
+dependencies = [
+ "syscall_core",
+]
+
+[[package]]
 name = "syscall_core"
 version = "0.1.0"
+
+[[package]]
+name = "writetest"
+version = "0.1.0"
+dependencies = [
+ "syscall_core",
+]

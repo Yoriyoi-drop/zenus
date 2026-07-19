@@ -32,7 +32,7 @@ $(KERNEL): target/$(TARGET)/$(PROFILE_DIR)/libzenus.a apps/src/linker.ld
 		--no-whole-archive
 
 # Build userspace programs
-USERSPACE_PROGS := hello echo cat exitonly
+USERSPACE_PROGS := hello echo cat exitonly args exitonly
 USERSPACE_BUILD := userspace/build
 $(USERSPACE_BUILD)/%: userspace/%/src/lib.rs userspace/userspace.ld
 	$(MAKE) -C userspace $(notdir $@)
@@ -120,6 +120,23 @@ run-qemu: run-gui
 run-gdb: $(ISO)
 	qemu-system-x86_64 -m 2G -smp $(SMP) -cdrom $(ISO) -s -S -no-reboot \
 		-netdev user,id=net0 -device rtl8139,netdev=net0
+
+# TCP serial: connect with: nc localhost 45678
+# Piped stdin (-nographic) does not work reliably with KVM in-kernel PIT
+# mode (the default). KVM's in-kernel PIT processes timer interrupts
+# without returning to QEMU's main loop, so stdin pipe data is never
+# forwarded to the UART. TCP serial avoids this by using a socket
+# backend that QEMU processes through its own fd event loop.
+# Use `make run-tcp` then `nc localhost 45678` for interactive shell.
+run-tcp: $(ISO)
+	qemu-system-x86_64 -enable-kvm -cpu max -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
+		-serial tcp:localhost:45678,server,nowait \
+		-netdev user,id=net0 -device rtl8139,netdev=net0 &
+	@sleep 1
+	@echo "Connect: nc localhost 45678"
+	@echo "Press Ctrl+A X to exit QEMU"
+	@sleep 2
+	nc localhost 45678
 
 bochs: $(ISO)
 	bochs -f bochsrc -q

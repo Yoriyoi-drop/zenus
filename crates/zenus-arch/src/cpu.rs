@@ -69,8 +69,12 @@ core::arch::global_asm!(
     "  mov rsi, r9",
     "  mov rdx, r8",
     "  call syscall_dispatch",
-    "  mov rdi, rsp",
+    // Save RAX (syscall return value) — syscall_signal_hook may destroy it
+    "  push rax",
+    // kernel_rsp must skip the saved RAX and point to [r11, rcx]
+    "  lea rdi, [rsp + 8]",
     "  call syscall_signal_hook",
+    "  pop rax",
     "  pop r11",
     "  pop rcx",
     "  mov rsp, gs:[0]",

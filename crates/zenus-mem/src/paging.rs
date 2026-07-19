@@ -170,89 +170,24 @@ pub fn unmap_page(virt: VirtAddr) {
     })
 }
 
-fn raw_hex(val: u64) {
-    unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'0', options(nostack, preserves_flags)); }
-    unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'x', options(nostack, preserves_flags)); }
-    let v = val;
-    let mut i = 16;
-    while i > 0 {
-        i -= 1;
-        let nibble = ((v >> (i * 4)) & 0xF) as u8;
-        let ch = b"0123456789ABCDEF"[nibble as usize];
-        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") ch, options(nostack, preserves_flags)); }
-    }
-}
 
-fn raw_str(s: &str) {
-    let p = s.as_ptr();
-    let len = s.len();
-    let mut i = 0;
-    while i < len {
-        let byte = unsafe { *p.add(i) };
-        if byte == b'\n' {
-            unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") b'\r', options(nostack, preserves_flags)); }
-        }
-        unsafe { core::arch::asm!("out dx, al", in("dx") 0x3f8u16, in("al") byte, options(nostack, preserves_flags)); }
-        i += 1;
-    }
-}
 
 #[inline(never)]
 #[no_mangle]
 pub extern "C" fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool, executable: bool) -> bool {
-    raw_str("[MAP] start\n");
-
     let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
-    raw_str("[MAP] hhdm=");
-    raw_hex(hhdm);
-    raw_str("\n");
-
-    raw_str("[MAP] cr3_raw=");
-    raw_hex(cr3_phys_raw);
-    raw_str(" hhdm=");
-    raw_hex(hhdm);
-    raw_str("\n");
-
     let offset = VirtAddr::new(hhdm);
     let cr3_phys = cr3_phys_raw & !0xFFF;
-    raw_str("[MAP] cr3_phys=");
-    raw_hex(cr3_phys);
-    raw_str("\n");
-
     let pt_virt = (cr3_phys + hhdm) as *mut PageTable;
-    raw_str("[MAP] pt_virt=");
-    raw_hex(pt_virt as u64);
-    raw_str("\n");
-
-    raw_str("[MAP] a\n");
     let mut mapper = unsafe { OffsetPageTable::new(&mut *pt_virt, offset) };
-    raw_str("[MAP] b\n");
 
-    raw_str("[MAP] c\n");
     let va = match VirtAddr::try_new(virt) {
         Ok(v) => v,
-        Err(_) => {
-            raw_str("[MAP] ERROR: VirtAddr::try_new failed for virt=");
-            raw_hex(virt);
-            raw_str("\n");
-            return false;
-        }
+        Err(_) => return false,
     };
-    raw_str("[MAP] d\n");
     let page = Page::<Size4KiB>::containing_address(va);
-    raw_str("[MAP] e\n");
-
-    raw_str("[MAP] f\n");
-    raw_hex(virt);
-    raw_str(" phys=");
-    raw_hex(phys);
-    raw_str("\n");
-
-    raw_str("[MAP] g\n");
     let frame = PhysFrame::containing_address(PhysAddr::new(phys));
-    raw_str("[MAP] h\n");
 
-    raw_str("[MAP] i\n");
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if writable {
         flags |= PageTableFlags::WRITABLE;
@@ -261,25 +196,15 @@ pub extern "C" fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, wri
         flags |= PageTableFlags::NO_EXECUTE;
     }
 
-    raw_str("[MAP] j\n");
     let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
-    raw_str("[MAP] k\n");
-
-    raw_str("[MAP] l\n");
     let result = unsafe { mapper.map_to(page, frame, flags, &mut *allocator) };
-    raw_str("[MAP] m\n");
 
     match result {
         Ok(flush) => {
-            raw_str("[MAP] n\n");
             flush.flush();
-            raw_str("[MAP] o\n");
             return true;
         }
-        Err(_) => {
-            raw_str("[MAP] err\n");
-            false
-        },
+        Err(_) => false,
     }
 }
 

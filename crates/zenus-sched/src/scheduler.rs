@@ -104,6 +104,12 @@ static TASK_COUNT: AtomicU32 = AtomicU32::new(0);
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 static SYS_TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// Atomic flag for child exit notification.
+/// Format: bit 63 = valid flag, bits 47:0 = exit_code, bits 31:0 = child_pid (OR'd)
+/// When bit 63 is set, a child has exited. Cleaned to 0 by the parent after read.
+/// This bypasses TASKS/ZOMBIE_LIST which have state visibility issues.
+static CHILD_EXIT_NOTIFY: AtomicU64 = AtomicU64::new(0);
+
 static TASKS: SpinLock<TaskArray> = SpinLock::new(TaskArray::new());
 
 struct TaskArray {
@@ -898,17 +904,23 @@ pub fn check_yield() {
 fn find_next_ready(tasks: &TaskArray, current: u32, cpu: u32) -> u32 {
     // Round-robin: find next ready task after current, wrap around
     for idx in (current + 1)..MAX_TASKS as u32 {
+        if idx == 0 { continue; } // skip idle — only pick as last resort
         if let Some(ref task) = tasks.tasks[idx as usize] {
             if task.is_active() && task.cpu == cpu { return idx; }
         }
     }
-    // Wrap around: scan from 0 to current (includes idle at 0)
-    for idx in 0..current {
+    // Wrap around: scan from 1 to current (skip idle at 0)
+    let start = if 1u32 < current { 1u32 } else { u32::MAX }; // start=MAX → loop skipped
+    for idx in start..current {
         if let Some(ref task) = tasks.tasks[idx as usize] {
             if task.is_active() && task.cpu == cpu { return idx; }
         }
     }
-    // Steal from other CPUs
+    // Only now check idle (index 0) — last resort on this CPU
+    if let Some(ref task) = tasks.tasks[0] {
+        if task.is_active() && task.cpu == cpu { return 0; }
+    }
+    // Steal from other CPUs (skip idle — it can't migrate)
     for idx in 1..MAX_TASKS as u32 {
         if let Some(ref task) = tasks.tasks[idx as usize] {
             if task.is_active() { return idx; }
@@ -1152,6 +1164,8 @@ pub fn get_task(id: u64) -> Option<super::task::Task> {
     None
 }
 
+
+
 #[no_mangle]
 pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     SYS_TICKS.fetch_add(1, Ordering::Relaxed);
@@ -1357,6 +1371,12 @@ pub fn exit_current_task(code: u64) -> ! {
     tasks.tasks[idx as usize].as_mut().unwrap().state = TaskState::Terminated;
     tasks.tasks[idx as usize].as_mut().unwrap().exit_code = code;
 
+    // Set atomic child-exit notification (bypasses ZOMBIE_LIST issues)
+    CHILD_EXIT_NOTIFY.store(
+        (1u64 << 63) | ((code & 0xFFFF) << 32) | (task_id & 0xFFFFFFFF),
+        Ordering::Release,
+    );
+
     // Store zombie record so parent can reap
     {
         let mut zombies = ZOMBIE_LIST.lock();
@@ -1448,6 +1468,20 @@ pub fn reap_task(task_id: u64) {
             }
             return;
         }
+    }
+}
+
+/// Check if any child has exited via the atomic notification flag.
+/// Returns Some((child_pid, exit_code)) if a child exit was recorded.
+/// Clears the flag — only returns each exit once.
+pub fn check_child_exit_notify() -> Option<(u64, u64)> {
+    let val = CHILD_EXIT_NOTIFY.swap(0, Ordering::AcqRel);
+    if val & (1u64 << 63) != 0 {
+        let child_pid = val & 0xFFFFFFFF;
+        let exit_code = (val >> 32) & 0xFFFF;
+        Some((child_pid, exit_code))
+    } else {
+        None
     }
 }
 

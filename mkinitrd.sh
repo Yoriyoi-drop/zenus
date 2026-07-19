@@ -8,7 +8,7 @@ echo "Zenus OS v0.1.0 - Server OS" > "$INITRD_DIR/version.txt"
 echo "Hello from initrd!" > "$INITRD_DIR/hello.txt"
 echo "Zenus OS - Server Mode" > "$INITRD_DIR/etc/motd"
 # Copy userspace ELF binaries
-for prog in hello echo cat exitonly; do
+for prog in hello echo cat exitonly args pipe_test minimal writetest; do
     if [ -f "userspace/build/$prog" ]; then
         cp "userspace/build/$prog" "$INITRD_DIR/bin/$prog"
         chmod +x "$INITRD_DIR/bin/$prog"

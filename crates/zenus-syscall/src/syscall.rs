@@ -2665,14 +2665,24 @@ pub extern "C" fn syscall_dispatch(
     arg2: u64,
     arg3: u64,
 ) -> u64 {
+    // DEBUG: write syscall marker to Bochs port 0xE9
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'\x53'); // 'S' = syscall start
+        core::arch::asm!("out 0xe9, al", in("al") (num as u8)); // syscall number
+    }
     if num >= 256 { return -1i64 as u64; }
-    match SYSCALL_TABLE[num as usize] {
+    let result = match SYSCALL_TABLE[num as usize] {
         Some(f) => f(arg1, arg2, arg3, 0, 0, 0),
         None => {
             zenus_console::kwarn!("Unknown syscall {}", num);
             -1i64 as u64
         }
+    };
+    // DEBUG: write syscall done marker
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'\x44'); // 'D' = syscall done
     }
+    result
 }
 
 /// Called from syscall return path in cpu.rs asm.

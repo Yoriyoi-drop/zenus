@@ -48,6 +48,20 @@ pub extern "x86-interrupt" fn interrupt_spurious(_frame: InterruptStackFrame) {
 }
 
 #[no_mangle]
+pub extern "x86-interrupt" fn interrupt_serial(_frame: InterruptStackFrame) {
+    // Read all available bytes from UART and push into interrupt buffer.
+    // NOTE: LSR (Line Status Register) must be RELOADED each iteration
+    // because reading the data port (0x3F8) clears the LSR's DR bit.
+    loop {
+        let lsr: u8;
+        unsafe { core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16, options(nostack, preserves_flags)); }
+        if lsr & 0x01 == 0 { break; }
+        zenus_console::serial::irq_handler_serial();
+    }
+    crate::interrupts::apic::eoi();
+}
+
+#[no_mangle]
 pub extern "x86-interrupt" fn interrupt_nic(_frame: InterruptStackFrame) {
     let ptr = NIC_IRQ_HANDLER.load(core::sync::atomic::Ordering::Acquire);
     if ptr != 0 && ptr_in_text(ptr) {

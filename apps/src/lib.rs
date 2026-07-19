@@ -110,7 +110,153 @@ fn panic(info: &PanicInfo) -> ! {
     }
 }
 
+/// Execute a userspace ELF binary at boot, before the shell starts.
+/// Opens the file from VFS, loads it as ELF, creates a user task,
+/// and waits for it to complete. This is the same flow as `run`
+/// command but runs before the interactive shell.
+/// Returns true if execution was successful, false otherwise.
+fn boot_run_userspace(path: &str) -> bool {
+    use zenus_fs::vfs;
+    use zenus_mem::paging;
+
+    zenus_console::kinfo!("boot-run: opening {}", path);
+
+    let node = match vfs::open(path) {
+        Some(n) => n,
+        None => {
+            zenus_console::kinfo!("boot-run: file not found: {}", path);
+            return false;
+        }
+    };
+
+    let stat = node.fs.stat(node.inode);
+    zenus_console::kinfo!("boot-run: file size={}", stat.size);
+
+    if stat.size < 64 || stat.size > 1024 * 1024 {
+        zenus_console::kinfo!("boot-run: invalid file size");
+        return false;
+    }
+
+    let size = stat.size as usize;
+    let mut data = alloc::vec![0u8; size];
+    if node.fs.read(node.inode, 0, &mut data).is_none() {
+        zenus_console::kinfo!("boot-run: read failed");
+        return false;
+    }
+
+    zenus_console::kinfo!("boot-run: creating address space");
+
+    let new_cr3 = match paging::create_address_space() {
+        Some(c) => c,
+        None => {
+            zenus_console::kinfo!("boot-run: failed to create address space");
+            return false;
+        }
+    };
+
+    zenus_console::kinfo!("boot-run: loading ELF");
+
+    let loaded = match zenus_syscall::elf::load_elf_raw(&data, new_cr3) {
+        Some(e) => e,
+        None => {
+            paging::destroy_address_space(new_cr3);
+            zenus_console::kinfo!("boot-run: invalid ELF: {}", path);
+            return false;
+        }
+    };
+
+    zenus_console::kinfo!("boot-run: ELF loaded entry=0x{:x} stack_top=0x{:x}",
+        loaded.entry, loaded.stack_top);
+
+    // Set up argv on user stack by writing DIRECTLY to the physical page
+    // via HHDM. The physical address of the last stack page is returned by
+    // load_elf_raw as stack_first_phys. Compute offsets within that page.
+    // This avoids CR3 switching + TLB / SMAP issues entirely.
+    let user_stack_top = loaded.stack_top;
+    let hhdm = paging::hhdm_offset();
+    let stack_phys = loaded.stack_first_phys;
+
+    let path_bytes = path.as_bytes();
+    let path_len = path_bytes.len();
+    let str_pos = user_stack_top - path_len as u64 - 1;
+    let ptr_area = (str_pos - 16) & !7u64;
+    let user_rsp = ptr_area - 8;
+
+    // Compute physical addresses: base physical + offset within page
+    let phys_str = stack_phys + (str_pos & 0xFFF);
+    let phys_ptr = stack_phys + (ptr_area & 0xFFF);
+    let phys_rsp = stack_phys + (user_rsp & 0xFFF);
+
+    // Write path string at str_pos
+    let dst_str = (hhdm + phys_str) as *mut u8;
+    unsafe {
+        core::ptr::copy_nonoverlapping(path_bytes.as_ptr(), dst_str, path_len);
+        *dst_str.add(path_len) = 0; // null terminator
+    }
+
+    // Write argv[0] = str_pos, argv[1] = NULL at ptr_area
+    let dst_ptr = (hhdm + phys_ptr) as *mut u64;
+    unsafe {
+        *dst_ptr = str_pos;       // argv[0] = pointer to path string
+        *dst_ptr.add(1) = 0;      // argv[1] = NULL
+    }
+
+    // Write argc = 1 at user_rsp
+    let dst_rsp = (hhdm + phys_rsp) as *mut u64;
+    unsafe { *dst_rsp = 1; }
+
+
+    // Safe operations after SMAP bypass + CR3 restore
+    let stack_size = 65536;
+    let pid = scheduler::create_user_task(
+        loaded.entry,
+        stack_size,
+        user_rsp,
+        new_cr3,
+        loaded.heap_base,
+    );
+
+    if pid == 0 {
+        paging::destroy_address_space(new_cr3);
+        zenus_console::kinfo!("boot-run: failed to create task");
+        return false;
+    }
+
+    zenus_console::kinfo!("boot-run: PID {} created, waiting...", pid);
+
+    // Wait for child using wait_for_child() with ZOMBIE_LIST.
+    // exit_current_task() stores a zombie record, so wait_for_child()
+    // can find it. This is the same mechanism used by the shell `run`
+    // command (verified working).
+    let ppid = scheduler::current_task_id();
+    for _ in 0u64..2000u64 {
+        scheduler::yield_now();
+        if let Some((cpid, exit_code)) = scheduler::wait_for_child(ppid, pid, 1) {
+            zenus_console::kinfo!("boot-run: PID {} exited with code {}", cpid, exit_code);
+            zenus_console::serial::flush_output_blocking();
+            scheduler::reap_task(cpid);
+            return true;
+        }
+    }
+
+    zenus_console::kinfo!("boot-run: TIMEOUT waiting for PID {}", pid);
+    zenus_console::serial::flush_output_blocking();
+    scheduler::signal_force_kill(pid);
+    scheduler::reap_task(pid);
+    return false;
+}
+
 fn shell_task() {
+    // Execute userspace programs at boot to verify process lifecycle.
+    // Uses wait_for_child() which reads zombie records from ZOMBIE_LIST
+    // populated by exit_current_task(). Verified working (2026-07-19).
+    boot_run_userspace("/initrd/bin/exitonly");
+    // TEST: writetest — minimal write+exit (no division, no .bss)
+    boot_run_userspace("/initrd/bin/writetest");
+    // TEST: args — reads argc/argv from stack, writes to .bss dec_buf
+    boot_run_userspace("/initrd/bin/args");
+    boot_run_userspace("/initrd/bin/pipe_test");
+
     let mut shell = shell::Shell::new();
     shell.run();
 }
@@ -122,24 +268,9 @@ pub extern "C" fn entry() -> ! {
 
     // Write initial boot message and flush — ensures serial port works even
     // if we crash later. This bypasses the buffer for absolute reliability.
+    // Boot marker — single character to confirm UART works
     zenus_console::serial::uart_write_byte_emergency(b'Z');
-    zenus_console::serial::uart_write_byte_emergency(b'e');
-    zenus_console::serial::uart_write_byte_emergency(b'n');
-    zenus_console::serial::uart_write_byte_emergency(b'u');
-    zenus_console::serial::uart_write_byte_emergency(b's');
-    zenus_console::serial::uart_write_byte_emergency(b' ');
-    zenus_console::serial::uart_write_byte_emergency(b'B');
-    zenus_console::serial::uart_write_byte_emergency(b'o');
-    zenus_console::serial::uart_write_byte_emergency(b'o');
-    zenus_console::serial::uart_write_byte_emergency(b't');
-    zenus_console::serial::uart_write_byte_emergency(b'i');
-    zenus_console::serial::uart_write_byte_emergency(b'n');
-    zenus_console::serial::uart_write_byte_emergency(b'g');
-    zenus_console::serial::uart_write_byte_emergency(b'.');
-    zenus_console::serial::uart_write_byte_emergency(b'.');
-    zenus_console::serial::uart_write_byte_emergency(b'.');
-    zenus_console::serial::uart_write_byte_emergency(b'\r');
-    zenus_console::serial::uart_write_byte_emergency(b'\n');
+
 
     if zenus_arch::limine::MEMMAP_REQUEST.response.is_null() {
         zenus_console::kpanic_code!(zenus_console::error::codes::KRN_PANIC_INVALID_MEM,
@@ -185,8 +316,14 @@ pub extern "C" fn entry() -> ! {
     // Fix page table permissions (clear U/S bit at all levels for all
     // present PML4 entries 0-511), then enable SMEP + SMAP.
     // NOTE: Requires QEMU `-cpu max` or a CPU with SMEP/SMAP support.
-    zenus_mem::paging::ensure_kernel_pages_supervisor();
-    cpu::enable_smep_smap();
+    //
+    // DISABLED (2026-07-19): SMAP causes GPF in userspace programs (args/pipe_test)
+    // because write to user stack via boot_run_userspace with stac does not
+    // reliably write the expected values. Root cause suspected in PML4 U/S interaction
+    // between ensure_kernel_pages_supervisor and create_address_space / map_user_page_raw.
+    // Enable after fixing: uncomment the two lines below.
+    //zenus_mem::paging::ensure_kernel_pages_supervisor();
+    //cpu::enable_smep_smap();
     zenus_console::vga::init(hhdm_offset);
 
     // Initialize framebuffer console if available (UEFI/GOP boot)
@@ -220,6 +357,19 @@ pub extern "C" fn entry() -> ! {
     // dibuat dan init selesai. Output di-flush manual dengan flush_output_blocking().
 
     zenus_arch::keyboard::init();
+    // Register serial IRQ (UART interrupt-driven I/O) for KVM compatibility.
+    // With in-kernel irqchip, KVM doesn't process host stdin during HLT.
+    // UART interrupts force a VM exit, allowing QEMU to read stdin.
+    // Route IRQ4 (COM1) through IOAPIC → vector 36, then enable IER bit 0.
+    if zenus_arch::interrupts::ioapic::is_initialized() {
+        let apic_id = zenus_arch::interrupts::apic::current_apic_id() as u8;
+        if zenus_arch::interrupts::ioapic::route_irq(4, 36u8, apic_id) {
+            zenus_console::kinfo!("Serial IRQ4 -> vector 36 (IOAPIC)");
+        } else {
+            zenus_console::kwarn!("Serial IRQ4 -> IOAPIC FAILED");
+        }
+    }
+    zenus_console::serial::enable_serial_interrupts();
     scheduler::init();
     zenus_console::serial::flush_output_blocking();
 

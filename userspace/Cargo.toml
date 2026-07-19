@@ -5,6 +5,10 @@ members = [
     "echo",
     "cat",
     "exitonly",
+    "args",
+    "pipe_test",
+    "minimal",
+    "writetest",
 ]
 resolver = "2"
 

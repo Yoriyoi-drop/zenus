@@ -6,6 +6,27 @@ use zenus_console::serial::SerialPort;
 const MAX_LINE: usize = 256;
 const PROMPT: &str = "zenus$ ";
 
+/// Tab completion: list of all known commands
+const COMMANDS: &[&str] = &[
+    "help", "echo", "ls", "cat", "clear", "cd", "timer", "ps", "kill",
+    "mkdir", "rm", "touch", "ifconfig", "meminfo", "reboot", "shutdown",
+    "uname", "version", "dmesg", "id", "whoami", "chmod", "cp", "mv",
+    "mount", "pwd", "df", "grep", "find", "du", "chown", "pgrep",
+    "top", "uptime", "which", "zerrors",
+    "bcache", "fsck", "journal-init", "journal-test",
+    "tcp-listen", "tcp-status", "tcp-send", "tcp-echo", "tcp-connect",
+    "udp-bind", "udp-send", "udp-recv",
+    "dhcp", "dhcp-server", "resolve", "readdev",
+    "init-start", "init-shutdown",
+    "service-list", "service-start", "service-stop", "service-restart",
+    "sysctl", "pkg-install", "pkg-list", "pkg-remove", "pkg-info",
+    "watchdog-pet", "watchdog-status", "crashdump", "lockdep-status", "syslog",
+    "ssh-start", "ssh-status",
+    "ns-info", "ns-sethost", "ns-clone",
+    "firewall-list", "firewall-add", "firewall-remove",            "run", "pipe-test",
+    "zbench", "zdiag", "zdoctor", "zinfo", "zmem", "zpkg", "zsys", "ztrace",
+];
+
 struct ShellWriter {
     serial: SerialPort,
 }
@@ -170,14 +191,26 @@ impl Shell {
         let mut idle_count = 0u64;
 
         loop {
-            let c = if self.serial.is_data_available() {
+            let c = if let Some(b) = zenus_console::serial::take_drain_byte() {
+                // Byte from boot drain buffer — data that arrived before shell started.
+                Some(b)
+            } else if let Some(b) = zenus_console::serial::take_irq_byte() {
+                // Byte from UART interrupt handler (IRQ4).
+                // On KVM, the UART IRQ forces a VM exit so QEMU can read
+                // host stdin and pipe data to the guest's serial port.
+                Some(b)
+            } else if self.serial.is_data_available() {
                 let b = self.serial.read_byte_serial();
                 Some(b)
             } else if zenus_arch::keyboard::is_key_available() {
                 let b = zenus_arch::keyboard::read_key().unwrap_or(0);
                 Some(b)
             } else {
-                unsafe { core::arch::asm!("sti", "hlt", "cli"); }
+                // HLT gives QEMU time to process host events (stdin pipe -> UART).
+                // Falls through to None, which loops back and re-checks for data.
+                x86_64::instructions::interrupts::enable();
+                x86_64::instructions::hlt();
+                x86_64::instructions::interrupts::disable();
                 None
             };
 
@@ -215,6 +248,20 @@ impl Shell {
                             zenus_console::display::write_str(
                                 core::str::from_utf8(&[c]).unwrap_or(""),
                             );
+                        }
+                    }
+                    b'\t' => {
+                        // Tab completion: detect if we're completing a command or a path
+                        if self.line_pos > 0 {
+                            // Check if buffer contains a space (meaning command + argument)
+                            let has_space = self.line_buf[..self.line_pos].iter().any(|&b| b == b' ');
+                            if has_space {
+                                // ── File path completion ──
+                                self.tab_complete_path();
+                            } else {
+                                // ── Command name completion ──
+                                self.tab_complete_command();
+                            }
                         }
                     }
                     _ => {
@@ -337,6 +384,8 @@ impl Shell {
             "firewall-list" => self.cmd_firewall_list(w),
             "firewall-add" => self.cmd_firewall_add(line, w),
             "firewall-remove" => self.cmd_firewall_remove(line, w),
+            "run" => self.cmd_run(line, w),
+            "pipe-test" => self.cmd_pipe_test(w),
             _ => return false,
         }
         true
@@ -1109,6 +1158,419 @@ impl Shell {
         } else {
             w.write_str("firewall-remove: no rule at that index\r\n");
         }
+    }
+
+    fn cmd_run(&mut self, line: &str, w: &mut ShellWriter) {
+        let args = Args::parse(line);
+        let path = match args.get(1) {
+            Some(p) => p,
+            None => {
+                w.write_str("Usage: run <path> [args...]\r\n");
+                return;
+            }
+        };
+
+        zenus_console::kinfo!("run: opening {}", path);
+
+        // Open the ELF file from VFS
+        let node = match zenus_fs::vfs::open(path) {
+            Some(n) => n,
+            None => {
+                w.write_str("run: file not found: ");
+                w.write_str(path);
+                w.write_str("\r\n");
+                return;
+            }
+        };
+
+        let stat = node.fs.stat(node.inode);
+        zenus_console::kinfo!("run: file opened size={}", stat.size);
+
+        if stat.size < 64 || stat.size > 1024 * 1024 {
+            w.write_str("run: invalid file size\r\n");
+            return;
+        }
+
+        // Read entire file into buffer
+        let size = stat.size as usize;
+        let mut data = alloc::vec![0u8; size];
+        if node.fs.read(node.inode, 0, &mut data).is_none() {
+            w.write_str("run: read failed\r\n");
+            return;
+        }
+
+        zenus_console::kinfo!("run: read {} bytes, creating address space", size);
+
+        // Create new address space
+        let new_cr3 = match zenus_mem::paging::create_address_space() {
+            Some(c) => c,
+            None => {
+                w.write_str("run: failed to create address space\r\n");
+                return;
+            }
+        };
+
+        zenus_console::kinfo!("run: address space created cr3=0x{:x}", new_cr3);
+
+        // Load ELF into the new address space
+        let loaded = match zenus_syscall::elf::load_elf_raw(&data, new_cr3) {
+            Some(e) => e,
+            None => {
+                zenus_mem::paging::destroy_address_space(new_cr3);
+                w.write_str("run: invalid ELF: ");
+                w.write_str(path);
+                w.write_str("\r\n");
+                return;
+            }
+        };
+
+        zenus_console::kinfo!("run: ELF loaded entry=0x{:x} stack_top=0x{:x} heap=0x{:x}",
+            loaded.entry, loaded.stack_top, loaded.heap_base);
+
+        // ── Set up argv on user stack ──
+        // Layout (from high address to low):
+        //   stack_top          (top of user stack, highest address)
+        //   argv strings       (packed, each null-terminated)
+        //   argv ptr array     (one 8-byte ptr per string, NULL-terminated)
+        //   argc (8 bytes)
+        //   initial RSP
+        //
+        // Build argv from command-line arguments:
+        //   argv[0] = path (the program itself, like Linux convention)
+        //   argv[1..] = remaining args from command line
+        let max_strings = 32usize;
+        let mut argv_strings: [&str; 32] = [""; 32];
+        let mut argv_count = 0usize;
+
+        argv_strings[0] = path;
+        argv_count = 1;
+        for arg in args.args().iter().take(max_strings - 1) {
+            argv_strings[argv_count] = arg;
+            argv_count += 1;
+        }
+        let argc = argv_count;
+
+        // Calculate total space needed on user stack
+        let mut total_str_len: usize = 0;
+        for i in 0..argc {
+            total_str_len += argv_strings[i].len() + 1; // +1 for null terminator
+        }
+        let ptr_array_size = (argc + 1) * 8; // argv pointers + NULL
+        let stack_used = total_str_len + ptr_array_size + 8; // +8 for argc
+
+        // Available user stack space: 16 pages = 65536 bytes
+        if stack_used > 64000 {
+            zenus_mem::paging::destroy_address_space(new_cr3);
+            w.write_str("run: argv too large\r\n");
+            return;
+        }
+
+        let user_stack_top = loaded.stack_top;
+
+        zenus_console::kinfo!("run: setting up argv ({} bytes)", stack_used);
+
+        // Compute user_rsp_final BEFORE unsafe block so it's accessible outside
+        let mut total_deployed: usize = 0;
+        for i in 0..argc {
+            total_deployed += argv_strings[i].len() + 1;
+        }
+        let str_pos_computed = user_stack_top - total_deployed as u64;
+        let ptr_area_start_computed = (str_pos_computed - (argc + 1) as u64 * 8) & !7u64;
+        let user_rsp_final = ptr_area_start_computed - 8;
+
+        // Switch to user CR3 to write the stack
+        let kernel_cr3 = zenus_mem::paging::kernel_cr3();
+        zenus_mem::paging::set_cr3(new_cr3);
+
+        unsafe {
+            // stac: bypass SMAP so supervisor mode can write to user pages
+            core::arch::asm!("stac", options(nostack, preserves_flags));
+
+            // ── Write argv strings: packed from high address to low ──
+            let mut str_pos = user_stack_top;
+            for i in 0..argc {
+                let s = argv_strings[i].as_bytes();
+                let len = s.len();
+                str_pos -= len as u64 + 1;
+                core::ptr::copy_nonoverlapping(s.as_ptr(), str_pos as *mut u8, len);
+                *((str_pos + len as u64) as *mut u8) = 0;
+            }
+
+            // Write argv pointer array
+            let ptr_area_start = (str_pos - (argc + 1) as u64 * 8) & !7u64;
+            let mut ptr_pos = ptr_area_start;
+            let mut str_cur = str_pos;
+            for i in 0..argc {
+                *((ptr_pos) as *mut u64) = str_cur;
+                ptr_pos += 8;
+                str_cur += argv_strings[i].len() as u64 + 1;
+            }
+            *((ptr_pos) as *mut u64) = 0;
+
+            // Write argc (using computed user_rsp_final)
+            *((user_rsp_final) as *mut u64) = argc as u64;
+
+            // clac: restore SMAP protection
+            core::arch::asm!("clac", options(nostack, preserves_flags));
+        }
+
+        // Safe operations after SMAP bypass (outside unsafe block)
+        zenus_console::kinfo!("run: user_rsp=0x{:x} argc={}", user_rsp_final, argc);
+
+        // Switch back to kernel CR3
+        zenus_mem::paging::set_cr3(kernel_cr3);
+
+        // ── Create user task ──
+        let stack_size = 65536;
+        let pid = zenus_sched::scheduler::create_user_task(
+            loaded.entry,
+            stack_size,
+            user_rsp_final,
+            new_cr3,
+            loaded.heap_base,
+        );
+
+        if pid == 0 {
+            zenus_mem::paging::destroy_address_space(new_cr3);
+            w.write_str("run: failed to create task\r\n");
+            return;
+        }
+
+        zenus_console::kinfo!("run: created PID={}", pid);
+
+        w.write_str("[PID ");
+        w.write_u64(pid);
+        w.write_str("] ");
+        w.write_str(path);
+        w.write_str("\r\n");
+
+        // Wait for child using wait_for_child() with ZOMBIE_LIST.
+        zenus_console::kinfo!("run: waiting for PID {}", pid);
+
+        let ppid = zenus_sched::scheduler::current_task_id();
+        let mut wait_loops: u64 = 0;
+        loop {
+            zenus_sched::scheduler::yield_now();
+            wait_loops += 1;
+
+            // Primary: wait_for_child checks ZOMBIE_LIST (populated by exit_current_task)
+            if let Some((cpid, exit_code)) = zenus_sched::scheduler::wait_for_child(ppid, pid, 1) {
+                zenus_console::kinfo!("run: PID {} exited with code {}", cpid, exit_code);
+                w.write_str("[PID ");
+                w.write_u64(cpid);
+                w.write_str("] exited with code ");
+                w.write_u64(exit_code);
+                w.write_str("\r\n");
+                zenus_sched::scheduler::reap_task(cpid);
+                return;
+            }
+
+            // NOTE: get_task() fallback removed — extensive debugging showed
+            // it never detects TaskState::Terminated after exit_current_task().
+
+            // Log every 100 iterations
+            if wait_loops % 100 == 0 {
+                zenus_console::kinfo!("run: still waiting for PID {} (loop {})", pid, wait_loops);
+            }
+
+            // Timeout: >5000 iterations ~ 50 seconds
+            if wait_loops > 5000 {
+                zenus_console::kinfo!("run: TIMEOUT waiting for PID {}", pid);
+                w.write_str("[PID ");
+                w.write_u64(pid);
+                w.write_str("] timeout\r\n");
+                return;
+            }
+        }
+    }
+
+    /// Complete the command name (first word in buffer)
+    fn tab_complete_command(&mut self) {
+        // Find end of first word
+        let mut word_end = 0;
+        while word_end < self.line_pos && self.line_buf[word_end] != b' ' && self.line_buf[word_end] != 0 {
+            word_end += 1;
+        }
+        if word_end == 0 { return; }
+        let prefix = core::str::from_utf8(&self.line_buf[..word_end]).unwrap_or("");
+        if prefix.is_empty() { return; }
+        let prefix_lower = prefix.to_ascii_lowercase();
+        let mut matches: [&str; 32] = [""; 32];
+        let mut match_count = 0usize;
+        for cmd in COMMANDS {
+            if cmd.len() >= prefix_lower.len()
+                && cmd[..prefix_lower.len()].eq_ignore_ascii_case(&prefix_lower)
+            {
+                if match_count < 32 {
+                    matches[match_count] = cmd;
+                    match_count += 1;
+                }
+            }
+        }
+        if match_count == 1 {
+            // Unique match: complete the command name
+            let completed = matches[0];
+            for _ in 0..word_end {
+                self.line_pos -= 1;
+                self.serial.write_byte_serial(b'\x08');
+                self.serial.write_byte_serial(b' ');
+                self.serial.write_byte_serial(b'\x08');
+                zenus_console::display::write_str("\x08 \x08");
+            }
+            for &b in completed.as_bytes() {
+                if self.line_pos < MAX_LINE - 1 {
+                    self.line_buf[self.line_pos] = b;
+                    self.line_pos += 1;
+                    self.serial.write_byte_serial(b);
+                    let byte_arr = [b];
+                    let s = core::str::from_utf8(&byte_arr).unwrap_or("");
+                    zenus_console::display::write_str(s);
+                }
+            }
+            // Append space after completed command
+            if self.line_pos < MAX_LINE - 1 {
+                self.line_buf[self.line_pos] = b' ';
+                self.line_pos += 1;
+                self.serial.write_byte_serial(b' ');
+                zenus_console::display::write_str(" ");
+            }
+        } else if match_count > 1 {
+            // Multiple matches: show all on next line
+            self.serial.write_byte_serial(b'\r');
+            self.serial.write_byte_serial(b'\n');
+            zenus_console::display::write_str("\r\n");
+            for i in 0..match_count {
+                for &b in matches[i].as_bytes() {
+                    self.serial.write_byte_serial(b);
+                }
+                self.serial.write_byte_serial(b' ');
+                zenus_console::display::write_str(" ");
+            }
+            self.serial.write_byte_serial(b'\r');
+            self.serial.write_byte_serial(b'\n');
+            zenus_console::display::write_str("\r\n");
+            // Redraw prompt + current input
+            for &b in PROMPT.as_bytes() {
+                self.serial.write_byte_serial(b);
+            }
+            zenus_console::display::write_str(PROMPT);
+            for &b in &self.line_buf[..self.line_pos] {
+                self.serial.write_byte_serial(b);
+            }
+            let s = core::str::from_utf8(&self.line_buf[..self.line_pos]).unwrap_or("");
+            zenus_console::display::write_str(s);
+        }
+    }
+
+    /// Complete a file path (after a command that takes a path argument)
+    fn tab_complete_path(&mut self) {
+        // Find the last space — everything after it is the path prefix
+        let mut last_space = 0usize;
+        for i in 0..self.line_pos {
+            if self.line_buf[i] == b' ' {
+                last_space = i;
+            }
+        }
+        // Text after last space (skip the space itself)
+        let path_start = if last_space + 1 < self.line_pos { last_space + 1 } else { return; };
+        let path_prefix = core::str::from_utf8(&self.line_buf[path_start..self.line_pos]).unwrap_or("");
+        
+        // Determine directory and file prefix
+        let (dir_path, file_prefix) = if let Some(slash_pos) = path_prefix.rfind('/') {
+            let dir = if slash_pos == 0 { "/" } else { &path_prefix[..slash_pos] };
+            let file_pref = &path_prefix[slash_pos + 1..];
+            (dir.to_owned(), file_pref)
+        } else {
+            // No slash — search current directory (root)
+            ("/".to_owned(), path_prefix)
+        };
+
+        // Read directory entries
+        let entries = zenus_fs::vfs::read_dir(&dir_path);
+
+        // Find matching entries (store indices into the entries vec)
+        let mut match_indices: [usize; 64] = [0; 64];
+        let mut match_count = 0usize;
+        for (idx, entry) in entries.iter().enumerate() {
+            if entry.name.starts_with(file_prefix) {
+                if match_count < 64 {
+                    match_indices[match_count] = idx;
+                    match_count += 1;
+                }
+            }
+        }
+
+        if match_count == 0 {
+            return;
+        }
+
+        if match_count == 1 {
+            // Unique match: complete the path
+            let entry = &entries[match_indices[0]];
+            let is_dir = matches!(entry.file_type, zenus_fs::vfs::FileType::Directory);
+            // Clear the current path (from path_start to line_pos)
+            let old_len = self.line_pos - path_start;
+            for _ in 0..old_len {
+                self.line_pos -= 1;
+                self.serial.write_byte_serial(b'\x08');
+                self.serial.write_byte_serial(b' ');
+                self.serial.write_byte_serial(b'\x08');
+                zenus_console::display::write_str("\x08 \x08");
+            }
+            // Write the completed name
+            for &b in entry.name.as_bytes() {
+                if self.line_pos < MAX_LINE - 1 {
+                    self.line_buf[self.line_pos] = b;
+                    self.line_pos += 1;
+                    self.serial.write_byte_serial(b);
+                    let byte_arr = [b];
+                    let s = core::str::from_utf8(&byte_arr).unwrap_or("");
+                    zenus_console::display::write_str(s);
+                }
+            }
+            // Append slash after directory name
+            if is_dir && self.line_pos < MAX_LINE - 1 {
+                self.line_buf[self.line_pos] = b'/';
+                self.line_pos += 1;
+                self.serial.write_byte_serial(b'/');
+                zenus_console::display::write_str("/");
+            }
+        } else {
+            // Multiple matches: show all on next line
+            self.serial.write_byte_serial(b'\r');
+            self.serial.write_byte_serial(b'\n');
+            zenus_console::display::write_str("\r\n");
+            for i in 0..match_count {
+                let entry = &entries[match_indices[i]];
+                for &b in entry.name.as_bytes() {
+                    self.serial.write_byte_serial(b);
+                }
+                if matches!(entry.file_type, zenus_fs::vfs::FileType::Directory) {
+                    self.serial.write_byte_serial(b'/');
+                }
+                self.serial.write_byte_serial(b' ');
+                zenus_console::display::write_str(" ");
+            }
+            self.serial.write_byte_serial(b'\r');
+            self.serial.write_byte_serial(b'\n');
+            zenus_console::display::write_str("\r\n");
+            // Redraw prompt + current input
+            for &b in PROMPT.as_bytes() {
+                self.serial.write_byte_serial(b);
+            }
+            zenus_console::display::write_str(PROMPT);
+            for &b in &self.line_buf[..self.line_pos] {
+                self.serial.write_byte_serial(b);
+            }
+            let s = core::str::from_utf8(&self.line_buf[..self.line_pos]).unwrap_or("");
+            zenus_console::display::write_str(s);
+        }
+    }
+
+    fn cmd_pipe_test(&mut self, w: &mut ShellWriter) {
+        w.write_str("Running pipe test...\r\n");
+        // Delegate to the `run` command infrastructure
+        self.cmd_run("run /initrd/bin/pipe_test", w);
     }
 
     fn echo_server_poll(&mut self) {

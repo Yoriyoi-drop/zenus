@@ -5,7 +5,7 @@ CARGO_FLAGS ?=
 BUILD_DIR := build
 PROFILE_DIR := $(if $(filter --release,$(CARGO_FLAGS)),release,debug)
 LD := ld.lld
-PROGRAMS := hello echo cat exitonly
+PROGRAMS := hello echo cat exitonly args pipe_test minimal writetest
 
 .PHONY: all clean $(PROGRAMS)
 

@@ -1,0 +1,9 @@
+[package]
+name = "args"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]

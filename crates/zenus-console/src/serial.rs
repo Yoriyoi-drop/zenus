@@ -17,6 +17,89 @@ static OUTPUT_BUF: SpinLock<OutBuf> = SpinLock::new(OutBuf::new());
 static mut DRAIN_BUF: [u8; 256] = [0; 256];
 static mut DRAIN_LEN: usize = 0;
 
+// ── Interrupt-driven serial input ──
+// These buffers collect incoming serial bytes from the UART interrupt
+// handler. The shell polls `take_irq_byte()` in its read_line loop,
+// alongside the existing polling-based read. With IER bit 0 set, the
+// UART asserts IRQ4 on each received byte, which triggers a VM exit
+// on KVM — forcing QEMU to process the host stdin pipe.
+
+struct IrqBuf {
+    data: [u8; 256],
+    head: usize,
+    tail: usize,
+}
+
+impl IrqBuf {
+    const fn new() -> Self {
+        IrqBuf { data: [0; 256], head: 0, tail: 0 }
+    }
+
+    fn push(&mut self, b: u8) {
+        let next = (self.head + 1) % self.data.len();
+        if next != self.tail {
+            self.data[self.head] = b;
+            self.head = next;
+        }
+    }
+
+    fn pop(&mut self) -> Option<u8> {
+        if self.tail == self.head {
+            return None;
+        }
+        let b = self.data[self.tail];
+        self.tail = (self.tail + 1) % self.data.len();
+        Some(b)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tail == self.head
+    }
+}
+
+static IRQ_BUF: SpinLock<IrqBuf> = SpinLock::new(IrqBuf::new());
+
+/// Called from the UART interrupt handler (IRQ4 → vector 36).
+/// Reads one byte directly from the UART data port and stores it in
+/// the interrupt buffer. The caller (handler.rs) already verified
+/// LSR.DR=1, so we skip the redundant Line Status Register check.
+pub fn irq_handler_serial() {
+    let b = read_byte_raw(0x3F8);
+    let mut buf = IRQ_BUF.lock();
+    buf.push(b);
+}
+
+/// Take one byte from the interrupt-driven serial input buffer.
+/// Returns None if the buffer is empty.
+pub fn take_irq_byte() -> Option<u8> {
+    let mut buf = IRQ_BUF.lock();
+    buf.pop()
+}
+
+/// Check if there's data in the interrupt-driven serial input buffer.
+pub fn irq_data_available() -> bool {
+    let buf = IRQ_BUF.lock();
+    !buf.is_empty()
+}
+
+/// Enable UART interrupts: set IER (Interrupt Enable Register) bit 0
+/// to enable "Received Data Available" interrupt.
+/// NOTE: IOAPIC routing must be done separately (in boot code) after
+/// IOAPIC init, because this crate doesn't depend on zenus_arch.
+pub fn enable_serial_interrupts() {
+    // Set IER bit 0: enable received data available interrupt
+    unsafe {
+        core::arch::asm!(
+            "out dx, al",
+            in("dx") 0x3F9u16, in("al") 0x01u8,
+            options(nostack, preserves_flags),
+        );
+        // Also clear any pending interrupt by reading the data port
+        let _drain: u8;
+        core::arch::asm!("in al, dx", out("al") _drain, in("dx") 0x3F8u16, options(nostack, preserves_flags));
+    }
+}
+
 /// Drain all pending serial input. Runs after serial init, before shell.
 /// Uses spin loop with delay (no HLT) to avoid depending on timer interrupts
 /// which may not fire reliably after SMP startup.
@@ -159,6 +242,7 @@ impl SerialPort {
             // Standard 16550 UART init. Writes to IER, DLL, DLM, LCR, FCR, MCR.
             // FCR=0x01 enables the 16-byte FIFO without CLEAR_RCVR (which
             // orphans any pre-FIFO byte in RBR on some QEMU versions).
+            // IER=0x00 initially (interrupts disabled)
             core::arch::asm!("out dx, al", in("dx") 0x3F9u16, in("al") 0x00u8, options(nostack, preserves_flags));
             core::arch::asm!("out dx, al", in("dx") 0x3FBu16, in("al") 0x80u8, options(nostack, preserves_flags));
             core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") 0x01u8, options(nostack, preserves_flags));
@@ -166,6 +250,8 @@ impl SerialPort {
             core::arch::asm!("out dx, al", in("dx") 0x3FBu16, in("al") 0x03u8, options(nostack, preserves_flags));
             core::arch::asm!("out dx, al", in("dx") 0x3FAu16, in("al") 0x01u8, options(nostack, preserves_flags));
             core::arch::asm!("out dx, al", in("dx") 0x3FCu16, in("al") 0x0Bu8, options(nostack, preserves_flags));
+            // IER remains 0x00 — interrupts not enabled yet.
+            // Call register_serial_irq() later to enable them.
         }
     }
 

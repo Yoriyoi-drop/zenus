@@ -347,6 +347,8 @@ pub fn fd_read(fd: u64, buf: &mut [u8]) -> Option<u64> {
 }
 
 pub fn fd_write(fd: u64, buf: &[u8]) -> Option<u64> {
+    // DEBUG: write 'W' to Bochs port when fd_write is entered
+    unsafe { core::arch::asm!("out 0xe9, al", in("al") b'\x57'); }
     // stdout/stderr (fd 1, 2) are special — handle BEFORE table lookup
     // so user tasks without explicit FD entries can still write.
     if fd == 1 || fd == 2 {
