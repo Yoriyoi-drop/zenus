@@ -1,3 +1,4 @@
+use alloc::borrow::ToOwned;
 use alloc::format;
 use zutils_common::{Args, Writer};
 use zenus_console::serial::SerialPort;
@@ -14,6 +15,7 @@ impl Writer for ShellWriter {
     fn write_str(&mut self, s: &str) {
         self.serial.write_str(s);
         zenus_console::vga::write_str(s, self.hhdm_offset);
+        zenus_console::serial::flush_output();
     }
 
     fn write_byte(&mut self, b: u8) {
@@ -22,6 +24,7 @@ impl Writer for ShellWriter {
         if let Ok(s) = core::str::from_utf8(&arr) {
             zenus_console::vga::write_str(s, self.hhdm_offset);
         }
+        zenus_console::serial::flush_output();
     }
 
     fn write_u64(&mut self, v: u64) {
@@ -40,6 +43,7 @@ impl Writer for ShellWriter {
         }
         let s = core::str::from_utf8(&buf[i..]).unwrap_or("");
         zenus_console::vga::write_str(s, self.hhdm_offset);
+        zenus_console::serial::flush_output();
     }
 
     fn write_i64(&mut self, v: i64) {
@@ -67,6 +71,7 @@ impl Writer for ShellWriter {
         }
         let s = core::str::from_utf8(&buf[i..]).unwrap_or("");
         zenus_console::vga::write_str(s, self.hhdm_offset);
+        zenus_console::serial::flush_output();
     }
 
     fn write_ip(&mut self, ip: [u8; 4]) {
@@ -96,14 +101,19 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
 pub struct Shell {
     serial: SerialPort,
     hhdm_offset: u64,
+    line_buf: [u8; MAX_LINE],
+    line_pos: usize,
 }
 
 impl Shell {
     pub fn new() -> Self {
-        Shell {
+        let s = Shell {
             serial: SerialPort::new(0x3F8),
             hhdm_offset: zenus_arch::limine::hhdm_offset(),
-        }
+            line_buf: [0; MAX_LINE],
+            line_pos: 0,
+        };
+        s
     }
 
     fn writer(&mut self) -> ShellWriter {
@@ -138,12 +148,12 @@ impl Shell {
                 }
             };
 
-            let trimmed = line.trim();
+            let trimmed = line.trim().to_owned();
             if trimmed.is_empty() {
                 continue;
             }
 
-            self.execute(trimmed);
+            self.execute(&trimmed);
             zenus_console::serial::flush_output();
 
             // housekeeping after command
@@ -160,12 +170,9 @@ impl Shell {
         }
     }
 
-    fn read_line(&mut self) -> Option<&'static str> {
-        static mut BUF: [u8; MAX_LINE] = [0; MAX_LINE];
-        static mut POS: usize = 0;
+    fn read_line(&mut self) -> Option<alloc::string::String> {
+        self.line_pos = 0;
         let mut idle_count = 0u64;
-
-        unsafe { POS = 0 };
 
         loop {
             let c = if self.serial.is_data_available() {
@@ -175,7 +182,7 @@ impl Shell {
                 let b = zenus_arch::keyboard::read_key().unwrap_or(0);
                 Some(b)
             } else {
-                x86_64::instructions::hlt();
+                unsafe { core::arch::asm!("pause"); }
                 None
             };
 
@@ -185,15 +192,20 @@ impl Shell {
                         self.serial.write_byte_serial(b'\r');
                         self.serial.write_byte_serial(b'\n');
                         zenus_console::vga::write_str("\r\n", self.hhdm_offset);
-                        unsafe {
-                            let s = core::str::from_utf8(&BUF[..POS]).unwrap_or("");
-                            POS = 0;
-                            return if s.is_empty() { None } else { Some(s) };
-                        }
+                        let result = if self.line_pos == 0 {
+                            None
+                        } else {
+                            let s = core::str::from_utf8(&self.line_buf[..self.line_pos])
+                                .unwrap_or("")
+                                .to_owned();
+                            self.line_pos = 0;
+                            Some(s)
+                        };
+                        return result;
                     }
                     b'\x7F' | b'\x08' => {
-                        if unsafe { POS > 0 } {
-                            unsafe { POS -= 1 };
+                        if self.line_pos > 0 {
+                            self.line_pos -= 1;
                             self.serial.write_byte_serial(b'\x08');
                             self.serial.write_byte_serial(b' ');
                             self.serial.write_byte_serial(b'\x08');
@@ -201,16 +213,14 @@ impl Shell {
                         }
                     }
                     0x20..=0x7E => {
-                        unsafe {
-                            if POS < MAX_LINE - 1 {
-                                BUF[POS] = c;
-                                POS += 1;
-                                self.serial.write_byte_serial(c);
-                                zenus_console::vga::write_str(
-                                    core::str::from_utf8(&[c]).unwrap_or(""),
-                                    self.hhdm_offset
-                                );
-                            }
+                        if self.line_pos < MAX_LINE - 1 {
+                            self.line_buf[self.line_pos] = c;
+                            self.line_pos += 1;
+                            self.serial.write_byte_serial(c);
+                            zenus_console::vga::write_str(
+                                core::str::from_utf8(&[c]).unwrap_or(""),
+                                self.hhdm_offset
+                            );
                         }
                     }
                     _ => {
@@ -260,6 +270,11 @@ impl Shell {
             "mount" => zutils_mount::execute(&args, &mut w),
             "pwd" => zutils_pwd::execute(&args, &mut w),
             "df" => zutils_df::execute(&args, &mut w),
+            "zerrors" => {
+                let mut s = SerialPort::new(0x3F8);
+                zenus_console::error::dump_error_catalog(&mut s);
+                zenus_console::serial::flush_output();
+            }
             _ => {
                 if !self.execute_zenus_specific(line, &args, &mut w) {
                     w.write_str("Unknown command: ");
