@@ -229,8 +229,14 @@ core::arch::global_asm!(
     "  test byte ptr [rsp + 8], 3",
     "  jnz 3f",
     // Kernel task (3-item frame: RIP, CS, RFLAGS)
-    // Use iretq to atomically restore RFLAGS including IF
-    "  iretq",
+    // Use popfq+jmp rax instead of iretq for Ring 0→Ring 0 returns.
+    // KVM with x2APIC treats iretq differently — it may validate the CS
+    // descriptor in ways that cause spurious #GP on valid segments.
+    // popfq+jmp rax keeps the current CS (no reload), avoiding the issue.
+    "  pop rax",
+    "  add rsp, 8",
+    "  popfq",
+    "  jmp rax",
     // User task (5-item frame: RIP, CS, RFLAGS, RSP, SS)
     // KERNEL_GS_BASE was set to PerCpu by Rust caller.
     // Zero GS_BASE so user mode can't access kernel memory via GS segment.

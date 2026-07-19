@@ -8,13 +8,12 @@ const PROMPT: &str = "zenus$ ";
 
 struct ShellWriter {
     serial: SerialPort,
-    hhdm_offset: u64,
 }
 
 impl Writer for ShellWriter {
     fn write_str(&mut self, s: &str) {
         self.serial.write_str(s);
-        zenus_console::vga::write_str(s, self.hhdm_offset);
+        zenus_console::display::write_str(s);
         zenus_console::serial::flush_output();
     }
 
@@ -22,7 +21,7 @@ impl Writer for ShellWriter {
         self.serial.write_str_noirq(core::str::from_utf8(&[b]).unwrap_or(""));
         let arr = [b];
         if let Ok(s) = core::str::from_utf8(&arr) {
-            zenus_console::vga::write_str(s, self.hhdm_offset);
+            zenus_console::display::write_str(s);
         }
         zenus_console::serial::flush_output();
     }
@@ -42,7 +41,7 @@ impl Writer for ShellWriter {
             n /= 10;
         }
         let s = core::str::from_utf8(&buf[i..]).unwrap_or("");
-        zenus_console::vga::write_str(s, self.hhdm_offset);
+        zenus_console::display::write_str(s);
         zenus_console::serial::flush_output();
     }
 
@@ -70,7 +69,7 @@ impl Writer for ShellWriter {
             }
         }
         let s = core::str::from_utf8(&buf[i..]).unwrap_or("");
-        zenus_console::vga::write_str(s, self.hhdm_offset);
+        zenus_console::display::write_str(s);
         zenus_console::serial::flush_output();
     }
 
@@ -100,26 +99,22 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
 
 pub struct Shell {
     serial: SerialPort,
-    hhdm_offset: u64,
     line_buf: [u8; MAX_LINE],
     line_pos: usize,
 }
 
 impl Shell {
     pub fn new() -> Self {
-        let s = Shell {
+        Shell {
             serial: SerialPort::new(0x3F8),
-            hhdm_offset: zenus_arch::limine::hhdm_offset(),
             line_buf: [0; MAX_LINE],
             line_pos: 0,
-        };
-        s
+        }
     }
 
     fn writer(&mut self) -> ShellWriter {
         ShellWriter {
             serial: SerialPort::new(0x3F8),
-            hhdm_offset: self.hhdm_offset,
         }
     }
 
@@ -129,7 +124,7 @@ impl Shell {
             // Print prompt immediately, before any yielding
             let mut w = self.writer();
             w.write_str(PROMPT);
-            zenus_console::serial::flush_output();
+            zenus_console::serial::flush_output_blocking();
 
             let line = match self.read_line() {
                 Some(l) => l,
@@ -154,7 +149,7 @@ impl Shell {
             }
 
             self.execute(&trimmed);
-            zenus_console::serial::flush_output();
+            zenus_console::serial::flush_output_blocking();
 
             // housekeeping after command
             yield_count += 1;
@@ -182,7 +177,7 @@ impl Shell {
                 let b = zenus_arch::keyboard::read_key().unwrap_or(0);
                 Some(b)
             } else {
-                unsafe { core::arch::asm!("pause"); }
+                unsafe { core::arch::asm!("sti", "hlt", "cli"); }
                 None
             };
 
@@ -191,7 +186,7 @@ impl Shell {
                     b'\r' | b'\n' => {
                         self.serial.write_byte_serial(b'\r');
                         self.serial.write_byte_serial(b'\n');
-                        zenus_console::vga::write_str("\r\n", self.hhdm_offset);
+                        zenus_console::display::write_str("\r\n");
                         let result = if self.line_pos == 0 {
                             None
                         } else {
@@ -209,7 +204,7 @@ impl Shell {
                             self.serial.write_byte_serial(b'\x08');
                             self.serial.write_byte_serial(b' ');
                             self.serial.write_byte_serial(b'\x08');
-                            zenus_console::vga::write_str("\x08 \x08", self.hhdm_offset);
+                            zenus_console::display::write_str("\x08 \x08");
                         }
                     }
                     0x20..=0x7E => {
@@ -217,9 +212,8 @@ impl Shell {
                             self.line_buf[self.line_pos] = c;
                             self.line_pos += 1;
                             self.serial.write_byte_serial(c);
-                            zenus_console::vga::write_str(
+                            zenus_console::display::write_str(
                                 core::str::from_utf8(&[c]).unwrap_or(""),
-                                self.hhdm_offset
                             );
                         }
                     }
