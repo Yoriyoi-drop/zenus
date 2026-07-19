@@ -8,12 +8,13 @@ const PROMPT: &str = "zenus$ ";
 
 struct ShellWriter {
     serial: SerialPort,
+    hhdm_offset: u64,
 }
 
 impl Writer for ShellWriter {
     fn write_str(&mut self, s: &str) {
         self.serial.write_str(s);
-        zenus_console::display::write_str(s);
+        zenus_console::vga::write_str(s, self.hhdm_offset);
         zenus_console::serial::flush_output();
     }
 
@@ -21,7 +22,7 @@ impl Writer for ShellWriter {
         self.serial.write_str_noirq(core::str::from_utf8(&[b]).unwrap_or(""));
         let arr = [b];
         if let Ok(s) = core::str::from_utf8(&arr) {
-            zenus_console::display::write_str(s);
+            zenus_console::vga::write_str(s, self.hhdm_offset);
         }
         zenus_console::serial::flush_output();
     }
@@ -41,7 +42,7 @@ impl Writer for ShellWriter {
             n /= 10;
         }
         let s = core::str::from_utf8(&buf[i..]).unwrap_or("");
-        zenus_console::display::write_str(s);
+        zenus_console::vga::write_str(s, self.hhdm_offset);
         zenus_console::serial::flush_output();
     }
 
@@ -69,7 +70,7 @@ impl Writer for ShellWriter {
             }
         }
         let s = core::str::from_utf8(&buf[i..]).unwrap_or("");
-        zenus_console::display::write_str(s);
+        zenus_console::vga::write_str(s, self.hhdm_offset);
         zenus_console::serial::flush_output();
     }
 
@@ -99,22 +100,26 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
 
 pub struct Shell {
     serial: SerialPort,
+    hhdm_offset: u64,
     line_buf: [u8; MAX_LINE],
     line_pos: usize,
 }
 
 impl Shell {
     pub fn new() -> Self {
-        Shell {
+        let s = Shell {
             serial: SerialPort::new(0x3F8),
+            hhdm_offset: zenus_arch::limine::hhdm_offset(),
             line_buf: [0; MAX_LINE],
             line_pos: 0,
-        }
+        };
+        s
     }
 
     fn writer(&mut self) -> ShellWriter {
         ShellWriter {
             serial: SerialPort::new(0x3F8),
+            hhdm_offset: self.hhdm_offset,
         }
     }
 
@@ -124,7 +129,7 @@ impl Shell {
             // Print prompt immediately, before any yielding
             let mut w = self.writer();
             w.write_str(PROMPT);
-            zenus_console::serial::flush_output_blocking();
+            zenus_console::serial::flush_output();
 
             let line = match self.read_line() {
                 Some(l) => l,
@@ -149,7 +154,7 @@ impl Shell {
             }
 
             self.execute(&trimmed);
-            zenus_console::serial::flush_output_blocking();
+            zenus_console::serial::flush_output();
 
             // housekeeping after command
             yield_count += 1;
@@ -186,7 +191,7 @@ impl Shell {
                     b'\r' | b'\n' => {
                         self.serial.write_byte_serial(b'\r');
                         self.serial.write_byte_serial(b'\n');
-                        zenus_console::display::write_str("\r\n");
+                        zenus_console::vga::write_str("\r\n", self.hhdm_offset);
                         let result = if self.line_pos == 0 {
                             None
                         } else {
@@ -204,7 +209,7 @@ impl Shell {
                             self.serial.write_byte_serial(b'\x08');
                             self.serial.write_byte_serial(b' ');
                             self.serial.write_byte_serial(b'\x08');
-                            zenus_console::display::write_str("\x08 \x08");
+                            zenus_console::vga::write_str("\x08 \x08", self.hhdm_offset);
                         }
                     }
                     0x20..=0x7E => {
@@ -212,8 +217,9 @@ impl Shell {
                             self.line_buf[self.line_pos] = c;
                             self.line_pos += 1;
                             self.serial.write_byte_serial(c);
-                            zenus_console::display::write_str(
+                            zenus_console::vga::write_str(
                                 core::str::from_utf8(&[c]).unwrap_or(""),
+                                self.hhdm_offset
                             );
                         }
                     }
@@ -337,7 +343,6 @@ impl Shell {
             "firewall-list" => self.cmd_firewall_list(w),
             "firewall-add" => self.cmd_firewall_add(line, w),
             "firewall-remove" => self.cmd_firewall_remove(line, w),
-            "run" => self.cmd_run(line, w),
             _ => return false,
         }
         true
@@ -1109,52 +1114,6 @@ impl Shell {
             w.write_str("firewall-remove: rule removed\r\n");
         } else {
             w.write_str("firewall-remove: no rule at that index\r\n");
-        }
-    }
-
-    fn cmd_run(&mut self, line: &str, w: &mut ShellWriter) {
-        let args = Args::parse(line);
-        let path = args.args().first().unwrap_or(&"");
-        if path.is_empty() {
-            w.write_str("Usage: run <path>\r\n");
-            return;
-        }
-        let full_path = alloc::format!("/initrd/bin/{}", path);
-        let new_cr3 = match zenus_mem::paging::create_address_space() {
-            Some(c) => c,
-            None => { w.write_str("run: failed to create address space\r\n"); return; }
-        };
-        let loaded = match zenus_syscall::elf::load_elf(&full_path, new_cr3) {
-            Some(e) => e,
-            None => {
-                zenus_mem::paging::destroy_address_space(new_cr3);
-                w.write_str("run: ELF not found or invalid\r\n");
-                return;
-            }
-        };
-        let pid = zenus_sched::scheduler::create_user_task(
-            loaded.entry, 65536, loaded.stack_top, new_cr3, loaded.heap_base,
-        );
-        if pid == 0 {
-            zenus_mem::paging::destroy_address_space(new_cr3);
-            w.write_str("run: failed to create task\r\n");
-            return;
-        }
-        w.write_str("Started PID ");
-        w.write_u64(pid);
-        w.write_str("\r\n");
-        let ppid = zenus_sched::scheduler::current_task_id();
-        loop {
-            zenus_sched::scheduler::yield_now();
-            if let Some((exited_pid, exit_code)) = zenus_sched::scheduler::wait_for_child(ppid, pid, 1) {
-                w.write_str("PID ");
-                w.write_u64(exited_pid);
-                w.write_str(" exited with code ");
-                w.write_u64(exit_code);
-                w.write_str("\r\n");
-                zenus_sched::scheduler::reap_task(exited_pid);
-                break;
-            }
         }
     }
 
