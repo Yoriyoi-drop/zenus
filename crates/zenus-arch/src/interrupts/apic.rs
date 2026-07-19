@@ -134,8 +134,8 @@ fn remap_pic() {
         core::arch::asm!("out 0xA1, al", in("al") 0x02u8);
         core::arch::asm!("out 0xA1, al", in("al") 0x01u8);
 
-        // Keep IRQ0 (PIT) unmasked; mask everything else
-        core::arch::asm!("out 0x21, al", in("al") 0xFEu8);
+        // Keep IRQ0 (PIT) and IRQ1 (keyboard) unmasked; mask everything else
+        core::arch::asm!("out 0x21, al", in("al") 0xFCu8);
         core::arch::asm!("out 0xA1, al", in("al") 0xFFu8);
     }
 }

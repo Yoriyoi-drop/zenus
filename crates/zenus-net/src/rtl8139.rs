@@ -150,17 +150,14 @@ impl Rtl8139 {
     pub fn probe_and_init() -> Option<&'static mut Self> {
         let mut found: Option<(u16, [u8; 6], u8)> = None;
 
-        for i in 0..zenus_arch::pci::MAX_PCI_DEVICES {
-            unsafe {
-                let dev = &zenus_arch::pci::PCI_DEVICES[i];
-                if dev.vendor_id == 0 && dev.device_id == 0 {
-                    break;
-                }
+        let count = zenus_arch::pci::get_device_count();
+        for i in 0..count {
+            if let Some(dev) = zenus_arch::pci::get_device(i) {
                 if dev.vendor_id == RTL_VENDOR && dev.device_id == RTL_DEVICE {
                     let io_base = (dev.bar0 & 0xFFFFFFF0) as u16;
                     let irq_line = dev.interrupt_line;
 
-                    zenus_arch::pci::enable_bus_master(dev.bus, dev.device, dev.function);
+                    unsafe { zenus_arch::pci::enable_bus_master(dev.bus, dev.device, dev.function); }
 
                     let mac = Self::read_mac_from_nic(io_base);
                     found = Some((io_base, mac, irq_line));
@@ -397,7 +394,10 @@ impl Rtl8139 {
     }
 
     pub fn handle_irq() {
-    let _rtl_guard = RTL_LOCK.lock_no_irq();
+    let guard = match RTL_LOCK.try_lock_no_irq() {
+        Some(g) => g,
+        None => return,
+    };
     let io_base = NIC_IO_BASE.load(core::sync::atomic::Ordering::Relaxed);
     if io_base == 0 { return; }
     unsafe {
@@ -412,6 +412,7 @@ impl Rtl8139 {
             }
         }
     }
+    drop(guard);
 }
 
     pub fn poll(&mut self) {

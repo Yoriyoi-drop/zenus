@@ -30,16 +30,21 @@ pub fn get_random_page_aligned(min: u64, max: u64) -> u64 {
 }
 
 pub fn init_rng() {
-    let rtc = crate::rtc::read_time();
-    let seed = (rtc.year as u64) << 32
-        | (rtc.month as u64) << 24
-        | (rtc.day as u64) << 16
-        | (rtc.hour as u64) << 8
-        | (rtc.minute as u64);
+    // Gunakan boot_time (dari static, TANPA I/O hardware) + TSC + PIT ticks
+    // untuk menghindari pembacaan RTC hardware kedua yang bisa hang.
+    let boot_entropy = match crate::rtc::boot_time() {
+        Some(t) => (t.year as u64) << 32
+            | (t.month as u64) << 24
+            | (t.day as u64) << 16
+            | (t.hour as u64) << 8
+            | (t.minute as u64)
+            | (t.second as u64),
+        None => 0,
+    };
     let ticks = crate::interrupts::pit::get_ticks();
-    let mut mixed = seed.wrapping_mul(6364136223846793005)
-        .wrapping_add(ticks)
-        .wrapping_add(rtc.second as u64);
+    let mut mixed = boot_entropy
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(ticks);
     let cycles = unsafe { core::arch::x86_64::_rdtsc() };
     mixed = mixed.wrapping_mul(2685821657736338717).wrapping_add(cycles);
     PRNG_STATE.store(mixed, Ordering::Relaxed);

@@ -33,6 +33,8 @@ pub extern "x86-interrupt" fn interrupt_timer(_frame: InterruptStackFrame) {
 #[no_mangle]
 pub extern "x86-interrupt" fn interrupt_keyboard(_frame: InterruptStackFrame) {
     crate::keyboard::handle_irq1();
+    // PIC EOI (master) — required if IRQ1 ever touches the PIC path
+    unsafe { core::arch::asm!("out 0x20, al", in("al") 0x20u8); }
     crate::interrupts::apic::eoi();
 }
 

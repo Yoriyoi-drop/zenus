@@ -12,3 +12,4 @@ zenus-mem = { path = "../zenus-mem" }
 zenus-sched = { path = "../zenus-sched" }
 zenus-sync = { path = "../zenus-sync" }
 zenus-ns = { path = "../zenus-ns" }
+zenus-net = { path = "../zenus-net" }

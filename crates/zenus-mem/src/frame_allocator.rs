@@ -224,14 +224,22 @@ unsafe impl FrameAllocatorTrait<Size4KiB> for FrameAllocator {
 /// Reserve the physical pages that contain the kernel's boot stack (provided by
 /// the bootloader, not tracked in the memory map). This must be called after
 /// `global_init()` and before any frame allocator user that might get a stack page.
+///
+/// The kernel's initialization path (PCI, ATA, network, VFS, namespaces, etc.)
+/// uses a substantial amount of stack space. After init, the shell runs directly
+/// on the boot stack with interrupts enabled. When the PIT timer ISR fires
+/// during `sti; hlt; cli` in the shell's readline loop, ~1-2 KiB of additional
+/// stack is consumed by the ISR and its callees (schedule_tick, flush_output,
+/// pit::tick, etc.). A 512 KiB reservation ensures the ISR never overflows the
+/// stack and corrupts the shell's local variables.
 pub fn reserve_boot_stack(hhdm_offset: u64) {
     let rsp: u64;
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags)); }
     let rsp_phys = rsp.wrapping_sub(hhdm_offset);
-    // Round down to page boundary, then reserve 64 KiB (16 pages) below current RSP
-    let stack_page_base = (rsp_phys - 65536) & !0xFFF;
+    // Round down to page boundary, then reserve 512 KiB (128 pages) below current RSP
+    let stack_page_base = (rsp_phys - 524288) & !0xFFF;
     let mut fa = FRAME_ALLOCATOR.lock();
-    fa.reserve_region(stack_page_base, 65536 + PAGE_SIZE as u64);
+    fa.reserve_region(stack_page_base, 524288 + PAGE_SIZE as u64);
 }
 
 pub fn global_init(memory_map: &[MemoryRegion]) {

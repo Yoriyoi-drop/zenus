@@ -1,4 +1,5 @@
 use crate::ethernet;
+use zenus_sync::spinlock::SpinLock;
 
 const HARDWARE_TYPE_ETH: u16 = 0x0001;
 const PROTOCOL_TYPE_IPV4: u16 = 0x0800;
@@ -7,7 +8,15 @@ const ARP_REPLY: u16 = 0x0002;
 
 const ARP_CACHE_SIZE: usize = 16;
 
-static mut ARP_GATEWAY: [u8; 4] = [10, 0, 2, 2];
+struct ArpState {
+    gateway: [u8; 4],
+    cache: [ArpEntry; ARP_CACHE_SIZE],
+}
+
+static ARP_STATE: SpinLock<ArpState> = SpinLock::new(ArpState {
+    gateway: [10, 0, 2, 2],
+    cache: [ArpEntry { ip: [0; 4], mac: [0; 6], valid: false }; ARP_CACHE_SIZE],
+});
 
 #[derive(Clone, Copy)]
 struct ArpEntry {
@@ -16,18 +25,15 @@ struct ArpEntry {
     valid: bool,
 }
 
-static mut ARP_CACHE: [ArpEntry; ARP_CACHE_SIZE] = [ArpEntry { ip: [0; 4], mac: [0; 6], valid: false }; ARP_CACHE_SIZE];
-
 pub fn set_gateway(gw: [u8; 4]) {
-    unsafe { ARP_GATEWAY = gw; }
+    ARP_STATE.lock().gateway = gw;
 }
 
 fn arp_lookup(target_ip: [u8; 4]) -> Option<[u8; 6]> {
-    unsafe {
-        for i in 0..ARP_CACHE_SIZE {
-            if ARP_CACHE[i].valid && ARP_CACHE[i].ip == target_ip {
-                return Some(ARP_CACHE[i].mac);
-            }
+    let state = ARP_STATE.lock();
+    for i in 0..ARP_CACHE_SIZE {
+        if state.cache[i].valid && state.cache[i].ip == target_ip {
+            return Some(state.cache[i].mac);
         }
     }
     None
@@ -36,29 +42,28 @@ fn arp_lookup(target_ip: [u8; 4]) -> Option<[u8; 6]> {
 pub fn add_static(ip: [u8; 4], mac: [u8; 6]) {
     arp_insert(ip, mac);
 }
+
 fn arp_insert(ip: [u8; 4], mac: [u8; 6]) {
-    unsafe {
-        if ip == ARP_GATEWAY {
+    let mut state = ARP_STATE.lock();
+    if ip == state.gateway {
+        return;
+    }
+    for i in 0..ARP_CACHE_SIZE {
+        if !state.cache[i].valid {
+            state.cache[i] = ArpEntry { ip, mac, valid: true };
             return;
         }
-        for i in 0..ARP_CACHE_SIZE {
-            if !ARP_CACHE[i].valid {
-                ARP_CACHE[i] = ArpEntry { ip, mac, valid: true };
+        if state.cache[i].ip == ip {
+            if state.cache[i].mac != mac {
                 return;
             }
-            if ARP_CACHE[i].ip == ip {
-                if ARP_CACHE[i].mac != mac {
-                    return;
-                }
-                return;
-            }
+            return;
         }
-        // All slots full: evict oldest non-gateway entry
-        for i in 1..ARP_CACHE_SIZE {
-            if ARP_CACHE[i].ip != ARP_GATEWAY {
-                ARP_CACHE[i] = ArpEntry { ip, mac, valid: true };
-                return;
-            }
+    }
+    for i in 1..ARP_CACHE_SIZE {
+        if state.cache[i].ip != state.gateway {
+            state.cache[i] = ArpEntry { ip, mac, valid: true };
+            return;
         }
     }
 }

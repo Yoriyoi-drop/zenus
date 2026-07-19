@@ -17,6 +17,12 @@ struct KeyboardState {
     buf: [u8; 256],
     read_idx: usize,
     write_idx: usize,
+    /// Set when 0xE0 prefix byte was received (extended scancode sequence).
+    e0_prefix: bool,
+    /// Pending multi-byte sequence to return from read_key() (e.g., ESC [ A for up arrow).
+    pending: [u8; 4],
+    pending_len: usize,
+    pending_pos: usize,
 }
 
 static KEYBOARD: SpinLock<KeyboardState> = SpinLock::new(KeyboardState {
@@ -25,6 +31,10 @@ static KEYBOARD: SpinLock<KeyboardState> = SpinLock::new(KeyboardState {
     buf: [0; 256],
     read_idx: 0,
     write_idx: 0,
+    e0_prefix: false,
+    pending: [0; 4],
+    pending_len: 0,
+    pending_pos: 0,
 });
 
 static KEY_PRESSED: AtomicBool = AtomicBool::new(false);
@@ -88,6 +98,34 @@ pub fn init() {
     zenus_console::kinfo!("PS/2 Keyboard initialized");
 }
 
+/// Extended scancode (Set 1) → escape sequence mapping for arrow/navigation keys.
+/// Format: byte sequence stored in pending buffer (e.g., [0x1B, 0x5B, 0x41] for up arrow).
+fn extended_to_escape(scancode: u8) -> ([u8; 4], usize) {
+    match scancode & 0x7F {
+        0x48 => ([0x1B, 0x5B, 0x41, 0], 3), // Up    → ESC [ A
+        0x50 => ([0x1B, 0x5B, 0x42, 0], 3), // Down  → ESC [ B
+        0x4D => ([0x1B, 0x5B, 0x43, 0], 3), // Right → ESC [ C
+        0x4B => ([0x1B, 0x5B, 0x44, 0], 3), // Left  → ESC [ D
+        0x47 => ([0x1B, 0x5B, 0x48, 0], 3), // Home  → ESC [ H
+        0x4F => ([0x1B, 0x5B, 0x46, 0], 3), // End   → ESC [ F
+        0x52 => ([0x1B, 0x5B, 0x32, 0x7E], 4), // Insert → ESC [ 2 ~
+        0x53 => ([0x1B, 0x5B, 0x33, 0x7E], 4), // Delete → ESC [ 3 ~
+        0x49 => ([0x1B, 0x5B, 0x35, 0x7E], 4), // PgUp  → ESC [ 5 ~
+        0x51 => ([0x1B, 0x5B, 0x36, 0x7E], 4), // PgDn  → ESC [ 6 ~
+        _    => ([0, 0, 0, 0], 0),
+    }
+}
+
+/// Push a byte into the keyboard circular buffer.
+fn push_byte(kbd: &mut KeyboardState, b: u8) {
+    let wi = kbd.write_idx;
+    let next = (wi + 1) % 256;
+    if next != kbd.read_idx {
+        kbd.buf[wi] = b;
+        kbd.write_idx = next;
+    }
+}
+
 pub fn handle_irq1() {
     let mut data = Port::<u8>::new(KB_DATA);
     let scancode: u8;
@@ -95,14 +133,33 @@ pub fn handle_irq1() {
         scancode = data.read();
     }
 
+    let mut kbd = KEYBOARD.lock();
+
+    // ── Extended scancode (0xE0 prefix) handling ──
     if scancode == 0xE0 {
+        kbd.e0_prefix = true;
         return;
     }
 
+    if kbd.e0_prefix {
+        kbd.e0_prefix = false;
+        // Only handle key-down events for extended keys
+        if (scancode & 0x80) == 0 {
+            let (seq, len) = extended_to_escape(scancode);
+            if len > 0 {
+                kbd.pending = seq;
+                kbd.pending_len = len;
+                kbd.pending_pos = 0;
+                KEY_PRESSED.store(true, Ordering::Release);
+            }
+        }
+        return;
+    }
+
+    // ── Standard scancode handling ──
     let key_down = (scancode & 0x80) == 0;
     let key = scancode & 0x7F;
 
-    let mut kbd = KEYBOARD.lock();
     if key == 0x2A || key == 0x36 {
         kbd.shift = key_down;
         return;
@@ -122,12 +179,7 @@ pub fn handle_irq1() {
         }
 
         if c != 0 {
-            let wi = kbd.write_idx;
-            let next = (wi + 1) % 256;
-            if next != kbd.read_idx {
-                kbd.buf[wi] = c;
-                kbd.write_idx = next;
-            }
+            push_byte(&mut kbd, c);
         }
         KEY_PRESSED.store(true, Ordering::Release);
     }
@@ -135,10 +187,23 @@ pub fn handle_irq1() {
 
 pub fn read_key() -> Option<u8> {
     let mut kbd = KEYBOARD.lock();
+    // Return from pending escape sequence first (e.g., ESC [ A for up arrow)
+    if kbd.pending_pos < kbd.pending_len {
+        let b = kbd.pending[kbd.pending_pos];
+        kbd.pending_pos += 1;
+        // Clear pending when fully consumed
+        if kbd.pending_pos >= kbd.pending_len {
+            kbd.pending_len = 0;
+            kbd.pending_pos = 0;
+        }
+        drop(kbd);
+        return Some(b);
+    }
+    // Then return from keyboard buffer
     if kbd.read_idx != kbd.write_idx {
         let c = kbd.buf[kbd.read_idx];
         kbd.read_idx = (kbd.read_idx + 1) % kbd.buf.len();
-        let avail = kbd.read_idx != kbd.write_idx;
+        let avail = kbd.read_idx != kbd.write_idx || kbd.pending_pos < kbd.pending_len;
         drop(kbd);
         KEY_PRESSED.store(avail, Ordering::Release);
         Some(c)
@@ -151,5 +216,72 @@ pub fn read_key() -> Option<u8> {
 
 pub fn is_key_available() -> bool {
     let kbd = KEYBOARD.lock();
-    kbd.read_idx != kbd.write_idx
+    kbd.read_idx != kbd.write_idx || kbd.pending_pos < kbd.pending_len
+}
+
+/// Direct PS/2 controller polling — bypass IRQ1 entirely.
+/// Checks status register (0x64) bit 0 for data ready, reads scancode from 0x60,
+/// translates to ASCII via SCANCODE_SET1, pushes into keyboard buffer.
+/// Returns true if a byte was pushed.
+pub fn poll_ps2_controller() -> bool {
+    let status: u8;
+    unsafe {
+        core::arch::asm!("in al, dx", out("al") status, in("dx") 0x64u16, options(nostack, preserves_flags));
+    }
+    if status & 0x01 == 0 {
+        return false;
+    }
+    let scancode: u8;
+    unsafe {
+        core::arch::asm!("in al, dx", out("al") scancode, in("dx") 0x60u16, options(nostack, preserves_flags));
+    }
+
+    let mut kbd = KEYBOARD.lock();
+
+    if scancode == 0xE0 {
+        kbd.e0_prefix = true;
+        return true;
+    }
+    if kbd.e0_prefix {
+        kbd.e0_prefix = false;
+        if (scancode & 0x80) == 0 {
+            let (seq, len) = extended_to_escape(scancode);
+            if len > 0 {
+                kbd.pending = seq;
+                kbd.pending_len = len;
+                kbd.pending_pos = 0;
+                KEY_PRESSED.store(true, Ordering::Release);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    let key_down = (scancode & 0x80) == 0;
+    let key = scancode & 0x7F;
+
+    if key == 0x2A || key == 0x36 {
+        kbd.shift = key_down;
+        return false;
+    }
+    if key == 0x3A && key_down {
+        kbd.caps = !kbd.caps;
+        return false;
+    }
+
+    if key_down && key < 128 {
+        let base = if kbd.shift { SCANCODE_SHIFT } else { SCANCODE_SET1 };
+        let mut c = base[key as usize];
+        if kbd.caps && c >= b'a' && c <= b'z' {
+            c -= 32;
+        } else if kbd.caps && c >= b'A' && c <= b'Z' {
+            c += 32;
+        }
+        if c != 0 {
+            push_byte(&mut kbd, c);
+            KEY_PRESSED.store(true, Ordering::Release);
+            return true;
+        }
+    }
+    false
 }

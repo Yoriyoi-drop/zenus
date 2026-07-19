@@ -1,4 +1,5 @@
 use x86_64::instructions::port::Port;
+use zenus_sync::spinlock::SpinLock;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PciDevice {
@@ -23,8 +24,35 @@ pub struct PciDevice {
 }
 
 pub const MAX_PCI_DEVICES: usize = 256;
-pub static mut PCI_DEVICES: [PciDevice; MAX_PCI_DEVICES] = unsafe { core::mem::zeroed() };
-static mut PCI_COUNT: usize = 0;
+
+struct PciState {
+    devices: [PciDevice; MAX_PCI_DEVICES],
+    count: usize,
+}
+
+static PCI_STATE: SpinLock<PciState> = SpinLock::new(PciState {
+    devices: [PciDevice {
+        bus: 0, device: 0, function: 0,
+        vendor_id: 0, device_id: 0, class_code: 0, subclass: 0,
+        prog_if: 0, revision: 0, header_type: 0,
+        bar0: 0, bar1: 0, bar2: 0, bar3: 0, bar4: 0, bar5: 0,
+        interrupt_line: 0, interrupt_pin: 0,
+    }; MAX_PCI_DEVICES],
+    count: 0,
+});
+
+pub fn get_device_count() -> usize {
+    PCI_STATE.lock().count
+}
+
+pub fn get_device(idx: usize) -> Option<PciDevice> {
+    let state = PCI_STATE.lock();
+    if idx < state.count {
+        Some(state.devices[idx])
+    } else {
+        None
+    }
+}
 
 const PCI_CONFIG_ADDR: u16 = 0xCF8;
 const PCI_CONFIG_DATA: u16 = 0xCFC;
@@ -68,7 +96,6 @@ unsafe fn scan_all_buses() -> usize {
     }
 
     let mut total = 0usize;
-    // Check if bus 0 has multiple buses via PCI bridge
     let max_bus = if is_multi_bus_system() { 256 } else { 1 };
     for bus in 0..max_bus {
         total += scan_bus(bus as u8);
@@ -77,7 +104,6 @@ unsafe fn scan_all_buses() -> usize {
 }
 
 unsafe fn is_multi_bus_system() -> bool {
-    // Check if there's a PCI-PCI bridge on bus 0
     for dev in 0..32 {
         let class_reg = pci_read_config(0, dev, 0, 8);
         let class_code = ((class_reg >> 24) & 0xFF) as u8;
@@ -85,7 +111,6 @@ unsafe fn is_multi_bus_system() -> bool {
         if class_code == 0x06 && subclass == 0x04 {
             return true;
         }
-        // Check multi-function devices that might be bridges
         let header_type = (pci_read_config(0, dev, 0, 0x0E) >> 16) as u8;
         if (header_type & 0x80) != 0 {
             for func in 1..8 {
@@ -105,6 +130,7 @@ unsafe fn is_multi_bus_system() -> bool {
 
 unsafe fn scan_bus(bus: u8) -> usize {
     let mut devices = 0;
+    let mut state = PCI_STATE.lock();
     for dev in 0..32 {
         let vid_did = pci_read_config(bus, dev, 0, 0);
         if (vid_did & 0xFFFF) != 0xFFFF {
@@ -115,9 +141,10 @@ unsafe fn scan_bus(bus: u8) -> usize {
                 let f_vid_did = pci_read_config(bus, dev, func, 0);
                 if (f_vid_did & 0xFFFF) != 0xFFFF {
                     let device = read_device(bus, dev, func);
-                    if PCI_COUNT < MAX_PCI_DEVICES {
-                        PCI_DEVICES[PCI_COUNT] = device;
-                        PCI_COUNT += 1;
+                    let idx = state.count;
+                    if idx < MAX_PCI_DEVICES {
+                        state.devices[idx] = device;
+                        state.count = idx + 1;
                         devices += 1;
                         log_device(&device);
                     }

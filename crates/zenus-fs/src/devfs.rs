@@ -1,4 +1,5 @@
 use crate::vfs::{FileSystem, FileType, FileStat, DirEntry};
+use zenus_sync::spinlock::SpinLock;
 
 const MAX_BLOCK_DEVS: usize = 8;
 
@@ -14,49 +15,67 @@ const DEVFS_TYPES: [FileType; 4] = [FileType::CharDevice, FileType::CharDevice, 
 const DEVFS_INODES: [u64; 4] = [1, 2, 3, 4];
 
 const BLOCK_INODE_BASE: u64 = 64;
-static mut BLOCK_DEVS: [Option<(&'static str, BlockDeviceOps)>; MAX_BLOCK_DEVS] = [None; MAX_BLOCK_DEVS];
-static mut BLOCK_DEV_COUNT: usize = 0;
+
+struct BlockDevState {
+    devs: [Option<(&'static str, BlockDeviceOps)>; MAX_BLOCK_DEVS],
+    count: usize,
+}
+
+static BLOCK_DEV_STATE: SpinLock<BlockDevState> = SpinLock::new(BlockDevState {
+    devs: [None; MAX_BLOCK_DEVS],
+    count: 0,
+});
+
+fn with_block_devs<R>(f: impl FnOnce(&BlockDevState) -> R) -> R {
+    let state = BLOCK_DEV_STATE.lock();
+    f(&state)
+}
+
+fn with_block_devs_mut<R>(f: impl FnOnce(&mut BlockDevState) -> R) -> R {
+    let mut state = BLOCK_DEV_STATE.lock();
+    f(&mut state)
+}
 
 pub fn block_device_read(dev_idx: usize, lba: u64, buf: &mut [u8]) -> bool {
-    unsafe {
-        BLOCK_DEVS.get(dev_idx).and_then(|o| o.as_ref()).map(|(_, ops)| {
+    with_block_devs(|state| {
+        state.devs.get(dev_idx).and_then(|o| o.as_ref()).map(|(_, ops)| {
             (ops.read)(lba, buf)
         }).unwrap_or(false)
-    }
+    })
 }
 
 pub fn block_device_write(dev_idx: usize, lba: u64, buf: &[u8]) -> bool {
-    unsafe {
-        BLOCK_DEVS.get(dev_idx).and_then(|o| o.as_ref()).map(|(_, ops)| {
+    with_block_devs(|state| {
+        state.devs.get(dev_idx).and_then(|o| o.as_ref()).map(|(_, ops)| {
             (ops.write)(lba, buf)
         }).unwrap_or(false)
-    }
+    })
 }
 
 pub fn register_block_device(name: &'static str, ops: BlockDeviceOps) -> bool {
-    unsafe {
-        if BLOCK_DEV_COUNT >= MAX_BLOCK_DEVS {
+    with_block_devs_mut(|state| {
+        if state.count >= MAX_BLOCK_DEVS {
             return false;
         }
-        BLOCK_DEVS[BLOCK_DEV_COUNT] = Some((name, ops));
-        BLOCK_DEV_COUNT += 1;
-    }
-    true
+        state.devs[state.count] = Some((name, ops));
+        state.count += 1;
+        true
+    })
 }
 
 pub fn block_device_count() -> usize {
-    unsafe { BLOCK_DEV_COUNT }
+    with_block_devs(|state| state.count)
 }
 
 pub struct DevFs;
 
 impl DevFs {
     fn block_entry_at(&self, idx: usize) -> Option<DirEntry> {
-        unsafe {
-            BLOCK_DEVS.get(idx).and_then(|o| o.as_ref()).map(|(name, _)| {
+        with_block_devs(|state| {
+            state.devs.get(idx).and_then(|o| o.as_ref()).map(|(name, _)| {
                 DirEntry { name: alloc::string::String::from(*name), file_type: FileType::BlockDevice, inode: BLOCK_INODE_BASE + idx as u64 }
             })
-        }
+        })
     }
 }
 
@@ -75,25 +94,24 @@ impl FileSystem for DevFs {
                 return Some(DEVFS_INODES[i]);
             }
         }
-        // Check block devices
-        unsafe {
-            for i in 0..BLOCK_DEV_COUNT {
-                if let Some((n, _)) = &BLOCK_DEVS[i] {
+        with_block_devs(|state| {
+            for i in 0..state.count {
+                if let Some((n, _)) = &state.devs[i] {
                     if *n == name {
                         return Some(BLOCK_INODE_BASE + i as u64);
                     }
                 }
             }
-        }
-        None
+            None
+        })
     }
 
     fn read(&self, inode: u64, offset: u64, buf: &mut [u8]) -> Option<u64> {
         if inode >= BLOCK_INODE_BASE {
             let idx = (inode - BLOCK_INODE_BASE) as usize;
-            unsafe {
-                if idx < BLOCK_DEVS.len() {
-                    if let Some((_, ops)) = &BLOCK_DEVS[idx] {
+            return with_block_devs(|state| {
+                if idx < state.devs.len() {
+                    if let Some((_, ops)) = &state.devs[idx] {
                         let sector = offset / 512;
                         let off_in_sector = (offset % 512) as usize;
                         let mut sector_buf = [0u8; 512];
@@ -105,7 +123,8 @@ impl FileSystem for DevFs {
                         return Some(copy_len as u64);
                     }
                 }
-            }
+                Some(0)
+            });
         }
         Some(0)
     }
@@ -128,9 +147,9 @@ impl FileSystem for DevFs {
             }
             _ if inode >= BLOCK_INODE_BASE => {
                 let idx = (inode - BLOCK_INODE_BASE) as usize;
-                unsafe {
-                    if idx < BLOCK_DEVS.len() {
-                        if let Some((_, ops)) = &BLOCK_DEVS[idx] {
+                with_block_devs_mut(|state| {
+                    if idx < state.devs.len() {
+                        if let Some((_, ops)) = &state.devs[idx] {
                             let sector = offset / 512;
                             let off_in_sector = (offset % 512) as usize;
                             let mut sector_buf = [0u8; 512];
@@ -147,8 +166,8 @@ impl FileSystem for DevFs {
                             return Some(copy_len as u64);
                         }
                     }
-                }
-                None
+                    None
+                })
             }
             _ => None,
         }
@@ -166,10 +185,10 @@ impl FileSystem for DevFs {
                 inode: DEVFS_INODES[i],
             });
         }
-        unsafe {
-            for i in 0..BLOCK_DEV_COUNT {
-                if entries.len() >= 12 { break; }
-                if let Some((name, _)) = &BLOCK_DEVS[i] {
+        with_block_devs(|state| {
+            for i in 0..state.count {
+                if entries.len() >= 12 { return; }
+                if let Some((name, _)) = &state.devs[i] {
                     entries.push(DirEntry {
                         name: alloc::string::String::from(*name),
                         file_type: FileType::BlockDevice,
@@ -177,7 +196,7 @@ impl FileSystem for DevFs {
                     });
                 }
             }
-        }
+        });
         entries
     }
 
@@ -192,15 +211,15 @@ impl FileSystem for DevFs {
             3 => dev_mode(FileType::CharDevice),
             4 => dev_mode(FileType::CharDevice),
             _ if inode >= BLOCK_INODE_BASE => {
-                let idx = (inode - BLOCK_INODE_BASE) as usize;
-                unsafe {
-                    if idx < BLOCK_DEVS.len() {
-                        if let Some((_, ops)) = &BLOCK_DEVS[idx] {
+                with_block_devs(|state| {
+                    let idx = (inode - BLOCK_INODE_BASE) as usize;
+                    if idx < state.devs.len() {
+                        if let Some((_, ops)) = &state.devs[idx] {
                             return FileStat { size: ops.size, file_type: FileType::BlockDevice, inode, blocks: ops.size / 512, uid: 0, gid: 0, mode: 0o660 };
                         }
                     }
-                }
-                FileStat { size: 0, file_type: FileType::BlockDevice, inode, blocks: 0, uid: 0, gid: 0, mode: 0o660 }
+                    FileStat { size: 0, file_type: FileType::BlockDevice, inode, blocks: 0, uid: 0, gid: 0, mode: 0o660 }
+                })
             }
             _ => FileStat { size: 0, file_type: FileType::None, inode, blocks: 0, uid: 0, gid: 0, mode: 0 },
         }

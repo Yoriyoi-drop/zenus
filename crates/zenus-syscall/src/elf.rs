@@ -63,7 +63,8 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
     let phnum = header.e_phnum as usize;
 
     if phentsize != core::mem::size_of::<Elf64Phdr>() { return None; }
-    if phoff + phnum * phentsize > data.len() { return None; }
+    let phdr_end = phoff.checked_add(phnum.checked_mul(phentsize)?)?;
+    if phdr_end > data.len() { return None; }
 
     // Validate entry is a canonical user-space virtual address
     if header.e_entry < 0x1000 || header.e_entry >= 0x0000_8000_0000_0000 {
@@ -405,7 +406,7 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
 
     if phentsize != core::mem::size_of::<Elf64Phdr>() { return None; }
 
-    let phdr_size = phnum * phentsize;
+    let phdr_size = phnum.checked_mul(phentsize)?;
     let mut phdr_buf: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(phdr_size);
     phdr_buf.resize(phdr_size, 0);
     node.fs.read(node.inode, phoff, &mut phdr_buf)?;

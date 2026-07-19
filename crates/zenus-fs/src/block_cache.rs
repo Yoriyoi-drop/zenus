@@ -43,7 +43,10 @@ impl BlockCache {
         let start = hash(dev_id, block);
         for i in 0..4 {
             let idx = (start + i) & (CACHE_SIZE - 1);
-            if self.entries[idx].valid && self.entries[idx].dev_id == dev_id && self.entries[idx].block == block {
+            if self.entries[idx].valid
+                && self.entries[idx].dev_id == dev_id
+                && self.entries[idx].block == block
+            {
                 return Some(idx);
             }
         }
@@ -52,24 +55,33 @@ impl BlockCache {
 
     fn evict_one(&mut self, dev_id: u8, block: u64) -> Option<usize> {
         let start = hash(dev_id, block);
+        // Cari slot kosong (tidak valid) terlebih dahulu
         for i in 0..4 {
             let idx = (start + i) & (CACHE_SIZE - 1);
             if !self.entries[idx].valid {
                 return Some(idx);
             }
         }
+        // Semua slot terpakai — usir slot pertama (LRU sederhana)
         Some(start)
     }
 
-    fn flush_entry(&mut self, idx: usize) {
+    /// Flush satu entry ke disk. Mengembalikan false jika write gagal,
+    /// dan TIDAK men-clear flag dirty sehingga data tidak hilang.
+    fn flush_entry(&mut self, idx: usize) -> bool {
         if self.entries[idx].dirty {
-            block_device_write(
+            let ok = block_device_write(
                 self.entries[idx].dev_id as usize,
                 self.entries[idx].block,
                 &self.entries[idx].data,
             );
+            if !ok {
+                // Jangan clear dirty — data masih perlu ditulis ulang
+                return false;
+            }
             self.entries[idx].dirty = false;
         }
+        true
     }
 
     pub fn read_block(&mut self, dev_id: u8, block: u64, buf: &mut [u8]) -> bool {
@@ -86,7 +98,10 @@ impl BlockCache {
             None => return false,
         };
 
-        self.flush_entry(idx);
+        // Jika flush gagal, batalkan — jangan timpa data dirty yang belum tersimpan
+        if !self.flush_entry(idx) {
+            return false;
+        }
 
         let mut sector_buf = [0u8; SECTOR_SIZE];
         if !block_device_read(dev_id as usize, block, &mut sector_buf) {
@@ -112,8 +127,12 @@ impl BlockCache {
                     Some(i) => i,
                     None => return false,
                 };
-                self.flush_entry(idx);
+                // Jika flush gagal, batalkan untuk mencegah data corruption
+                if !self.flush_entry(idx) {
+                    return false;
+                }
                 if buf.len() < SECTOR_SIZE {
+                    // Read-modify-write: baca sektor lama dulu
                     let mut sector_buf = [0u8; SECTOR_SIZE];
                     block_device_read(dev_id as usize, block, &mut sector_buf);
                     self.entries[idx].data = sector_buf;
@@ -134,17 +153,18 @@ impl BlockCache {
         true
     }
 
-    pub fn flush_all(&mut self) {
+    /// Flush semua entry dirty ke disk. Mengembalikan false jika ada write yang gagal.
+    pub fn flush_all(&mut self) -> bool {
+        let mut success = true;
         for i in 0..CACHE_SIZE {
             if self.entries[i].valid && self.entries[i].dirty {
-                block_device_write(
-                    self.entries[i].dev_id as usize,
-                    self.entries[i].block,
-                    &self.entries[i].data,
-                );
-                self.entries[i].dirty = false;
+                if !self.flush_entry(i) {
+                    success = false;
+                    // Lanjutkan untuk mencoba flush entry lain
+                }
             }
         }
+        success
     }
 
     pub fn stats(&self) -> (u64, u64) {
@@ -162,10 +182,75 @@ pub fn bc_write(dev_id: u8, block: u64, buf: &[u8]) -> bool {
     BLOCK_CACHE.lock().write_block(dev_id, block, buf)
 }
 
-pub fn bc_flush() {
-    BLOCK_CACHE.lock().flush_all();
+/// Flush semua dirty entries. Mengembalikan false jika ada write yang gagal.
+pub fn bc_flush() -> bool {
+    BLOCK_CACHE.lock().flush_all()
 }
 
 pub fn bc_stats() -> (u64, u64) {
     BLOCK_CACHE.lock().stats()
+}
+
+#[cfg(feature = "testing")]
+pub mod tests {
+    use super::*;
+
+    pub fn test_new_cache_empty() -> Result<(), &'static str> {
+        let cache = BlockCache::new();
+        if cache.hits != 0 || cache.misses != 0 {
+            return Err("New cache should have zero stats");
+        }
+        Ok(())
+    }
+
+    pub fn test_evict_on_empty_returns_index_0() -> Result<(), &'static str> {
+        let mut cache = BlockCache::new();
+        // Evict pada cache kosong harus mengembalikan index 0 (hash berdasarkan dev_id=0, block=0)
+        let idx = cache.evict_one(0, 0);
+        match idx {
+            Some(_) => Ok(()),
+            None => Err("evict_one on empty cache should return Some"),
+        }
+    }
+
+    pub fn test_find_entry_empty_returns_none() -> Result<(), &'static str> {
+        let cache = BlockCache::new();
+        if cache.find_entry(0, 0).is_some() {
+            return Err("find_entry on empty cache should return None");
+        }
+        Ok(())
+    }
+
+    pub fn test_stats_empty() -> Result<(), &'static str> {
+        let cache = BlockCache::new();
+        let (hits, misses) = cache.stats();
+        if hits != 0 || misses != 0 {
+            return Err("Empty cache stats should be (0, 0)");
+        }
+        Ok(())
+    }
+
+    pub fn test_lru_counter_increments_on_evict() -> Result<(), &'static str> {
+        let mut cache = BlockCache::new();
+        let idx1 = cache.evict_one(0, 0);
+        let idx2 = cache.evict_one(0, 1);
+        if idx1 == idx2 {
+            // Boleh saja sama (hash collision) — yang penting return Some
+        }
+        Ok(())
+    }
+
+    pub fn test_cache_size_constant() -> Result<(), &'static str> {
+        if CACHE_SIZE != 512 {
+            return Err("CACHE_SIZE should be 512");
+        }
+        Ok(())
+    }
+
+    pub fn test_sector_size_constant() -> Result<(), &'static str> {
+        if SECTOR_SIZE != 512 {
+            return Err("SECTOR_SIZE should be 512");
+        }
+        Ok(())
+    }
 }

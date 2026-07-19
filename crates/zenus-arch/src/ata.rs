@@ -7,15 +7,21 @@ const SECONDARY_IO: u16 = 0x170;
 const SECONDARY_CTRL: u16 = 0x376;
 
 const CMD_IDENTIFY: u8 = 0xEC;
-const CMD_READ: u8 = 0x20;
-const CMD_WRITE: u8 = 0x30;
+const CMD_READ28: u8 = 0x20;
+const CMD_WRITE28: u8 = 0x30;
+const CMD_READ48: u8 = 0x24;
+const CMD_WRITE48: u8 = 0x34;
 const CMD_FLUSH: u8 = 0xE7;
+const CMD_FLUSH48: u8 = 0xEA;
 
 const STATUS_BSY: u8 = 0x80;
 #[allow(dead_code)]
 const STATUS_DRDY: u8 = 0x40;
 const STATUS_DRQ: u8 = 0x08;
 const STATUS_ERR: u8 = 0x01;
+
+// IDENTIFY word 83 bit 10: LBA-48 supported
+const IDENTIFY_LBA48_BIT: u16 = 1 << 10;
 
 const SECTOR_SIZE: usize = 512;
 
@@ -29,28 +35,32 @@ pub struct AtaDevice {
     drive: u8,
     pub lba_sectors: u64,
     pub model: [u8; 40],
+    /// True jika drive mendukung LBA-48 (disk > 128 GiB)
+    pub lba48: bool,
 }
 
 pub const MAX_ATA_DEVICES: usize = 4;
-static ATA_DEVICES: zenus_sync::spinlock::SpinLock<[Option<AtaDevice>; MAX_ATA_DEVICES]> = zenus_sync::spinlock::SpinLock::new([None; MAX_ATA_DEVICES]);
-static ATA_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static ATA_DEVICES: SpinLock<[Option<AtaDevice>; MAX_ATA_DEVICES]> =
+    SpinLock::new([None; MAX_ATA_DEVICES]);
+static ATA_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
+/// Tunggu BSY clear. Tidak menggunakan hlt() — aman dipanggil di dalam
+/// spinlock atau handler interrupt.
 fn ata_wait_busy(io_base: u16) -> bool {
-    for i in 0..1000 {
+    for _ in 0..100_000 {
         let status: u8 = unsafe { Port::new(io_base + 7).read() };
         if status & STATUS_BSY == 0 {
             return true;
         }
         core::hint::spin_loop();
-        if i & 0x7F == 0 {
-            x86_64::instructions::hlt();
-        }
     }
     false
 }
 
+/// Tunggu DRQ set (atau ERR). Tidak menggunakan hlt().
 fn ata_wait_drq(io_base: u16) -> bool {
-    for i in 0..1000 {
+    for _ in 0..100_000 {
         let status: u8 = unsafe { Port::new(io_base + 7).read() };
         if status & STATUS_BSY == 0 {
             if status & STATUS_ERR != 0 {
@@ -61,14 +71,12 @@ fn ata_wait_drq(io_base: u16) -> bool {
             }
         }
         core::hint::spin_loop();
-        if i & 0x7F == 0 {
-            x86_64::instructions::hlt();
-        }
     }
     false
 }
 
 fn ata_select_drive(io_base: u16, drive: u8) {
+    // drive == 0 → master (0xE0), drive == 1 → slave (0xF0)
     let selector: u8 = if drive == 0 { 0xE0 } else { 0xF0 };
     unsafe {
         Port::new(io_base + 6).write(selector);
@@ -118,29 +126,46 @@ fn identify_drive(io_base: u16, ctrl_base: u16, drive: u8) -> Option<AtaDevice> 
         *word = unsafe { Port::new(io_base).read() };
     }
 
-    let lba_sectors = ((data[61] as u64) << 16) | (data[60] as u64);
+    // Cek dukungan LBA-48 (word 83 bit 10)
+    let lba48 = (data[83] & IDENTIFY_LBA48_BIT) != 0;
+
+    let lba_sectors = if lba48 {
+        // Word 100-103: total LBA-48 sectors (64-bit)
+        (data[100] as u64)
+            | ((data[101] as u64) << 16)
+            | ((data[102] as u64) << 32)
+            | ((data[103] as u64) << 48)
+    } else {
+        // Word 60-61: total LBA-28 sectors (28-bit)
+        ((data[61] as u64) << 16) | (data[60] as u64)
+    };
+
     if lba_sectors == 0 {
         return None;
     }
 
     let model = extract_model(&data);
+    let drive_sel = if drive == 0 { 0xE0 } else { 0xF0 };
 
-    Some(AtaDevice { io_base, ctrl_base, drive: if drive == 0 { 0xE0 } else { 0xF0 }, lba_sectors, model })
+    Some(AtaDevice { io_base, ctrl_base, drive: drive_sel, lba_sectors, model, lba48 })
 }
 
+/// ATA string byte-swap: setiap word dari IDENTIFY disimpan sebagai
+/// high-byte dulu, low-byte kedua (big-endian per karakter pasangan).
 fn extract_model(data: &[u16; 256]) -> [u8; 40] {
     let mut model = [0u8; 40];
     for i in 0..20 {
         let w = data[27 + i];
-        model[i * 2] = (w & 0xFF) as u8;
-        model[i * 2 + 1] = (w >> 8) as u8;
+        // ATA: byte tinggi adalah karakter pertama pasangan
+        model[i * 2]     = (w >> 8) as u8;
+        model[i * 2 + 1] = (w & 0xFF) as u8;
     }
     model
 }
 
 #[allow(dead_code)]
 fn model_str(model: &[u8; 40]) -> &str {
-    let end = model.iter().rposition(|&b| b != 0 && b != ' ' as u8)
+    let end = model.iter().rposition(|&b| b != 0 && b != b' ')
         .map(|i| i + 1)
         .unwrap_or(0);
     core::str::from_utf8(&model[..end]).unwrap_or("<non-utf8>")
@@ -155,15 +180,17 @@ pub fn init() {
     ];
 
     for &(io, ctrl, _name) in &channels {
-        for drive in 0..2 {
-            let _label = if drive == 0 { "master" } else { "slave" };
+        for drive in 0..2u8 {
             if let Some(dev) = identify_drive(io, ctrl, drive) {
+                // Lock sekali dan update count di dalam lock untuk mencegah
+                // race condition antara load, check, dan store.
                 let mut guard = ATA_DEVICES.lock();
                 let idx = ATA_COUNT.load(core::sync::atomic::Ordering::Relaxed);
                 if idx < MAX_ATA_DEVICES {
                     guard[idx] = Some(dev);
                     ATA_COUNT.store(idx + 1, core::sync::atomic::Ordering::Relaxed);
                 }
+                // guard drop di sini — count sudah konsisten dengan array
             }
         }
     }
@@ -187,6 +214,34 @@ fn get_device_copy(dev_idx: usize) -> Option<AtaDevice> {
 
 const MAX_RW_SECTORS: u16 = 256;
 
+/// Tulis register LBA-28 ke port ATA.
+unsafe fn setup_lba28(io_base: u16, drive: u8, lba: u64, count: u8) {
+    Port::<u8>::new(io_base + 6).write(drive | ((lba >> 24) as u8 & 0x0F));
+    Port::<u8>::new(io_base + 1).write(0);
+    Port::<u8>::new(io_base + 2).write(count);
+    Port::<u8>::new(io_base + 3).write((lba & 0xFF) as u8);
+    Port::<u8>::new(io_base + 4).write(((lba >> 8) & 0xFF) as u8);
+    Port::<u8>::new(io_base + 5).write(((lba >> 16) & 0xFF) as u8);
+}
+
+/// Tulis register LBA-48 ke port ATA (HOB dulu, lalu LOB).
+unsafe fn setup_lba48(io_base: u16, drive: u8, lba: u64, count: u16) {
+    // Bit 6 = LBA mode; tidak pakai bit 24-27 untuk LBA-48
+    Port::<u8>::new(io_base + 6).write(drive | 0x40);
+    // High-order bytes dulu
+    Port::<u8>::new(io_base + 1).write(0);
+    Port::<u8>::new(io_base + 2).write((count >> 8) as u8);
+    Port::<u8>::new(io_base + 3).write(((lba >> 24) & 0xFF) as u8);
+    Port::<u8>::new(io_base + 4).write(((lba >> 32) & 0xFF) as u8);
+    Port::<u8>::new(io_base + 5).write(((lba >> 40) & 0xFF) as u8);
+    // Low-order bytes
+    Port::<u8>::new(io_base + 1).write(0);
+    Port::<u8>::new(io_base + 2).write((count & 0xFF) as u8);
+    Port::<u8>::new(io_base + 3).write((lba & 0xFF) as u8);
+    Port::<u8>::new(io_base + 4).write(((lba >> 8) & 0xFF) as u8);
+    Port::<u8>::new(io_base + 5).write(((lba >> 16) & 0xFF) as u8);
+}
+
 pub fn read_sectors(dev_idx: usize, lba: u64, count: u16, buf: &mut [u8]) -> bool {
     let dev = match get_device_copy(dev_idx) {
         Some(d) => d,
@@ -199,6 +254,11 @@ pub fn read_sectors(dev_idx: usize, lba: u64, count: u16, buf: &mut [u8]) -> boo
         return false;
     }
     if buf.len() < (count as usize) * SECTOR_SIZE {
+        return false;
+    }
+
+    // Pastikan LBA-28 tidak dipakai untuk alamat yang melebihi 28-bit
+    if !dev.lba48 && lba >= (1u64 << 28) {
         return false;
     }
 
@@ -215,13 +275,13 @@ pub fn read_sectors(dev_idx: usize, lba: u64, count: u16, buf: &mut [u8]) -> boo
         }
 
         unsafe {
-            Port::<u8>::new(io_base + 6).write(dev.drive | ((current_lba >> 24) as u8 & 0x0F));
-            Port::<u8>::new(io_base + 1).write(0);
-            Port::<u8>::new(io_base + 2).write(1);
-            Port::<u8>::new(io_base + 3).write((current_lba & 0xFF) as u8);
-            Port::<u8>::new(io_base + 4).write(((current_lba >> 8) & 0xFF) as u8);
-            Port::<u8>::new(io_base + 5).write(((current_lba >> 16) & 0xFF) as u8);
-            Port::<u8>::new(io_base + 7).write(CMD_READ);
+            if dev.lba48 {
+                setup_lba48(io_base, dev.drive, current_lba, 1);
+                Port::<u8>::new(io_base + 7).write(CMD_READ48);
+            } else {
+                setup_lba28(io_base, dev.drive, current_lba, 1);
+                Port::<u8>::new(io_base + 7).write(CMD_READ28);
+            }
         }
 
         if !ata_wait_drq(io_base) {
@@ -258,6 +318,10 @@ pub fn write_sectors(dev_idx: usize, lba: u64, count: u16, buf: &[u8]) -> bool {
         return false;
     }
 
+    if !dev.lba48 && lba >= (1u64 << 28) {
+        return false;
+    }
+
     let io_base = dev.io_base;
     let channel = if io_base == PRIMARY_IO { 0 } else { 1 };
     let _lock = ATA_CHANNEL_LOCKS[channel].lock();
@@ -271,13 +335,13 @@ pub fn write_sectors(dev_idx: usize, lba: u64, count: u16, buf: &[u8]) -> bool {
         }
 
         unsafe {
-            Port::<u8>::new(io_base + 6).write(dev.drive | ((current_lba >> 24) as u8 & 0x0F));
-            Port::<u8>::new(io_base + 1).write(0);
-            Port::<u8>::new(io_base + 2).write(1);
-            Port::<u8>::new(io_base + 3).write((current_lba & 0xFF) as u8);
-            Port::<u8>::new(io_base + 4).write(((current_lba >> 8) & 0xFF) as u8);
-            Port::<u8>::new(io_base + 5).write(((current_lba >> 16) & 0xFF) as u8);
-            Port::<u8>::new(io_base + 7).write(CMD_WRITE);
+            if dev.lba48 {
+                setup_lba48(io_base, dev.drive, current_lba, 1);
+                Port::<u8>::new(io_base + 7).write(CMD_WRITE48);
+            } else {
+                setup_lba28(io_base, dev.drive, current_lba, 1);
+                Port::<u8>::new(io_base + 7).write(CMD_WRITE28);
+            }
         }
 
         if !ata_wait_drq(io_base) {
@@ -300,7 +364,11 @@ pub fn write_sectors(dev_idx: usize, lba: u64, count: u16, buf: &[u8]) -> bool {
         }
     }
 
-    unsafe { Port::<u8>::new(io_base + 7).write(CMD_FLUSH); }
+    // Gunakan FLUSH EXT untuk LBA-48, FLUSH biasa untuk LBA-28
+    unsafe {
+        let flush_cmd = if dev.lba48 { CMD_FLUSH48 } else { CMD_FLUSH };
+        Port::<u8>::new(io_base + 7).write(flush_cmd);
+    }
     ata_wait_busy(io_base)
 }
 

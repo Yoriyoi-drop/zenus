@@ -1,0 +1,2 @@
+Makefile:121: peringatan: memaksa perintah untuk target 'run-gdb'
+Makefile:115: peringatan: menghiraukan perintah lama untuk target 'run-gdb'

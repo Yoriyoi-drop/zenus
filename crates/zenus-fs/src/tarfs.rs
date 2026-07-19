@@ -1,6 +1,7 @@
 use core::slice;
+use alloc::boxed::Box;
 use crate::vfs::{self, FileSystem, FileType, FileStat, DirEntry};
-
+use zenus_sync::spinlock::SpinLock;
 
 #[repr(C, packed)]
 struct UstarHeader {
@@ -49,77 +50,74 @@ const MAX_ENTRIES: usize = 64;
 const MAX_DIR_ENTRIES: usize = 128;
 
 fn copy_name(name: &str) -> &'static str {
-    static mut NAME_BUF: [u8; 4096] = [0; 4096];
-    static mut NAME_OFF: usize = 0;
     let bytes = name.as_bytes();
     let len = bytes.len().min(255);
-    unsafe {
-        let off = NAME_OFF;
-        if off + len + 1 > NAME_BUF.len() {
-            return "";
-        }
-        let dst = &mut NAME_BUF[off..off + len];
-        dst.copy_from_slice(&bytes[..len]);
-        NAME_OFF = off + len + 1;
-        core::str::from_utf8(&NAME_BUF[off..off + len]).unwrap_or("")
-    }
+    let s: alloc::string::String = core::str::from_utf8(&bytes[..len]).unwrap_or("").into();
+    Box::leak(s.into_boxed_str())
 }
 
-pub struct TarFs {
-    entries: &'static [TarEntry],
+struct TarData {
+    entries: [TarEntry; MAX_ENTRIES],
+    count: usize,
     data_base: u64,
 }
 
+static TAR_DATA: SpinLock<TarData> = SpinLock::new(TarData {
+    entries: [TarEntry {
+        inode: 0, name: "", file_type: FileType::None,
+        data_off: 0, data_len: 0,
+    }; MAX_ENTRIES],
+    count: 0,
+    data_base: 0,
+});
+
+pub struct TarFs;
+
 impl TarFs {
     pub fn load(addr: u64, len: u64) -> Option<&'static Self> {
-        static mut ENTRIES: [TarEntry; MAX_ENTRIES] = [TarEntry {
+        let data = unsafe { slice::from_raw_parts(addr as *const u8, len as usize) };
+        let mut tmp_entries: [TarEntry; MAX_ENTRIES] = [TarEntry {
             inode: 0, name: "", file_type: FileType::None,
             data_off: 0, data_len: 0,
         }; MAX_ENTRIES];
-        static mut FS: TarFs = TarFs {
-            entries: &[],
-            data_base: 0,
-        };
-
-        let data = unsafe { slice::from_raw_parts(addr as *const u8, len as usize) };
         let mut count = 0usize;
         let mut offset = 0usize;
 
         while offset + 512 <= len as usize && count < MAX_ENTRIES {
-            let hdr = unsafe { &*(data.as_ptr().add(offset) as *const UstarHeader) };
-            // ustar magic can be "ustar\0" (POSIX) or "ustar " (GNU)
-            if &hdr.magic[..5] != b"ustar" {
+            let hdr_ptr = unsafe { data.as_ptr().add(offset) } as *const UstarHeader;
+            let magic = unsafe { core::ptr::read_unaligned(&(*hdr_ptr).magic) };
+            if &magic[..5] != b"ustar" {
                 break;
             }
 
-            let raw_name = core::str::from_utf8(&hdr.name).unwrap_or("");
-            let file_name = name_skip_prefix(raw_name.trim_end_matches('\0'));
-            let file_size = parse_octal(&hdr.size) as usize;
-            let entry_type = hdr.type_flag;
+            let hdr_name: [u8; 100] = unsafe { core::ptr::read_unaligned(&(*hdr_ptr).name) };
+            let hdr_size: [u8; 12] = unsafe { core::ptr::read_unaligned(&(*hdr_ptr).size) };
+            let hdr_type: u8 = unsafe { core::ptr::read_unaligned(&(*hdr_ptr).type_flag) };
 
-                if !file_name.is_empty() && file_name != "." {
+            let raw_name = core::str::from_utf8(&hdr_name).unwrap_or("");
+            let file_name = name_skip_prefix(raw_name.trim_end_matches('\0'));
+            let file_size = parse_octal(&hdr_size) as usize;
+            let entry_type = hdr_type;
+
+            if !file_name.is_empty() && file_name != "." {
                 let ft = match entry_type {
                     b'5' => FileType::Directory,
                     b'0' | b'\0' => FileType::File,
                     _ => FileType::None,
                 };
                 if ft != FileType::None {
-                    // Normalize: strip trailing '/' on directory names so root
-                    // read_dir and open() path lookups work correctly.
                     let normalized = if ft == FileType::Directory && file_name.ends_with('/') {
                         &file_name[..file_name.len() - 1]
                     } else {
                         file_name
                     };
-                    unsafe {
-                        ENTRIES[count] = TarEntry {
-                            inode: count as u64 + 1,
-                            name: copy_name(normalized),
-                            file_type: ft,
-                            data_off: addr + offset as u64 + 512,
-                            data_len: file_size as u64,
-                        };
-                    }
+                    tmp_entries[count] = TarEntry {
+                        inode: count as u64 + 1,
+                        name: copy_name(normalized),
+                        file_type: ft,
+                        data_off: addr + offset as u64 + 512,
+                        data_len: file_size as u64,
+                    };
                     count += 1;
                 }
             }
@@ -134,15 +132,19 @@ impl TarFs {
             return None;
         }
 
-        unsafe {
-            FS.data_base = addr;
-            FS.entries = core::slice::from_raw_parts(ENTRIES.as_ptr(), count);
-            Some(&FS)
+        {
+            let mut tar = TAR_DATA.lock();
+            tar.entries = tmp_entries;
+            tar.count = count;
+            tar.data_base = addr;
         }
+
+        Some(&TarFs)
     }
 
     fn find_inode(&self, name: &str) -> Option<u64> {
-        self.entries.iter()
+        let tar = TAR_DATA.lock();
+        tar.entries[..tar.count].iter()
             .find(|e| e.name == name)
             .map(|e| e.inode)
     }
@@ -158,7 +160,8 @@ impl FileSystem for TarFs {
     }
 
     fn read(&self, inode: u64, offset: u64, buf: &mut [u8]) -> Option<u64> {
-        let entry = self.entries.iter().find(|e| e.inode == inode)?;
+        let tar = TAR_DATA.lock();
+        let entry = tar.entries[..tar.count].iter().find(|e| e.inode == inode)?;
         if entry.file_type != FileType::File {
             return Some(0);
         }
@@ -177,24 +180,24 @@ impl FileSystem for TarFs {
     }
 
     fn write(&self, _inode: u64, _offset: u64, _buf: &[u8]) -> Option<u64> {
-        // TarFs is read-only (initrd)
         None
     }
 
     fn read_dir(&self, inode: u64) -> alloc::vec::Vec<DirEntry> {
         let mut entries = alloc::vec::Vec::with_capacity(MAX_DIR_ENTRIES);
+        let tar = TAR_DATA.lock();
 
         let dir_name: &str = if inode == 0 {
             ""
         } else {
-            match self.entries.iter().find(|e| e.inode == inode) {
+            match tar.entries[..tar.count].iter().find(|e| e.inode == inode) {
                 Some(e) => e.name,
                 None => return entries,
             }
         };
         let dir_ends_slash = dir_name.ends_with('/');
 
-        for entry in self.entries.iter() {
+        for entry in tar.entries[..tar.count].iter() {
             if entries.len() >= MAX_DIR_ENTRIES {
                 break;
             }
@@ -240,7 +243,7 @@ impl FileSystem for TarFs {
             let child_entry = if inode == 0 {
                 Some(entry)
             } else {
-                self.entries.iter().find(|e| {
+                tar.entries[..tar.count].iter().find(|e| {
                     let en = e.name;
                     if !en.starts_with(dir_name) || en.len() <= dir_name.len() {
                         return false;
@@ -275,10 +278,12 @@ impl FileSystem for TarFs {
     fn stat(&self, inode: u64) -> FileStat {
         if inode == 0 {
             return FileStat {
-                size: 0, file_type: FileType::Directory, inode: 0, blocks: 0, uid: 0, gid: 0,                 mode: vfs::DEFAULT_DIR_MODE,
+                size: 0, file_type: FileType::Directory, inode: 0, blocks: 0, uid: 0, gid: 0,
+                mode: vfs::DEFAULT_DIR_MODE,
             };
         }
-        match self.entries.iter().find(|e| e.inode == inode) {
+        let tar = TAR_DATA.lock();
+        match tar.entries[..tar.count].iter().find(|e| e.inode == inode) {
             Some(e) => FileStat {
                 size: e.data_len,
                 file_type: e.file_type,

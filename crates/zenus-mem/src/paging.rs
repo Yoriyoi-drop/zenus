@@ -7,6 +7,7 @@ use x86_64::VirtAddr;
 use x86_64::PhysAddr;
 
 pub const PAGE_SIZE: usize = 4096;
+const MAX_FREED_CR3: usize = 64;
 
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 static LEVEL4_PHYS: AtomicU64 = AtomicU64::new(0);
@@ -34,6 +35,81 @@ pub fn hhdm_offset() -> u64 {
 
 pub fn kernel_cr3() -> u64 {
     KERNEL_CR3.load(Ordering::Acquire)
+}
+
+/// Walk ALL 4 levels of ALL present PML4 entries (entries 0-511) and
+/// clear the U/S (User/Supervisor) bit from EVERY entry. This covers
+/// both the kernel half (entries 256-511) AND any identity-mapped or
+/// lower memory entries (0-255) that Limine may have set up.
+///
+/// Per Intel SDM Vol 3 §4.10.4.1, SMEP considers a page user-mode if
+/// U/S=1 in ANY level — so we clear U/S at ALL 4 levels.
+///
+/// Must be called AFTER interrupts::init() so the IDT can catch faults,
+/// and BEFORE enable_smep_smap().
+pub fn ensure_kernel_pages_supervisor() {
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+    if hhdm == 0 { return; }
+    let cr3_phys = KERNEL_CR3.load(Ordering::Acquire) & !0xFFF;
+    if cr3_phys == 0 { return; }
+
+    const US_BIT: u64 = 1u64 << 2;
+
+    unsafe {
+        let pml4_virt = (cr3_phys + hhdm) as *mut u64;
+
+        // Walk ALL 512 PML4 entries — Limine may set up identity-mapped
+        // pages in entries 0-255 that the kernel currently executes from.
+        for pml4_idx in 0..512 {
+            let pml4e = *pml4_virt.add(pml4_idx);
+            if (pml4e & 1) == 0 { continue; }
+            *pml4_virt.add(pml4_idx) = pml4e & !US_BIT;
+
+            if (pml4e & 0x80) != 0 { continue; } // 1 GiB huge page
+
+            let pdpt_phys = pml4e & 0x000FFFFFFFFFF000;
+            let pdpt_virt = (pdpt_phys + hhdm) as *mut u64;
+
+            for pdpt_idx in 0..512 {
+                let pdpte = *pdpt_virt.add(pdpt_idx);
+                if (pdpte & 1) == 0 { continue; }
+                *pdpt_virt.add(pdpt_idx) = pdpte & !US_BIT;
+
+                if (pdpte & 0x80) != 0 { continue; } // 2 MiB huge page
+
+                let pd_phys = pdpte & 0x000FFFFFFFFFF000;
+                let pd_virt = (pd_phys + hhdm) as *mut u64;
+
+                for pd_idx in 0..512 {
+                    let pde = *pd_virt.add(pd_idx);
+                    if (pde & 1) == 0 { continue; }
+                    *pd_virt.add(pd_idx) = pde & !US_BIT;
+
+                    if (pde & 0x80) != 0 { continue; } // 2 MiB page
+
+                    let pt_phys = pde & 0x000FFFFFFFFFF000;
+                    let pt_virt = (pt_phys + hhdm) as *mut u64;
+
+                    for pt_idx in 0..512 {
+                        let pte = *pt_virt.add(pt_idx);
+                        if (pte & 1) == 0 { continue; }
+                        *pt_virt.add(pt_idx) = pte & !US_BIT;
+                    }
+                }
+            }
+        }
+    }
+
+    // Flush ALL TLB entries (including global)
+    unsafe {
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
+        cr4 &= !(1u64 << 7); // Clear PGE
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
+        set_cr3(get_level4_addr_raw());
+        cr4 |= 1u64 << 7; // Set PGE
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
+    }
 }
 
 pub fn get_level4_addr() -> VirtAddr {
@@ -234,6 +310,33 @@ pub fn virt_to_phys_raw(cr3_raw: u64, virt: u64) -> Option<u64> {
     None
 }
 
+/// Change page table flags for a virtual address in an arbitrary address space.
+/// Returns true if successful.
+pub fn protect_page_raw(cr3_raw: u64, virt: u64, writable: bool, executable: bool) -> bool {
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+    let cr3_phys = cr3_raw & !0xFFF;
+    let levels = [(4usize, 39), (3, 30), (2, 21), (1, 12)];
+    unsafe {
+        let mut table_virt = (cr3_phys + hhdm) as *mut u64;
+        for &(level, shift) in &levels {
+            let idx = (virt >> shift) & 0x1FF;
+            let entry = *table_virt.add(idx as usize);
+            if (entry & 1) == 0 { return false; }
+            if level == 1 {
+                let mut new_entry = entry & !(1u64 << 1) & !(1u64 << 63);
+                if writable { new_entry |= 1u64 << 1; }
+                if !executable { new_entry |= 1u64 << 63; }
+                table_virt.add(idx as usize).write(new_entry);
+                core::arch::asm!("invlpg [{0}]", in(reg) virt, options(nostack, preserves_flags));
+                return true;
+            }
+            let next = entry & 0x000FFFFFFFFFF000;
+            table_virt = (next + hhdm) as *mut u64;
+        }
+    }
+    false
+}
+
 pub fn create_address_space() -> Option<u64> {
     let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
     let cr3_phys = LEVEL4_PHYS.load(Ordering::Acquire);
@@ -255,6 +358,185 @@ pub fn create_address_space() -> Option<u64> {
 
     let flags = get_level4_addr_raw() & (0b11000u64);
     Some(new_frame.as_u64() | flags)
+}
+
+/// Clone a user address space by copying all mapped user pages.
+/// Read-only pages are shared (same physical frame in both parent and child).
+/// Writable pages are full-copied (new frame, same content).
+/// The parent's page tables are NOT modified.
+/// Returns the physical address of the new PML4.
+pub fn clone_user_address_space(source_cr3_raw: u64) -> Option<u64> {
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+
+    let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+    let new_pml4_frame = allocator.alloc_frame()?;
+    drop(allocator);
+
+    let source_cr3_phys = source_cr3_raw & !0xFFF;
+    let new_cr3_phys = new_pml4_frame.as_u64() & !0xFFF;
+
+    // Copy kernel half (entries 256-511) from kernel CR3 (shared with kernel)
+    let kernel_cr3_phys = KERNEL_CR3.load(Ordering::Acquire) & !0xFFF;
+    let dst_pml4 = (new_cr3_phys + hhdm) as *mut u64;
+    let src_pml4 = (source_cr3_phys + hhdm) as *const u64;
+
+    unsafe {
+        // Zero user half, copy kernel half
+        core::ptr::write_bytes(dst_pml4, 0, 256);
+        core::ptr::copy_nonoverlapping(
+            (kernel_cr3_phys + hhdm) as *const u64,
+            dst_pml4.add(256),
+            256,
+        );
+    }
+
+    // Walk user space (entries 0-255) of source and clone
+    for pml4_idx in 0..256 {
+        let pml4_entry = unsafe { *src_pml4.add(pml4_idx) };
+        if (pml4_entry & 1) == 0 {
+            continue;
+        }
+
+        let pdpt_phys = pml4_entry & 0x000FFFFFFFFFF000;
+        let pml4_flags = pml4_entry & 0xFFF;
+
+        // Allocate new PDPT for child
+        let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+        let new_pdpt_frame = allocator.alloc_frame()?;
+        drop(allocator);
+        let new_pdpt_phys = new_pdpt_frame.as_u64() & !0xFFF;
+        let new_pdpt_virt = (new_pdpt_phys + hhdm) as *mut u64;
+        unsafe { core::ptr::write_bytes(new_pdpt_virt, 0, 512 * 8); }
+
+        let pdpt_virt = (pdpt_phys + hhdm) as *const u64;
+
+        for pdpt_idx in 0..512 {
+            let pdpt_entry = unsafe { *pdpt_virt.add(pdpt_idx) };
+            if (pdpt_entry & 1) == 0 {
+                continue;
+            }
+
+            let pd_phys = pdpt_entry & 0x000FFFFFFFFFF000;
+            let pdpt_flags = pdpt_entry & 0xFFF;
+
+            // Allocate new PD for child
+            let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+            let new_pd_frame = allocator.alloc_frame()?;
+            drop(allocator);
+            let new_pd_phys = new_pd_frame.as_u64() & !0xFFF;
+            let new_pd_virt = (new_pd_phys + hhdm) as *mut u64;
+            unsafe { core::ptr::write_bytes(new_pd_virt, 0, 512 * 8); }
+
+            let pd_virt = (pd_phys + hhdm) as *const u64;
+
+            for pd_idx in 0..512 {
+                let pd_entry = unsafe { *pd_virt.add(pd_idx) };
+                if (pd_entry & 1) == 0 {
+                    continue;
+                }
+
+                let pt_phys = pd_entry & 0x000FFFFFFFFFF000;
+                let _pd_flags = pd_entry & 0xFFF;
+
+                // Allocate new PT for child
+                let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+                let new_pt_frame = allocator.alloc_frame()?;
+                drop(allocator);
+                let new_pt_phys = new_pt_frame.as_u64() & !0xFFF;
+                let new_pt_virt = (new_pt_phys + hhdm) as *mut u64;
+                unsafe { core::ptr::write_bytes(new_pt_virt, 0, 512 * 8); }
+
+                let pt_virt = (pt_phys + hhdm) as *const u64;
+
+                for pt_idx in 0..512 {
+                    let pt_entry = unsafe { *pt_virt.add(pt_idx) };
+                    if (pt_entry & 1) == 0 {
+                        continue;
+                    }
+
+                    let frame_phys = pt_entry & 0x000FFFFFFFFFF000;
+                    let writable = (pt_entry & 2) != 0;
+
+                    if writable {
+                        let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+                        let new_frame = match allocator.alloc_frame() {
+                            Some(f) => f,
+                            None => return None,
+                        };
+                        drop(allocator);
+
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                (hhdm + frame_phys) as *const u8,
+                                (hhdm + new_frame.as_u64()) as *mut u8,
+                                4096,
+                            );
+                        }
+
+                        let new_entry = (new_frame.as_u64() & !0xFFF)
+                            | (pt_entry & 0xFFF);
+                        unsafe { new_pt_virt.add(pt_idx).write(new_entry); }
+                    } else {
+                        unsafe { new_pt_virt.add(pt_idx).write(pt_entry); }
+                    }
+                }
+
+                // Link PT into child's PD (copy flags from source PD entry)
+                let new_pd_entry = (new_pt_phys & !0xFFF) | (_pd_flags & 0xFFF & !0x1);
+                unsafe { new_pd_virt.add(pd_idx).write(new_pd_entry | 1); }
+            }
+
+            // Link PD into child's PDPT
+            let new_pdpt_entry = (new_pd_phys & !0xFFF) | (pdpt_flags & 0xFFF & !0x1);
+            unsafe { new_pdpt_virt.add(pdpt_idx).write(new_pdpt_entry | 1); }
+        }
+
+        // Link PDPT into child's PML4
+        let new_pml4_entry = (new_pdpt_phys & !0xFFF) | (pml4_flags & 0xFFF & !0x1);
+        unsafe { dst_pml4.add(pml4_idx).write(new_pml4_entry | 1); }
+    }
+
+    let flags = source_cr3_raw & (0b11000u64);
+    Some(new_cr3_phys | flags)
+}
+
+/// Tracks freed address spaces to prevent double-free.
+static FREED_CR3_COUNT: AtomicU64 = AtomicU64::new(0);
+static FREED_CR3_LIST: [AtomicU64; MAX_FREED_CR3] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+
+fn is_already_freed(cr3_phys: u64) -> bool {
+    let count = FREED_CR3_COUNT.load(Ordering::Acquire) as usize;
+    let count = count.min(MAX_FREED_CR3);
+    for i in 0..count {
+        if FREED_CR3_LIST[i].load(Ordering::Acquire) == cr3_phys {
+            return true;
+        }
+    }
+    false
+}
+
+fn mark_freed(cr3_phys: u64) {
+    let idx = FREED_CR3_COUNT.fetch_add(1, Ordering::Release) as usize;
+    if idx < MAX_FREED_CR3 {
+        FREED_CR3_LIST[idx].store(cr3_phys, Ordering::Release);
+    }
 }
 
 /// Walk the user-space page table and free all mapped frames and page table pages.
@@ -281,6 +563,12 @@ pub fn destroy_address_space(cr3_raw: u64) {
     if cr3_phys == 0 {
         return;
     }
+
+    // Double-free guard: skip if already freed
+    if is_already_freed(cr3_phys) {
+        return;
+    }
+    mark_freed(cr3_phys);
 
     // If freeing the currently active address space, switch to kernel CR3 first
     if cr3_phys == current_cr3 {

@@ -1,7 +1,6 @@
 use x86_64::structures::idt::{InterruptDescriptorTable, PageFaultErrorCode, InterruptStackFrame};
 use core::mem::MaybeUninit;
 use zenus_console::serial::SerialPort;
-use zenus_console::vga;
 
 use crate::gdt;
 
@@ -17,6 +16,30 @@ fn try_read_u64(addr: u64) -> Option<u64> {
         return None;
     }
     Some(unsafe { core::ptr::read_volatile(addr as *const u64) })
+}
+
+/// Tulis angka u64 sebagai hex ke display (framebuffer/VGA). Format: 0x1234.
+fn write_hex_display(v: u64) {
+    let hex_chars = b"0123456789ABCDEF";
+    let mut nibbles = [0u8; 16];
+    for i in 0..16 {
+        nibbles[i] = hex_chars[((v >> (60 - i * 4)) & 0xF) as usize];
+    }
+    let mut start = 0;
+    while start < 15 && nibbles[start] == b'0' {
+        start += 1;
+    }
+    // Always show at least one digit
+    let display = &nibbles[start..];
+    let mut buf = [0u8; 19];
+    buf[0] = b'0';
+    buf[1] = b'x';
+    let len = display.len().min(16);
+    buf[2..2 + len].copy_from_slice(&display[..len]);
+    let total = 2 + len;
+    if let Ok(s) = core::str::from_utf8(&buf[..total]) {
+        zenus_console::display::write_str(s);
+    }
 }
 
 fn try_read_u8(addr: u64) -> Option<u8> {
@@ -59,7 +82,13 @@ pub fn init() {
     idt.virtualization.set_handler_fn(virtualization_handler);
 
     // IRQ 0-15 mapped to vectors 32-47
-    // Vector 32: PIT timer → apic_timer_isr_stub for preemptive scheduling
+    // Vector 32: PIT timer — registered but timer ISR is intentionally
+    // disabled (PIC IRQ0 masked). IST is NOT used here because IST would
+    // switch to a dedicated stack and never restore RSP on kernel→kernel
+    // return, leaving the interrupted task on the wrong stack.
+    // When preemptive multitasking is needed, this entry should use the
+    // red-zone protection approach (sub rsp, 128 in the ISR stub) and
+    // each task must have its own kernel stack for proper IST semantics.
     unsafe {
         extern "C" { static apic_timer_isr_stub: u8; }
         let addr = &apic_timer_isr_stub as *const u8 as u64;
@@ -87,6 +116,8 @@ extern "x86-interrupt" fn debug_handler(frame: InterruptStackFrame) {
 extern "x86-interrupt" fn nmi_handler(_frame: InterruptStackFrame) {
     let s = SerialPort::new(0x3F8);
     s.write_str("!!! NMI !!!\n");
+    zenus_console::display::write_str("\n!!! NMI !!!\n");
+    zenus_console::serial::flush_output_blocking();
     loop { x86_64::instructions::hlt(); }
 }
 
@@ -121,6 +152,10 @@ extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code
     s.write_str("RIP: ");
     s.write_hex(frame.instruction_pointer.as_u64());
     s.write_str("\n");
+    zenus_console::display::write_str("\n!!! DOUBLE FAULT !!!\nRIP=");
+    write_hex_display(frame.instruction_pointer.as_u64());
+    zenus_console::display::write_str("\n");
+    zenus_console::serial::flush_output_blocking();
     loop { x86_64::instructions::hlt(); }
 }
 
@@ -198,6 +233,13 @@ extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
     s.write_str(" R14="); s.write_hex(r14);
     s.write_str(" R15="); s.write_hex(r15);
     s.write_str("\n");
+    // Show on display
+    zenus_console::display::write_str("\n!!! GPF !!! RIP=");
+    write_hex_display(frame.instruction_pointer.as_u64());
+    zenus_console::display::write_str(" Code=");
+    write_hex_display(_code);
+    zenus_console::display::write_str("\n");
+    zenus_console::serial::flush_output_blocking();
     loop { x86_64::instructions::hlt(); }
 }
 
@@ -313,6 +355,19 @@ extern "x86-interrupt" fn page_fault_handler(
         s.write_str("\n*** NEAR-NULL ADDRESS ***");
     }
 
+    // Show on display (framebuffer/VGA) too
+    zenus_console::display::write_str("\n!!! PAGE FAULT !!!\n");
+    zenus_console::display::write_str("ADDR=");
+    write_hex_display(addr);
+    zenus_console::display::write_str(" RIP=");
+    write_hex_display(frame.instruction_pointer.as_u64());
+    zenus_console::display::write_str(" ");
+    zenus_console::display::write_str(cause);
+    if addr < 0x1000 {
+        zenus_console::display::write_str(" NULL");
+    }
+    zenus_console::display::write_str("\n");
+
     s.write_str(" RAX="); s.write_hex(r_rax);
     s.write_str(" RBX="); s.write_hex(r_rbx);
     s.write_str(" RCX="); s.write_hex(r_rcx);
@@ -385,6 +440,7 @@ extern "x86-interrupt" fn page_fault_handler(
     } else {
         s.write_str("(invalid stack pointer)\n");
     }
+    zenus_console::serial::flush_output_blocking();
     loop { x86_64::instructions::hlt(); }
 }
 
@@ -399,6 +455,8 @@ extern "x86-interrupt" fn alignment_check_handler(frame: InterruptStackFrame, _c
 extern "x86-interrupt" fn machine_check_handler(_frame: InterruptStackFrame) -> ! {
     let s = SerialPort::new(0x3F8);
     s.write_str("!!! MACHINE CHECK !!!\n");
+    zenus_console::display::write_str("\n!!! MACHINE CHECK !!!\n");
+    zenus_console::serial::flush_output_blocking();
     loop { x86_64::instructions::hlt(); }
 }
 
@@ -438,11 +496,10 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     s.write_str("!!! ");
     s.write_str(name);
     s.write_str(" !!!\n");
-    let hhdm = crate::limine::hhdm_offset();
-    if hhdm != 0 {
-        vga::write_str("!!! ", hhdm);
-        vga::write_str(name, hhdm);
-        vga::write_str(" !!!\n", hhdm);
+    if crate::limine::hhdm_offset() != 0 {
+        zenus_console::display::write_str("!!! ");
+        zenus_console::display::write_str(name);
+        zenus_console::display::write_str(" !!!\n");
     }
     s.write_str("RIP: ");
     s.write_hex(rip);
@@ -519,5 +576,6 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
         s.write_str("(invalid stack pointer)\n");
     }
 
+    zenus_console::serial::flush_output_blocking();
     loop { x86_64::instructions::hlt(); }
 }

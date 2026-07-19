@@ -19,6 +19,64 @@ fn ata_write2(lba: u64, buf: &[u8]) -> bool { zenus_arch::ata::write_sectors(2, 
 fn ata_read3(lba: u64, buf: &mut [u8]) -> bool { zenus_arch::ata::read_sectors(3, lba, 1, buf) }
 fn ata_write3(lba: u64, buf: &[u8]) -> bool { zenus_arch::ata::write_sectors(3, lba, 1, buf) }
 
+// ── procfs data generators ──
+
+fn gen_proc_cpuinfo() -> alloc::string::String {
+    use core::fmt::Write;
+    let cpu = zenus_arch::smp::cpu_count();
+    let mut s = alloc::string::String::new();
+    for i in 0..cpu {
+        let _ = write!(s, "processor\t: {}\nvendor_id\t: Zenus\ncpu family\t: 1\nmodel\t\t: 1\nmodel name\t: Zenus OS x86_64\ncpu MHz\t\t: 2500.000\nphysical id\t: 0\ncore id\t\t: {}\ncpu cores\t: {}\n\n", i, i, cpu);
+    }
+    s
+}
+
+fn gen_proc_meminfo() -> alloc::string::String {
+    use core::fmt::Write;
+    use zenus_mem::frame_allocator::FRAME_ALLOCATOR;
+    let fa = FRAME_ALLOCATOR.lock();
+    let total_kb = fa.total_memory() / 1024;
+    let used_kb = fa.used_memory() / 1024;
+    let free_kb = if total_kb > used_kb { total_kb - used_kb } else { 0 };
+    drop(fa);
+    let mut s = alloc::string::String::new();
+    let _ = write!(s, "MemTotal:       {} kB\nMemFree:        {} kB\nMemAvailable:   {} kB\nBuffers:        0 kB\nCached:         0 kB\nSwapTotal:      0 kB\nSwapFree:       0 kB\nActive:         {} kB\nInactive:       0 kB\n", total_kb, free_kb, free_kb, used_kb);
+    s
+}
+
+fn gen_proc_uptime() -> alloc::string::String {
+    use core::fmt::Write;
+    let ticks = zenus_sched::scheduler::uptime_ticks();
+    let secs = ticks / 100;
+    let mut s = alloc::string::String::new();
+    let _ = write!(s, "{}.{} {}.{}\n", secs, 0u64, secs / 2, 0u64);
+    s
+}
+
+fn gen_proc_stat() -> alloc::string::String {
+    use core::fmt::Write;
+    let ticks = zenus_sched::scheduler::uptime_ticks();
+    let cpu_user = ticks / 3;
+    let cpu_nice = ticks / 10;
+    let cpu_system = ticks / 3;
+    let cpu_idle = ticks / 3;
+    let mut s = alloc::string::String::new();
+    let _ = write!(s, "cpu  {} {} {} {} 0 0 0 0 0 0\nintr 0\nctxt 0\nbtime {}\nprocesses {}\nprocs_running 1\nprocs_blocked 0\n", cpu_user, cpu_nice, cpu_system, cpu_idle, 1700000000u64, zenus_sched::scheduler::task_count());
+    s
+}
+
+fn gen_proc_loadavg() -> alloc::string::String {
+    use core::fmt::Write;
+    let running = zenus_sched::scheduler::task_count();
+    let mut s = alloc::string::String::new();
+    let _ = write!(s, "0.00 0.00 0.00 {}/{} 0\n", running, running);
+    s
+}
+
+fn gen_proc_task_count() -> u64 {
+    zenus_sched::scheduler::task_count()
+}
+
 extern crate zenus_syscall;
 
 #[used]
@@ -59,11 +117,29 @@ fn shell_task() {
 
 #[no_mangle]
 pub extern "C" fn entry() -> ! {
-    unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'Z');
-    }
     SerialPort::init();
     zenus_console::log::dmesg_init();
+
+    // Write initial boot message and flush — ensures serial port works even
+    // if we crash later. This bypasses the buffer for absolute reliability.
+    zenus_console::serial::uart_write_byte_emergency(b'Z');
+    zenus_console::serial::uart_write_byte_emergency(b'e');
+    zenus_console::serial::uart_write_byte_emergency(b'n');
+    zenus_console::serial::uart_write_byte_emergency(b'u');
+    zenus_console::serial::uart_write_byte_emergency(b's');
+    zenus_console::serial::uart_write_byte_emergency(b' ');
+    zenus_console::serial::uart_write_byte_emergency(b'B');
+    zenus_console::serial::uart_write_byte_emergency(b'o');
+    zenus_console::serial::uart_write_byte_emergency(b'o');
+    zenus_console::serial::uart_write_byte_emergency(b't');
+    zenus_console::serial::uart_write_byte_emergency(b'i');
+    zenus_console::serial::uart_write_byte_emergency(b'n');
+    zenus_console::serial::uart_write_byte_emergency(b'g');
+    zenus_console::serial::uart_write_byte_emergency(b'.');
+    zenus_console::serial::uart_write_byte_emergency(b'.');
+    zenus_console::serial::uart_write_byte_emergency(b'.');
+    zenus_console::serial::uart_write_byte_emergency(b'\r');
+    zenus_console::serial::uart_write_byte_emergency(b'\n');
 
     if zenus_arch::limine::MEMMAP_REQUEST.response.is_null() {
         zenus_console::kpanic_code!(zenus_console::error::codes::KRN_PANIC_INVALID_MEM,
@@ -106,34 +182,61 @@ pub extern "C" fn entry() -> ! {
     paging::init(hhdm_offset);
     frame_allocator::reserve_boot_stack(hhdm_offset);
     interrupts::init();
+    // Fix page table permissions (clear U/S bit at all levels for all
+    // present PML4 entries 0-511), then enable SMEP + SMAP.
+    // NOTE: Requires QEMU `-cpu max` or a CPU with SMEP/SMAP support.
+    zenus_mem::paging::ensure_kernel_pages_supervisor();
+    cpu::enable_smep_smap();
+    zenus_console::vga::init(hhdm_offset);
+
+    // Initialize framebuffer console if available (UEFI/GOP boot)
+    if let Some((fb_phys, fb_width, fb_height, fb_bpp, fb_pitch)) = zenus_arch::limine::framebuffer_info() {
+        let fb_virt = fb_phys + hhdm_offset;
+        let fb_info = zenus_console::fb::Framebuffer {
+            addr: fb_virt,
+            width: fb_width,
+            height: fb_height,
+            bpp: fb_bpp,
+            pitch: fb_pitch,
+        };
+        zenus_console::fb::init(&fb_info);
+    }
 
     let apic_base_raw = unsafe { cpu::read_msr(0x1B) };
     let apic_base = apic_base_raw & 0xFFFFF000;
     interrupts::apic::init_with_virt(apic_base + hhdm_offset);
-    interrupts::apic::enable_pic_lint0();
+    // Use PIT → PIC → ExtINT for timer interrupts (stable, tested).
+    // PIT IRQ0 and IRQ1 stay unmasked (PIC mask 0xFC from remap_pic).
+    // PIC EOI is sent in schedule_tick to prevent interrupt flooding.
     interrupts::pit::init();
+    interrupts::apic::enable_pic_lint0();
     zenus_arch::rtc::init();
+    zenus_arch::rtc::cache_boot_epoch();
     zenus_arch::random::init_rng();
 
-    zenus_console::serial::flush_output();
-    x86_64::instructions::interrupts::enable();
+    // AMAN: interrupts tetap disabled selama boot. Timer ISR menyebabkan
+    // race condition karena schedule_tick() mengakses spinlock yang sama
+    // dengan init code. Kita enable interrupts nanti setelah shell task
+    // dibuat dan init selesai. Output di-flush manual dengan flush_output_blocking().
 
     zenus_arch::keyboard::init();
     scheduler::init();
-
-    let test_msg = "Hello via syscall!\n";
-    let _ret = unsafe {
-        extern "C" {
-            fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64) -> u64;
-        }
-        syscall_dispatch(1, 1, test_msg.as_ptr() as u64, test_msg.len() as u64)
-    };
+    zenus_console::serial::flush_output_blocking();
 
     zenus_fs::vfs::init();
+    zenus_console::serial::flush_output_blocking();
     zenus_fs::vfs::create_dir("/dev");
     let devfs: &dyn zenus_fs::vfs::FileSystem = &zenus_fs::devfs::DevFs;
     zenus_fs::vfs::mount("/dev", devfs);
     zenus_fs::vfs::create_dir("/tmp");
+    zenus_fs::vfs::create_dir("/proc");
+    static PROCFS: zenus_fs::procfs::ProcFs = zenus_fs::procfs::ProcFs;
+    zenus_fs::vfs::mount("/proc", &PROCFS);
+    zenus_fs::vfs::create_dir("/sys");
+    zenus_fs::vfs::create_dir("/sys/fs");
+    zenus_fs::vfs::create_dir("/sys/fs/cgroup");
+    static CGROUP2: zenus_fs::cgroup::CgroupFs = zenus_fs::cgroup::CgroupFs;
+    zenus_fs::vfs::mount("/sys/fs/cgroup", &CGROUP2);
 
     if !zenus_arch::limine::MODULE_REQUEST.response.is_null() {
         unsafe {
@@ -158,20 +261,32 @@ pub extern "C" fn entry() -> ! {
     zenus_console::syslog::syslog_init();
     zenus_fs::sysctl::sysctl_init();
     zenus_fs::pkg::pkg_init();
+
+    // Register procfs data sources
+    zenus_fs::procfs::register_cpuinfo(gen_proc_cpuinfo);
+    zenus_fs::procfs::register_meminfo(gen_proc_meminfo);
+    zenus_fs::procfs::register_uptime(gen_proc_uptime);
+    zenus_fs::procfs::register_stat(gen_proc_stat);
+    zenus_fs::procfs::register_loadavg(gen_proc_loadavg);
+    zenus_fs::procfs::register_task_count(gen_proc_task_count);
+
     zenus_ns::uts::init();
     zenus_ns::pid::init();
     zenus_ns::mnt::init();
     zenus_ns::net::init();
     zenus_ns::user::init();
     zenus_ns::ipc::init();
+    zenus_console::serial::flush_output_blocking();
 
     #[cfg(not(feature = "testing"))]
     {
         // 12. PCI
         zenus_arch::pci::init();
+        zenus_console::serial::flush_output_blocking();
 
         // 13. Virtio
         unsafe { zenus_virtio::init(); }
+        zenus_console::serial::flush_output_blocking();
 
         // 14. ATA
         zenus_arch::ata::init();
@@ -199,6 +314,7 @@ pub extern "C" fn entry() -> ! {
                 }
             }
         }
+        zenus_console::serial::flush_output_blocking();
 
         // 15. Ext2 mount
         if zenus_arch::ata::device_count() > 0 {
@@ -219,7 +335,6 @@ pub extern "C" fn entry() -> ! {
         zenus_net::nic::init();
         if let Some(_idx) = zenus_net::tcp::listen(7) {
         }
-
         zenus_sync::lockdep::lockdep_init();
         zenus_arch::watchdog::watchdog_init(zenus_arch::watchdog::WatchdogType::Software, 30);
 
@@ -230,18 +345,45 @@ pub extern "C" fn entry() -> ! {
             }
         }
 
+
         // 17. SMP
         smp::init();
         zenus_arch::smp::set_ap_idle_fn(zenus_sched::scheduler::ap_idle);
         smp::wake_aps();
 
-        let shell_tid = scheduler::create_task_named(shell_task, 65536, "shell");
+        // Drain any bytes that arrived during boot (before UART FIFO stabilized)
+        zenus_console::serial::drain_boot_input();
+
+        // Start system services (if any registered)
         zenus_sched::init::init_system_start();
 
+        // Boot complete
         zenus_console::kinfo!("Zenus OS booted");
-        zenus_console::serial::flush_output();
+        zenus_console::serial::flush_output_blocking();
 
+        // Create shell as a scheduled task for preemptive multitasking.
+        // The scheduler will manage the shell via idle → yield → shell
+        // cycle, enabling timer-based preemption.
+        let _shell_tid = scheduler::create_task_named(shell_task, 65536, "shell");
+        zenus_console::kinfo!("Shell PID={}", _shell_tid);
+
+        // Enable interrupts. The first pending timer tick delivers the
+        // pending PIT interrupt through ExtINT → LAPIC LINT0 → CPU.
+        // The ISR's schedule_tick sees TASK_COUNT=2 (idle + shell) and
+        // preempts immediate to the shell task.
+        x86_64::instructions::interrupts::enable();
         scheduler::idle();
+
+        // Never reached
+    }
+
+    // Ketika fitur testing aktif, jalankan test suite lalu halt
+    #[cfg(feature = "testing")]
+    {
+        use zenus_console::serial::SerialPort;
+        let mut test_serial = SerialPort::new(0x3F8);
+        test_runner::run_tests(&mut test_serial);
+        loop { x86_64::instructions::hlt(); }
     }
 }
 

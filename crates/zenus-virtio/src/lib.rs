@@ -52,11 +52,12 @@ pub unsafe fn init() {
     zenus_console::kinfo!("Virtio scanning for devices...");
 
     let mut found = 0u32;
-    for i in 0..zenus_arch::pci::MAX_PCI_DEVICES {
-        let dev = &zenus_arch::pci::PCI_DEVICES[i];
-        if dev.vendor_id == 0 && dev.device_id == 0 {
-            break;
-        }
+    let count = zenus_arch::pci::get_device_count();
+    for i in 0..count {
+        let dev = match zenus_arch::pci::get_device(i) {
+            Some(d) => d,
+            None => continue,
+        };
         if dev.vendor_id != VIRTIO_VENDOR_ID {
             continue;
         }
@@ -69,7 +70,7 @@ pub unsafe fn init() {
 
         zenus_arch::pci::enable_bus_master(dev.bus, dev.device, dev.function);
 
-        let trans = match pci::init_device(dev) {
+        let trans = match pci::init_device(&dev) {
             Some(t) => t,
             None => {
                 zenus_console::kwarn!("Virtio: failed to initialize PCI transport for {}", dev_name);

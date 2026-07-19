@@ -227,6 +227,61 @@ pub fn mount(path: &'static str, fs: &'static dyn FileSystem) -> bool {
     mount_in_ns(zenus_ns::NS_ROOT, path, fs)
 }
 
+pub fn umount(path: &str) -> bool {
+    umount_in_ns(zenus_ns::NS_ROOT, path)
+}
+
+pub fn umount_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
+    let trimmed = path.trim_end_matches('/');
+    let target = if trimmed.is_empty() { "/" } else { trimmed };
+
+    if ns_id == zenus_ns::NS_ROOT {
+        let mut mt = MOUNT_TABLE.lock();
+        // Cannot unmount root
+        if mt.count <= 1 { return false; }
+        let mut found = false;
+        for i in 1..mt.count {
+            let m_path = mt.mounts[i].path;
+            if paths_equal(m_path, target) {
+                // Shift remaining mounts
+                for j in i..mt.count - 1 {
+                    mt.mounts[j] = mt.mounts[j + 1];
+                }
+                mt.count -= 1;
+                found = true;
+                break;
+            }
+        }
+        return found;
+    }
+
+    let mut tables = MNT_NS_TABLES.lock();
+    for entry in tables.entries.iter_mut().flatten() {
+        if entry.ns_id == ns_id {
+            if entry.table.count <= 1 { return false; }
+            for i in 1..entry.table.count {
+                let m_path = entry.table.mounts[i].path;
+                if paths_equal(m_path, target) {
+                    for j in i..entry.table.count - 1 {
+                        entry.table.mounts[j] = entry.table.mounts[j + 1];
+                    }
+                    entry.table.count -= 1;
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+    false
+}
+
+fn paths_equal(a: &str, b: &str) -> bool {
+    let a = a.trim_end_matches('/');
+    let b = b.trim_end_matches('/');
+    if a.is_empty() && b.is_empty() { return true; }
+    a == b
+}
+
 pub fn mount_in_ns(ns_id: zenus_ns::NsId, path: &'static str, fs: &'static dyn FileSystem) -> bool {
     if ns_id != zenus_ns::NS_ROOT {
         let mut tables = MNT_NS_TABLES.lock();
@@ -370,7 +425,10 @@ fn read_dir_root_in_ns(ns_id: zenus_ns::NsId) -> alloc::vec::Vec<DirEntry> {
             }
         }
         match idx {
-            Some(i) => (tables.entries[i].unwrap().table.count, tables.entries[i].unwrap().table.mounts),
+            Some(i) => match tables.entries[i] {
+                Some(ref entry) => (entry.table.count, entry.table.mounts),
+                None => (0, [EMPTY_MOUNT; MAX_MOUNTS]),
+            },
             None => (0, [EMPTY_MOUNT; MAX_MOUNTS]),
         }
     };

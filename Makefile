@@ -14,7 +14,7 @@ ISO := $(BUILD_DIR)/zenus.iso
 IMG := $(BUILD_DIR)/zenus.hdd
 LD := ld.lld
 
-.PHONY: all clean run run-qemu run-qemu-gdb run-bios run-uefi iso img test test-quiet bochs
+.PHONY: all clean run run-serial run-gui run-bios run-uefi run-gdb iso img test test-quiet bochs
 
 all: $(KERNEL)
 
@@ -31,8 +31,14 @@ $(KERNEL): target/$(TARGET)/$(PROFILE_DIR)/libzenus.a apps/src/linker.ld
 		target/$(TARGET)/$(PROFILE_DIR)/libzenus.a \
 		--no-whole-archive
 
+# Build userspace programs
+USERSPACE_PROGS := hello echo cat exitonly
+USERSPACE_BUILD := userspace/build
+$(USERSPACE_BUILD)/%: userspace/%/src/lib.rs userspace/userspace.ld
+	$(MAKE) -C userspace $(notdir $@)
+
 # Build initrd
-$(INITRD): mkinitrd.sh
+$(INITRD): mkinitrd.sh $(addprefix $(USERSPACE_BUILD)/,$(USERSPACE_PROGS))
 	bash mkinitrd.sh $(INITRD)
 
 # ISO image (BIOS + UEFI) — ISO depends on kernel + initrd
@@ -80,24 +86,43 @@ img: $(KERNEL) $(INITRD)
 	losetup -d $(LOOP)
 	$(LIMINE_DIR)/limine bios-install $(IMG)
 
-run: run-qemu
+# ── Interactive QEMU targets ──
+# run-serial   : serial-only (piped input via ssh), no display window
+# run-gui      : QEMU window + serial on stdout (keyboard+mouse input)
+# run-bios     : legacy -nographic mode
+# run-uefi     : UEFI firmware variant
+# run-gdb      : with GDB stub
+
+run: run-gui
+
+run-serial: $(ISO)
+	qemu-system-x86_64 -display none -serial stdio -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
+		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
+
+run-gui: $(ISO)
+	qemu-system-x86_64 -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
+		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
 
 run-bios: $(ISO)
-	qemu-system-x86_64 -nographic -serial stdio -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
-		-netdev user,id=net0 -device rtl8139,netdev=net0
+	qemu-system-x86_64 -nographic -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
+		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
 
 run-uefi: $(ISO)
 	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -no-reboot \
-		-netdev user,id=net0 -device rtl8139,netdev=net0
+		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
 
-run-qemu: run-bios
+run-gdb: $(ISO)
+	qemu-system-x86_64 -m 2G -smp $(SMP) -cdrom $(ISO) -s -S -no-reboot \
+		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
+
+run-qemu: run-gui
+
+run-gdb: $(ISO)
+	qemu-system-x86_64 -m 2G -smp $(SMP) -cdrom $(ISO) -s -S -no-reboot \
+		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 bochs: $(ISO)
 	bochs -f bochsrc -q
-
-run-qemu-gdb: $(ISO)
-	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(ISO) -s -S -no-reboot \
-		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 # Test build — enables testing feature for unit tests
 $(BUILD_DIR)/zenus-test: apps/src/lib.rs $(shell find crates -name '*.rs') apps/src/linker.ld

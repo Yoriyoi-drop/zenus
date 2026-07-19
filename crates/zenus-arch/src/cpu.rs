@@ -69,6 +69,8 @@ core::arch::global_asm!(
     "  mov rsi, r9",
     "  mov rdx, r8",
     "  call syscall_dispatch",
+    "  mov rdi, rsp",
+    "  call syscall_signal_hook",
     "  pop r11",
     "  pop rcx",
     "  mov rsp, gs:[0]",
@@ -79,6 +81,7 @@ core::arch::global_asm!(
 
 extern "C" {
     pub fn syscall_entry();
+    pub fn syscall_signal_hook(kernel_rsp: u64);
 }
 
 pub fn init() {
@@ -105,10 +108,36 @@ pub(crate) fn enable_sse() {
 
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
-        cr4 |= 1 << 9;
-        cr4 |= 1 << 10;
+        cr4 |= 1 << 9;   // OSFXSR — SSE
+        cr4 |= 1 << 10;  // OSXMMEXCPT
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
     }
+}
+
+/// Enable SMEP + SMAP. Must be called AFTER paging is set up by the kernel,
+/// because SMEP/SMAP interact with page-table U/S and R/W bits. Calling
+/// before proper kernel page tables exist will fault or hang on QEMU.
+pub fn enable_smep_smap() {
+    unsafe {
+        let mut cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
+        cr4 |= 1 << 20;  // SMEP — Supervisor Mode Execution Prevention
+        cr4 |= 1 << 21;  // SMAP — Supervisor Mode Access Prevention
+        core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
+    }
+}
+
+/// Temporarily disable SMAP to access user memory.
+/// Must be paired with `clac()` after access.
+#[inline]
+pub unsafe fn stac() {
+    core::arch::asm!("stac", options(nostack, nomem));
+}
+
+/// Re-enable SMAP after user memory access.
+#[inline]
+pub unsafe fn clac() {
+    core::arch::asm!("clac", options(nostack, nomem));
 }
 
 pub fn enable_syscall_ap() {

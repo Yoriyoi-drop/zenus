@@ -14,3 +14,5 @@ pub mod journal;
 pub mod io_scheduler;
 pub mod pkg;
 pub mod sysctl;
+pub mod procfs;
+pub mod cgroup;

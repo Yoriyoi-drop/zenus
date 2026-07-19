@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 const VGA_PHYS: u64 = 0xB8000;
 const WIDTH: usize = 80;
@@ -28,23 +28,25 @@ fn make_attr(fg: Color, bg: Color) -> u8 {
     (bg as u8) << 4 | (fg as u8)
 }
 
-fn vga_base(hhdm_offset: u64) -> *mut u8 {
-    (VGA_PHYS + hhdm_offset) as *mut u8
-}
-
+static HHDM: AtomicU64 = AtomicU64::new(0);
 static ROW: AtomicUsize = AtomicUsize::new(0);
 static COL: AtomicUsize = AtomicUsize::new(0);
 static ATTR: AtomicUsize = AtomicUsize::new(0);
 
 pub fn init(hhdm_offset: u64) {
+    HHDM.store(hhdm_offset, Ordering::Relaxed);
     ATTR.store(make_attr(Color::LightGray, Color::Black) as usize, Ordering::Relaxed);
-    clear(hhdm_offset);
+    clear();
     ROW.store(0, Ordering::Relaxed);
     COL.store(0, Ordering::Relaxed);
 }
 
-pub fn clear(hhdm_offset: u64) {
-    let base = vga_base(hhdm_offset);
+fn vga_base() -> *mut u8 {
+    (VGA_PHYS + HHDM.load(Ordering::Relaxed)) as *mut u8
+}
+
+pub fn clear() {
+    let base = vga_base();
     let attr = ATTR.load(Ordering::Relaxed) as u8;
     for i in 0..(WIDTH * HEIGHT) {
         let off = (i * 2) as isize;
@@ -57,8 +59,8 @@ pub fn clear(hhdm_offset: u64) {
     COL.store(0, Ordering::Relaxed);
 }
 
-fn scroll(hhdm_offset: u64) {
-    let base = vga_base(hhdm_offset);
+fn scroll() {
+    let base = vga_base();
     let line_bytes = WIDTH * 2;
     unsafe {
         for row in 1..HEIGHT {
@@ -75,9 +77,43 @@ fn scroll(hhdm_offset: u64) {
     }
 }
 
-pub fn write_str(s: &str, hhdm_offset: u64) {
-    let base = vga_base(hhdm_offset);
+pub fn write_str(s: &str) {
+    if HHDM.load(Ordering::Relaxed) == 0 { return; }
+    let base = vga_base();
+
+    let mut in_escape = false;
+    let mut ansi_buf = [0u8; 16];
+    let mut ansi_len = 0usize;
+
     for byte in s.bytes() {
+        if byte == 0x1B {
+            in_escape = true;
+            ansi_len = 0;
+            continue;
+        }
+
+        if in_escape {
+            if ansi_len < ansi_buf.len() {
+                ansi_buf[ansi_len] = byte;
+                ansi_len += 1;
+            }
+            if byte >= 0x40 && byte <= 0x7E {
+                in_escape = false;
+                if ansi_len >= 2 && ansi_buf[0] == b'[' {
+                    if ansi_len == 2 && ansi_buf[1] == b'H' {
+                        COL.store(0, Ordering::Relaxed);
+                        ROW.store(0, Ordering::Relaxed);
+                    } else if ansi_len >= 3 {
+                        let cmd = ansi_buf[ansi_len - 1];
+                        if cmd == b'J' && ansi_len == 3 && ansi_buf[1] == b'2' {
+                            clear();
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
         match byte {
             b'\n' => {
                 COL.store(0, Ordering::Relaxed);
@@ -87,9 +123,9 @@ pub fn write_str(s: &str, hhdm_offset: u64) {
                 COL.store(0, Ordering::Relaxed);
             }
             b'\t' => {
-                let tab_stop = 4;
-                let spaces = tab_stop - (COL.load(Ordering::Relaxed) % tab_stop);
-                for _ in 0..spaces {
+                loop {
+                    let col = COL.load(Ordering::Relaxed);
+                    if col >= WIDTH || col % 4 == 0 { break; }
                     put_char(base, b' ');
                 }
             }
@@ -104,7 +140,7 @@ pub fn write_str(s: &str, hhdm_offset: u64) {
             ROW.fetch_add(1, Ordering::Relaxed);
         }
         if ROW.load(Ordering::Relaxed) >= HEIGHT {
-            scroll(hhdm_offset);
+            scroll();
             ROW.store(HEIGHT - 1, Ordering::Relaxed);
         }
     }

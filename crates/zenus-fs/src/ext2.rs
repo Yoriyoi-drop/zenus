@@ -1,32 +1,24 @@
 use crate::vfs::{FileSystem, FileType, FileStat, DirEntry};
 use crate::block_cache::bc_read;
+use zenus_sync::spinlock::SpinLock;
 
 pub(crate) const EXT2_MAGIC: u16 = 0xEF53;
 const ROOT_INODE: u64 = 2;
-const EXT2_S_IFDIR: u16 = 0x4000;
-const EXT2_S_IFREG: u16 = 0x8000;
 
 const EXT2_GOOD_OLD_REV: u32 = 0;
 const EXT2_DYNAMIC_REV: u32 = 1;
 
-const EXT2_FT_REG_FILE: u8 = 1;
 const EXT2_FT_DIR: u8 = 2;
 
-#[allow(static_mut_refs)]
-static mut EXT2_FS: Ext2Fs = Ext2Fs {
-    dev_id: 0,
-    block_size: 1024,
-    blocks_per_group: 0,
-    inodes_per_group: 0,
-    inodes_count: 0,
-    blocks_count: 0,
-    bgdt_start: 0,
-    inode_size: 128,
-    mounted: false,
-};
+const MAX_EXT2_INSTANCES: usize = 4;
+
+static EXT2_POOL: SpinLock<[Option<Ext2Fs>; MAX_EXT2_INSTANCES]> =
+    SpinLock::new([None; MAX_EXT2_INSTANCES]);
+
+static NEXT_EXT2_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
-#[repr(C, packed)]
+#[repr(C)]
 pub(crate) struct RawSuperblock {
     pub inodes_count: u32,
     pub blocks_count: u32,
@@ -66,7 +58,7 @@ pub(crate) struct RawSuperblock {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, packed)]
+#[repr(C)]
 pub(crate) struct RawBlockGroupDescriptor {
     pub block_bitmap: u32,
     pub inode_bitmap: u32,
@@ -79,7 +71,7 @@ pub(crate) struct RawBlockGroupDescriptor {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, packed)]
+#[repr(C)]
 pub(crate) struct RawInode {
     pub mode: u16,
     pub uid: u16,
@@ -102,7 +94,7 @@ pub(crate) struct RawInode {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, packed)]
+#[repr(C)]
 struct RawDirEntry {
     inode: u32,
     rec_len: u16,
@@ -112,6 +104,7 @@ struct RawDirEntry {
 
 #[derive(Clone, Copy)]
 pub struct Ext2Fs {
+    id: u64,
     dev_id: u8,
     block_size: u64,
     blocks_per_group: u32,
@@ -123,10 +116,47 @@ pub struct Ext2Fs {
     mounted: bool,
 }
 
+fn read_unaligned_sb(buf: &[u8]) -> RawSuperblock {
+    unsafe {
+        let ptr = buf.as_ptr() as *const u8;
+        let mut sb: RawSuperblock = core::mem::zeroed();
+        core::ptr::copy_nonoverlapping(ptr, &mut sb as *mut RawSuperblock as *mut u8, core::mem::size_of::<RawSuperblock>());
+        sb
+    }
+}
+
+fn read_unaligned_bgdt(buf: &[u8]) -> RawBlockGroupDescriptor {
+    unsafe {
+        let mut bgd: RawBlockGroupDescriptor = core::mem::zeroed();
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), &mut bgd as *mut RawBlockGroupDescriptor as *mut u8, core::mem::size_of::<RawBlockGroupDescriptor>());
+        bgd
+    }
+}
+
+fn read_unaligned_inode(buf: &[u8]) -> RawInode {
+    unsafe {
+        let mut inode: RawInode = core::mem::zeroed();
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), &mut inode as *mut RawInode as *mut u8, core::mem::size_of::<RawInode>());
+        inode
+    }
+}
+
+fn write_unaligned_bgdt(buf: &mut [u8], bgd: &RawBlockGroupDescriptor) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(bgd as *const RawBlockGroupDescriptor as *const u8, buf.as_mut_ptr(), core::mem::size_of::<RawBlockGroupDescriptor>());
+    }
+}
+
+fn write_unaligned_inode(buf: &mut [u8], inode: &RawInode) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(inode as *const RawInode as *const u8, buf.as_mut_ptr(), core::mem::size_of::<RawInode>());
+    }
+}
+
 impl Ext2Fs {
     pub fn mount(dev_id: u8) -> Option<&'static Self> {
         let mut sb_buf = [0u8; 2048];
-        for i in 0..4 {
+        for i in 0..4u64 {
             let start = (i * 512) as usize;
             let end = ((i + 1) * 512) as usize;
             if !bc_read(dev_id, i, &mut sb_buf[start..end]) {
@@ -134,7 +164,7 @@ impl Ext2Fs {
             }
         }
 
-        let raw_sb = unsafe { &*(sb_buf.as_ptr().add(1024) as *const RawSuperblock) };
+        let raw_sb = read_unaligned_sb(&sb_buf[1024..1024 + core::mem::size_of::<RawSuperblock>()]);
 
         if raw_sb.magic != EXT2_MAGIC {
             return None;
@@ -155,33 +185,52 @@ impl Ext2Fs {
             return None;
         }
         let block_size = (1024u64) << log_block_size;
-        let blocks_per_group = raw_sb.blocks_per_group;
-        let inodes_per_group = raw_sb.inodes_per_group;
-        let inodes_count = raw_sb.inodes_count;
-        let blocks_count = raw_sb.blocks_count;
-
         let bgdt_start = if block_size == 1024 { 2u64 } else { 1u64 };
 
-        unsafe {
-            EXT2_FS = Ext2Fs {
-                dev_id,
-                block_size,
-                blocks_per_group,
-                inodes_per_group,
-                inodes_count,
-                blocks_count,
-                bgdt_start,
-                inode_size,
-                mounted: true,
-            };
-            Some(&EXT2_FS)
+        let id = NEXT_EXT2_ID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+
+        let fs = Ext2Fs {
+            id,
+            dev_id,
+            block_size,
+            blocks_per_group: raw_sb.blocks_per_group,
+            inodes_per_group: raw_sb.inodes_per_group,
+            inodes_count: raw_sb.inodes_count,
+            blocks_count: raw_sb.blocks_count,
+            bgdt_start,
+            inode_size,
+            mounted: true,
+        };
+
+        let mut pool = EXT2_POOL.lock();
+        for slot in pool.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(fs);
+                let ptr = slot.as_ref().unwrap() as *const Ext2Fs;
+                return Some(unsafe { &*ptr });
+            }
+        }
+        None
+    }
+
+    pub fn unmount(dev_id: u8) {
+        let mut pool = EXT2_POOL.lock();
+        for slot in pool.iter_mut() {
+            if let Some(fs) = slot {
+                if fs.dev_id == dev_id {
+                    *slot = None;
+                    return;
+                }
+            }
         }
     }
 
     fn read_bgdt(&self, group: u32) -> Option<RawBlockGroupDescriptor> {
         let entry_size = core::mem::size_of::<RawBlockGroupDescriptor>() as u64;
         let offset = group as u64 * entry_size;
-        let sector = (self.bgdt_start * self.block_size / 512) + (offset / 512);
+        let bgdt_start = self.bgdt_start;
+        let block_size = self.block_size;
+        let sector = (bgdt_start * block_size / 512) + (offset / 512);
         let offset_in_sector = offset % 512;
 
         if offset_in_sector + entry_size > 512 {
@@ -193,8 +242,7 @@ impl Ext2Fs {
             return None;
         }
 
-        let ptr = unsafe { buf.as_ptr().add(offset_in_sector as usize) as *const RawBlockGroupDescriptor };
-        Some(unsafe { *ptr })
+        Some(read_unaligned_bgdt(&buf[offset_in_sector as usize..]))
     }
 
     fn read_inode_raw(&self, inode: u64) -> Option<RawInode> {
@@ -202,23 +250,23 @@ impl Ext2Fs {
         let group = ((inode - 1) / self.inodes_per_group as u64) as u32;
         let local_idx = ((inode - 1) % self.inodes_per_group as u64) as u32;
         let bgd = self.read_bgdt(group)?;
-        let inode_table_block = bgd.inode_table as u64;
 
-        let inode_offset = local_idx as u64 * self.inode_size as u64;
-        let sector = (inode_table_block * self.block_size / 512) + (inode_offset / 512);
+        let inode_size = self.inode_size as u64;
+        let inode_offset = local_idx as u64 * inode_size;
+        let sector = (bgd.inode_table as u64 * self.block_size / 512) + (inode_offset / 512);
         let offset_in_sector = (inode_offset % 512) as usize;
 
-        let inode_size = self.inode_size as usize;
-        let needed_sectors = (offset_in_sector + inode_size + 511) / 512;
+        let raw_size = core::mem::size_of::<RawInode>();
+        let needed_sectors = (offset_in_sector + raw_size + 511) / 512;
         let mut buf = [0u8; 2048];
         for i in 0..needed_sectors as u64 {
-            if !bc_read(self.dev_id, sector + i, &mut buf[i as usize * 512..(i as usize + 1) * 512]) {
+            let s = i as usize;
+            if !bc_read(self.dev_id, sector + i, &mut buf[s * 512..(s + 1) * 512]) {
                 return None;
             }
         }
 
-        let ptr = unsafe { buf.as_ptr().add(offset_in_sector) as *const RawInode };
-        Some(unsafe { *ptr })
+        Some(read_unaligned_inode(&buf[offset_in_sector..]))
     }
 
     fn read_block_data(&self, block: u32, buf: &mut [u8]) -> bool {
@@ -226,9 +274,7 @@ impl Ext2Fs {
         let sectors = (self.block_size as usize + 511) / 512;
         for i in 0..sectors {
             let off = i * 512;
-            if off >= buf.len() {
-                break;
-            }
+            if off >= buf.len() { break; }
             let end = core::cmp::min(off + 512, buf.len());
             if !bc_read(self.dev_id, sector + i as u64, &mut buf[off..end]) {
                 return false;
@@ -246,16 +292,49 @@ impl Ext2Fs {
         }
 
         let indirect_idx = block_idx - 12;
-        let max_indirect = (self.block_size / 4) as u32;
-        if indirect_idx < max_indirect && raw.block[12] != 0 {
-            let mut buf = [0u8; 512];
-            let byte_off = indirect_idx as u64 * 4;
-            let sector = raw.block[12] as u64 * self.block_size / 512 + byte_off / 512;
-            let off_in_sector = (byte_off % 512) as usize;
-            if !bc_read(self.dev_id, sector, &mut buf) {
+        let ptrs_per_block = (self.block_size / 4) as u32;
+
+        if indirect_idx < ptrs_per_block && raw.block[12] != 0 {
+            let bsz = self.block_size as usize;
+            let mut blk_buf = alloc::vec![0u8; bsz];
+            if !self.read_block_data(raw.block[12], &mut blk_buf) {
                 return None;
             }
-            let entry = unsafe { *(buf.as_ptr().add(off_in_sector) as *const u32) };
+            let byte_off = (indirect_idx as usize) * 4;
+            if byte_off + 4 > bsz { return None; }
+            let entry = u32::from_le_bytes([
+                blk_buf[byte_off], blk_buf[byte_off + 1],
+                blk_buf[byte_off + 2], blk_buf[byte_off + 3],
+            ]);
+            if entry == 0 { return None; }
+            return Some(entry);
+        }
+
+        let dbl_idx = indirect_idx.saturating_sub(ptrs_per_block);
+        if dbl_idx < ptrs_per_block * ptrs_per_block && raw.block[13] != 0 {
+            let bsz = self.block_size as usize;
+            let mut blk_buf = alloc::vec![0u8; bsz];
+            if !self.read_block_data(raw.block[13], &mut blk_buf) {
+                return None;
+            }
+            let l1_idx = (dbl_idx / ptrs_per_block) as usize * 4;
+            if l1_idx + 4 > bsz { return None; }
+            let l1_block = u32::from_le_bytes([
+                blk_buf[l1_idx], blk_buf[l1_idx + 1],
+                blk_buf[l1_idx + 2], blk_buf[l1_idx + 3],
+            ]);
+            if l1_block == 0 { return None; }
+
+            let mut blk_buf2 = alloc::vec![0u8; bsz];
+            if !self.read_block_data(l1_block, &mut blk_buf2) {
+                return None;
+            }
+            let l2_idx = (dbl_idx % ptrs_per_block) as usize * 4;
+            if l2_idx + 4 > bsz { return None; }
+            let entry = u32::from_le_bytes([
+                blk_buf2[l2_idx], blk_buf2[l2_idx + 1],
+                blk_buf2[l2_idx + 2], blk_buf2[l2_idx + 3],
+            ]);
             if entry == 0 { return None; }
             return Some(entry);
         }
@@ -285,17 +364,17 @@ impl Ext2Fs {
         true
     }
 
-    fn read_block_bitmap(&self, group: u32) -> Option<[u8; 4096]> {
+    fn read_block_bitmap(&self, group: u32) -> Option<alloc::vec::Vec<u8>> {
         let bgd = self.read_bgdt(group)?;
-        let bitmap_block = bgd.block_bitmap as u64;
-        let mut buf = [0u8; 4096];
-        let sector = bitmap_block * self.block_size / 512;
+        let sector = bgd.block_bitmap as u64 * self.block_size / 512;
         let sectors = (self.block_size as usize + 511) / 512;
+        let bsz = self.block_size as usize;
+        let mut buf = alloc::vec![0u8; bsz];
         for i in 0..sectors {
             let off = i * 512;
-            if off >= buf.len() { break; }
-            let end = core::cmp::min(off + 512, buf.len());
-            if !crate::block_cache::bc_read(self.dev_id, sector + i as u64, &mut buf[off..end]) {
+            if off >= bsz { break; }
+            let end = core::cmp::min(off + 512, bsz);
+            if !bc_read(self.dev_id, sector + i as u64, &mut buf[off..end]) {
                 return None;
             }
         }
@@ -307,8 +386,7 @@ impl Ext2Fs {
             Some(b) => b,
             None => return false,
         };
-        let bitmap_block = bgd.block_bitmap as u64;
-        let sector = bitmap_block * self.block_size / 512;
+        let sector = bgd.block_bitmap as u64 * self.block_size / 512;
         let sectors = (self.block_size as usize + 511) / 512;
         for i in 0..sectors {
             let off = i * 512;
@@ -331,25 +409,38 @@ impl Ext2Fs {
         if !crate::block_cache::bc_read(self.dev_id, sector, &mut buf) {
             return false;
         }
-        let ptr = unsafe { buf.as_mut_ptr().add(offset_in_sector as usize) as *mut RawBlockGroupDescriptor };
-        unsafe { *ptr = *bgd; }
+        write_unaligned_bgdt(&mut buf[offset_in_sector as usize..], bgd);
         crate::block_cache::bc_write(self.dev_id, sector, &buf)
     }
 
     fn alloc_block(&self) -> Option<u32> {
-        let mut bitmap = self.read_block_bitmap(0)?;
-        let blocks_in_group = (self.block_size as usize * 8).min(self.blocks_per_group as usize);
-        for i in 2..blocks_in_group {
-            let byte_idx = i / 8;
-            let bit_idx = i % 8;
-            if byte_idx >= bitmap.len() { break; }
-            if (bitmap[byte_idx] & (1 << bit_idx)) == 0 {
-                bitmap[byte_idx] |= 1 << bit_idx;
-                self.write_block_bitmap(0, &bitmap);
-                let mut bgd = self.read_bgdt(0)?;
-                bgd.free_blocks_count -= 1;
-                self.write_bgdt(0, &bgd);
-                return Some(i as u32);
+        let num_groups = (self.blocks_count as u64 + self.blocks_per_group as u64 - 1)
+            / self.blocks_per_group as u64;
+
+        for group in 0..num_groups as u32 {
+            let mut bitmap = match self.read_block_bitmap(group) {
+                Some(b) => b,
+                None => continue,
+            };
+            let blocks_in_group =
+                (self.block_size as usize * 8).min(self.blocks_per_group as usize);
+
+            let start_idx = if group == 0 { 2 } else { 0 };
+            for i in start_idx..blocks_in_group {
+                let byte_idx = i / 8;
+                let bit_idx = i % 8;
+                if byte_idx >= bitmap.len() { break; }
+                if (bitmap[byte_idx] & (1 << bit_idx)) == 0 {
+                    bitmap[byte_idx] |= 1 << bit_idx;
+                    self.write_block_bitmap(group, &bitmap);
+                    if let Some(mut bgd) = self.read_bgdt(group) {
+                        bgd.free_blocks_count =
+                            bgd.free_blocks_count.saturating_sub(1);
+                        self.write_bgdt(group, &bgd);
+                    }
+                    let phys = group * self.blocks_per_group + i as u32;
+                    return Some(phys);
+                }
             }
         }
         None
@@ -360,30 +451,28 @@ impl Ext2Fs {
             raw.block[block_idx as usize] = phys;
             return true;
         }
-        if block_idx < 12 + (self.block_size as u32 / 4) {
+        let bsz = self.block_size as usize;
+        let ptrs_per_block = bsz as u32 / 4;
+        if block_idx < 12 + ptrs_per_block {
             if raw.block[12] == 0 {
                 let indirect = match self.alloc_block() {
                     Some(b) => b,
                     None => return false,
                 };
                 raw.block[12] = indirect;
-                let zero = [0u8; 4096];
-                if !self.write_block_data(indirect, &zero[..self.block_size as usize]) {
+                let zero = alloc::vec![0u8; bsz];
+                if !self.write_block_data(indirect, &zero) {
                     return false;
                 }
             }
-            let indirect_block = raw.block[12];
             let entry_idx = block_idx - 12;
-            let byte_off = entry_idx as u64 * 4;
-            let sector = (indirect_block as u64 * self.block_size / 512) + (byte_off / 512);
-            let off_in_sector = (byte_off % 512) as usize;
-            let mut buf = [0u8; 512];
-            if !crate::block_cache::bc_read(self.dev_id, sector, &mut buf) {
+            let byte_off = entry_idx as usize * 4;
+            let mut blk_buf = alloc::vec![0u8; bsz];
+            if !self.read_block_data(raw.block[12], &mut blk_buf) {
                 return false;
             }
-            let ptr = unsafe { buf.as_mut_ptr().add(off_in_sector) as *mut u32 };
-            unsafe { *ptr = phys; }
-            return crate::block_cache::bc_write(self.dev_id, sector, &buf);
+            blk_buf[byte_off..byte_off + 4].copy_from_slice(&phys.to_le_bytes());
+            return self.write_block_data(raw.block[12], &blk_buf);
         }
         false
     }
@@ -396,26 +485,33 @@ impl Ext2Fs {
             Some(b) => b,
             None => return false,
         };
-        let inode_table_block = bgd.inode_table as u64;
-        let inode_offset = local_idx as u64 * self.inode_size as u64;
-        let sector = (inode_table_block * self.block_size / 512) + (inode_offset / 512);
+
+        let inode_size = self.inode_size as u64;
+        let inode_offset = local_idx as u64 * inode_size;
+        let sector = (bgd.inode_table as u64 * self.block_size / 512) + (inode_offset / 512);
         let offset_in_sector = (inode_offset % 512) as usize;
 
         let raw_size = core::mem::size_of::<RawInode>();
-        let mut buf = [0u8; 2048];
         let inode_read_size = core::cmp::max(raw_size, self.inode_size as usize);
         let needed_sectors = (offset_in_sector + inode_read_size + 511) / 512;
+        let mut buf = alloc::vec![0u8; needed_sectors * 512];
+
         for i in 0..needed_sectors as u64 {
-            if !crate::block_cache::bc_read(self.dev_id, sector + i, &mut buf[i as usize * 512..(i as usize + 1) * 512]) {
+            let s = i as usize;
+            if !crate::block_cache::bc_read(
+                self.dev_id, sector + i, &mut buf[s * 512..(s + 1) * 512],
+            ) {
                 return false;
             }
         }
 
-        let ptr = unsafe { buf.as_mut_ptr().add(offset_in_sector) as *mut RawInode };
-        unsafe { *ptr = *raw; }
+        write_unaligned_inode(&mut buf[offset_in_sector..], raw);
 
         for i in 0..needed_sectors as u64 {
-            if !crate::block_cache::bc_write(self.dev_id, sector + i, &buf[i as usize * 512..(i as usize + 1) * 512]) {
+            let s = i as usize;
+            if !crate::block_cache::bc_write(
+                self.dev_id, sector + i, &buf[s * 512..(s + 1) * 512],
+            ) {
                 return false;
             }
         }
@@ -424,13 +520,9 @@ impl Ext2Fs {
 }
 
 impl FileSystem for Ext2Fs {
-    fn name(&self) -> &'static str {
-        "ext2"
-    }
+    fn name(&self) -> &'static str { "ext2" }
 
-    fn root_inode(&self) -> u64 {
-        ROOT_INODE
-    }
+    fn root_inode(&self) -> u64 { ROOT_INODE }
 
     fn read(&self, inode: u64, offset: u64, buf: &mut [u8]) -> Option<u64> {
         let raw = self.read_inode_raw(inode)?;
@@ -447,31 +539,32 @@ impl FileSystem for Ext2Fs {
 
         for b in start_block..end_block {
             let phys = self.inode_read_block(&raw, b)?;
-            let mut block_buf = [0u8; 4096];
-            if !self.read_block_data(phys, &mut block_buf[..block_size as usize]) {
+            let bsz = block_size as usize;
+            let mut block_buf = alloc::vec![0u8; bsz];
+            if !self.read_block_data(phys, &mut block_buf) {
                 return None;
             }
-
             let block_start = b as u64 * block_size;
-            let copy_start = if offset > block_start { (offset - block_start) as usize } else { 0 };
+            let copy_start = if offset > block_start {
+                (offset - block_start) as usize
+            } else {
+                0
+            };
             let copy_end_unclamped = (end - block_start) as usize;
-            let copy_end = core::cmp::min(copy_end_unclamped, block_size as usize);
+            let copy_end = core::cmp::min(copy_end_unclamped, bsz);
             let copy_len = copy_end.saturating_sub(copy_start);
-            if copy_len == 0 {
-                continue;
-            }
+            if copy_len == 0 { continue; }
 
             let dest_start = written as usize;
             let len = core::cmp::min(copy_len, buf.len() - dest_start);
-            buf[dest_start..dest_start + len].copy_from_slice(&block_buf[copy_start..copy_start + len]);
+            buf[dest_start..dest_start + len]
+                .copy_from_slice(&block_buf[copy_start..copy_start + len]);
             written += len as u64;
         }
-
         Some(written)
     }
 
     fn write(&self, inode: u64, offset: u64, buf: &[u8]) -> Option<u64> {
-
         let mut raw = self.read_inode_raw(inode)?;
         let block_size = self.block_size as usize;
         let file_size = raw.size_low as u64;
@@ -480,10 +573,12 @@ impl FileSystem for Ext2Fs {
         }
         let mut written = 0u64;
         let len = buf.len();
+
         while written < len as u64 {
             let logical_block = ((offset + written) / self.block_size) as u32;
             let block_off = ((offset + written) % self.block_size) as usize;
-            let to_copy = (block_size - block_off).min((len as u64 - written) as usize);
+            let to_copy =
+                (block_size - block_off).min((len as u64 - written) as usize);
 
             let mut phys = self.inode_read_block(&raw, logical_block);
             if phys.is_none() && (offset + written) < file_size {
@@ -491,27 +586,29 @@ impl FileSystem for Ext2Fs {
             }
             if phys.is_none() {
                 let nb = self.alloc_block()?;
-                self.inode_set_block(&mut raw, logical_block, nb);
+                if !self.inode_set_block(&mut raw, logical_block, nb) {
+                    return None;
+                }
                 phys = Some(nb);
             }
             let phys = phys?;
 
-            let mut block_buf = [0u8; 4096];
+            let mut block_buf = alloc::vec![0u8; block_size];
             if (offset + written) < file_size && to_copy < block_size {
-                if !self.read_block_data(phys, &mut block_buf[..block_size]) {
+                if !self.read_block_data(phys, &mut block_buf) {
                     return None;
                 }
             } else if to_copy < block_size {
                 for b in block_buf.iter_mut() { *b = 0; }
             }
-            block_buf[block_off..block_off + to_copy].copy_from_slice(
-                &buf[written as usize..written as usize + to_copy],
-            );
-            if !self.write_block_data(phys, &block_buf[..block_size]) {
+            block_buf[block_off..block_off + to_copy]
+                .copy_from_slice(&buf[written as usize..written as usize + to_copy]);
+            if !self.write_block_data(phys, &block_buf) {
                 return None;
             }
             written += to_copy as u64;
         }
+
         let new_size = offset + written;
         if new_size > raw.size_low as u64 {
             if new_size > u32::MAX as u64 {
@@ -519,46 +616,43 @@ impl FileSystem for Ext2Fs {
             }
             raw.size_low = new_size as u32;
         }
-        self.write_inode_raw(inode, &raw);
+        if !self.write_inode_raw(inode, &raw) {
+            return None;
+        }
         Some(written)
     }
 
     fn read_dir(&self, inode: u64) -> alloc::vec::Vec<DirEntry> {
         let mut entries = alloc::vec::Vec::with_capacity(32);
-
         let raw = match self.read_inode_raw(inode) {
             Some(r) => r,
             None => return entries,
         };
-
         if Self::inode_file_type(raw.mode) != FileType::Directory {
             return entries;
         }
 
         let size = raw.size_low as u64;
         let block_size = self.block_size as usize;
-        let mut block_buf = [0u8; 4096];
-
         let mut file_offset = 0u64;
+
         while file_offset < size {
             let block_idx = (file_offset / self.block_size) as u32;
             let block_start = block_idx as u64 * self.block_size;
-
             let phys = match self.inode_read_block(&raw, block_idx) {
                 Some(p) => p,
                 None => break,
             };
-
-            if !self.read_block_data(phys, &mut block_buf[..block_size]) {
+            let mut block_buf = alloc::vec![0u8; block_size];
+            if !self.read_block_data(phys, &mut block_buf) {
                 break;
             }
 
             let mut pos = (file_offset - block_start) as usize;
             while pos + core::mem::size_of::<RawDirEntry>() <= block_size {
-                let de = unsafe { &*(block_buf.as_ptr().add(pos) as *const RawDirEntry) };
-                if de.rec_len == 0 {
-                    break;
-                }
+                let de_ptr = &block_buf[pos] as *const u8 as *const RawDirEntry;
+                let de: RawDirEntry = unsafe { core::ptr::read_unaligned(de_ptr) };
+                if de.rec_len == 0 { break; }
                 if de.inode != 0 {
                     let name_len = de.name_len as usize;
                     if name_len > 0 && name_len <= 255 {
@@ -567,9 +661,10 @@ impl FileSystem for Ext2Fs {
                             let name_bytes = &block_buf[name_start..name_start + name_len];
                             if let Ok(name) = core::str::from_utf8(name_bytes) {
                                 if name != "." && name != ".." {
-                                    let ft = match de.file_type {
-                                        EXT2_FT_DIR => FileType::Directory,
-                                        _ => FileType::File,
+                                    let ft = if de.file_type == EXT2_FT_DIR {
+                                        FileType::Directory
+                                    } else {
+                                        FileType::File
                                     };
                                     if entries.len() < 64 {
                                         entries.push(DirEntry {
@@ -585,11 +680,10 @@ impl FileSystem for Ext2Fs {
                 }
                 pos += de.rec_len as usize;
             }
-            file_offset = ((file_offset / self.block_size) + 1) * self.block_size;
+            file_offset = (block_idx as u64 + 1) * self.block_size;
         }
         entries
     }
-
 
     fn stat(&self, inode: u64) -> FileStat {
         match self.read_inode_raw(inode) {
@@ -668,8 +762,6 @@ pub mod tests {
 
     pub fn test_raw_superblock_size() -> Result<(), &'static str> {
         let s = core::mem::size_of::<RawSuperblock>();
-        // 22 u32 = 88, 10 u16 = 20, uuid[16] + volume_name[16] + last_mounted[64] = 96
-        // Total with packed repr: 88 + 20 + 96 = 204
         if s != 204 {
             return Err("RawSuperblock should be exactly 204 bytes");
         }
@@ -678,7 +770,6 @@ pub mod tests {
 
     pub fn test_raw_inode_size() -> Result<(), &'static str> {
         let s = core::mem::size_of::<RawInode>();
-        // Standard ext2 inode is 128 bytes
         if s < 100 || s > 160 {
             return Err("RawInode size out of expected range (100-160)");
         }
@@ -687,7 +778,6 @@ pub mod tests {
 
     pub fn test_raw_dir_entry_size() -> Result<(), &'static str> {
         let s = core::mem::size_of::<RawDirEntry>();
-        // DirEntry is 8 bytes: inode(4) + rec_len(2) + name_len(1) + file_type(1)
         if s != 8 {
             return Err("RawDirEntry should be exactly 8 bytes");
         }
@@ -696,7 +786,6 @@ pub mod tests {
 
     pub fn test_raw_bgdt_size() -> Result<(), &'static str> {
         let s = core::mem::size_of::<RawBlockGroupDescriptor>();
-        // Standard BGDT entry is 32 bytes
         if s < 24 || s > 40 {
             return Err("RawBlockGroupDescriptor size out of range");
         }

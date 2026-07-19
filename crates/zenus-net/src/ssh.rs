@@ -9,12 +9,28 @@ const MAX_LINE: usize = 256;
 const MAX_OUTPUT: usize = 4096;
 const CHUNK_SIZE: usize = 1024;
 
+#[cfg(not(feature = "ssh_password"))]
+const SSH_PASSWORD: &[u8] = b"zenus";
+#[cfg(feature = "ssh_password")]
+const SSH_PASSWORD: &[u8] = include_bytes!(env!("SSH_PASSWORD_PATH"));
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
 fn ssh_keystream_byte(seed: u32, pos: u32) -> u8 {
     let state = seed.wrapping_mul(0x9E3779B9).wrapping_add(pos);
     ((state >> 16) ^ (state >> 8) ^ state) as u8
 }
 
-fn derive_key(nonce: &[u8; 8], password: &[u8]) -> u32 {
+fn derive_key(nonce: &[u8; 16], password: &[u8]) -> u32 {
     let mut h: u32 = 0x6A09E667;
     for &b in nonce {
         h = h.wrapping_mul(0x01000193).wrapping_add(b as u32);
@@ -44,7 +60,7 @@ enum ConnState {
 struct SshConnection {
     fd: Option<usize>,
     state: ConnState,
-    nonce: [u8; 8],
+    nonce: [u8; 16],
     seed: u32,
     cipher_pos: u32,
     rx_buf: [u8; 512],
@@ -54,6 +70,7 @@ struct SshConnection {
     output: [u8; MAX_OUTPUT],
     output_len: usize,
     output_sent: usize,
+    auth_failures: u8,
 }
 
 impl SshConnection {
@@ -61,7 +78,7 @@ impl SshConnection {
         SshConnection {
             fd: None,
             state: ConnState::Closing,
-            nonce: [0; 8],
+            nonce: [0; 16],
             seed: 0,
             cipher_pos: 0,
             rx_buf: [0; 512],
@@ -71,6 +88,7 @@ impl SshConnection {
             output: [0; MAX_OUTPUT],
             output_len: 0,
             output_sent: 0,
+            auth_failures: 0,
         }
     }
 }
@@ -137,16 +155,13 @@ impl SshServer {
                     let conn = &mut self.connections[idx];
                     conn.fd = Some(cfd);
                     conn.state = ConnState::New;
-                    let r = zenus_arch::random::get_random_u64();
+                    let r0 = zenus_arch::random::get_random_u64();
+                    let r1 = zenus_arch::random::get_random_u64();
                     conn.nonce = [
-                        r as u8,
-                        (r >> 8) as u8,
-                        (r >> 16) as u8,
-                        (r >> 24) as u8,
-                        (r >> 32) as u8,
-                        (r >> 40) as u8,
-                        (r >> 48) as u8,
-                        (r >> 56) as u8,
+                        r0 as u8, (r0 >> 8) as u8, (r0 >> 16) as u8, (r0 >> 24) as u8,
+                        (r0 >> 32) as u8, (r0 >> 40) as u8, (r0 >> 48) as u8, (r0 >> 56) as u8,
+                        r1 as u8, (r1 >> 8) as u8, (r1 >> 16) as u8, (r1 >> 24) as u8,
+                        (r1 >> 32) as u8, (r1 >> 40) as u8, (r1 >> 48) as u8, (r1 >> 56) as u8,
                     ];
                     conn.seed = 0;
                     conn.cipher_pos = 0;
@@ -154,6 +169,7 @@ impl SshServer {
                     conn.line_len = 0;
                     conn.output_len = 0;
                     conn.output_sent = 0;
+                    conn.auth_failures = 0;
                     zenus_console::kinfo!("SSH connection #{} accepted (fd={})", idx, cfd);
                 } else {
                     zenus_console::kwarn!("SSH too many connections, rejecting");
@@ -177,7 +193,7 @@ impl SshServer {
 
             match conn.state {
                 ConnState::New => {
-                    let mut greeting = [0u8; 64];
+                    let mut greeting = [0u8; 96];
                     let mut pos = 0;
                     let proto = b"ZENUS_SSH/1.0\n";
                     greeting[pos..pos + proto.len()].copy_from_slice(proto);
@@ -206,21 +222,20 @@ impl SshServer {
                             let line = &conn.rx_buf[..nl];
                             if line.starts_with(b"AUTH ") {
                                 let auth_data = &line[5..];
-                                let password = b"zenus";
-                                if auth_data.len() == password.len() {
-                                    let ok = auth_data.iter().enumerate().all(|(j, &a)| {
-                                        a ^ conn.nonce[j % 8] == password[j]
-                                    });
-                                    if ok {
-                                        conn.seed = derive_key(&conn.nonce, password);
-                                        conn.state = ConnState::AuthOk;
-                                    } else {
-                                        conn.state = ConnState::AuthDenied;
-                                    }
+                                if conn.auth_failures >= 5 {
+                                    conn.state = ConnState::Closing;
+                                } else if constant_time_eq(auth_data, SSH_PASSWORD) {
+                                    conn.seed = derive_key(&conn.nonce, SSH_PASSWORD);
+                                    conn.state = ConnState::AuthOk;
                                 } else {
+                                    conn.auth_failures += 1;
                                     conn.state = ConnState::AuthDenied;
+                                    for _ in 0..50000 {
+                                        unsafe { core::arch::asm!("pause"); }
+                                    }
                                 }
                             } else {
+                                conn.auth_failures += 1;
                                 conn.state = ConnState::AuthDenied;
                             }
                             conn.rx_len = 0;
@@ -299,6 +314,9 @@ impl SshServer {
                     conn.line[conn.line_len] = decrypted;
                     conn.line_len += 1;
                 }
+            }
+            if conn.line_len >= MAX_LINE {
+                conn.line_len = 0;
             }
         } else if conn.output_len == 0 && conn.line_len == 0 {
             let prompt = b"zenus$ ";

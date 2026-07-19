@@ -1,0 +1,1 @@
+qemu-system-x86_64: terminating on signal 15 from pid 517598 (/home/whale-d/.config/manicode/freebuff)

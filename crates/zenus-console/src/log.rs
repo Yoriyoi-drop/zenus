@@ -1,20 +1,30 @@
 use core::fmt::Write;
 use crate::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
+use core::sync::atomic::{AtomicU8, AtomicBool, Ordering};
 
-#[allow(dead_code)]
+/// Buffer log sementara untuk formatting pesan kernel.
+/// Ukuran diperbesar ke 512 byte agar pesan panjang tidak terpotong diam-diam.
 pub struct LogBuf {
-    buf: [u8; 256],
+    buf: [u8; 512],
     pos: usize,
+    /// True jika pesan dipotong karena buffer penuh
+    truncated: bool,
 }
 
-#[allow(dead_code)]
 impl LogBuf {
     pub fn new() -> Self {
-        LogBuf { buf: [0u8; 256], pos: 0 }
+        LogBuf { buf: [0u8; 512], pos: 0, truncated: false }
     }
+
     pub fn as_str(&self) -> &str {
         core::str::from_utf8(&self.buf[..self.pos]).unwrap_or("")
+    }
+
+    /// True jika pesan dipotong karena melebihi kapasitas buffer
+    #[allow(dead_code)]
+    pub fn was_truncated(&self) -> bool {
+        self.truncated
     }
 }
 
@@ -25,6 +35,9 @@ impl core::fmt::Write for LogBuf {
         let n = bytes.len().min(remaining);
         self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
         self.pos += n;
+        if bytes.len() > remaining {
+            self.truncated = true;
+        }
         Ok(())
     }
 }
@@ -57,12 +70,32 @@ impl LogLevel {
             LogLevel::Panic    => "PANIC",
         }
     }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => LogLevel::Trace,
+            1 => LogLevel::Debug,
+            2 => LogLevel::Notice,
+            3 => LogLevel::Info,
+            4 => LogLevel::Warn,
+            5 => LogLevel::Error,
+            6 => LogLevel::Critical,
+            7 => LogLevel::Fatal,
+            _ => LogLevel::Panic,
+        }
+    }
 }
 
-pub static mut LOG_LEVEL: LogLevel = LogLevel::Info;
+/// Level log global — disimpan sebagai AtomicU8 agar aman diakses dari
+/// banyak core tanpa lock.
+static LOG_LEVEL_ATOMIC: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
 
 pub fn set_level(level: LogLevel) {
-    unsafe { LOG_LEVEL = level };
+    LOG_LEVEL_ATOMIC.store(level as u8, Ordering::Relaxed);
+}
+
+pub fn get_level() -> LogLevel {
+    LogLevel::from_u8(LOG_LEVEL_ATOMIC.load(Ordering::Relaxed))
 }
 
 const DMESG_SIZE: usize = 256;
@@ -77,7 +110,7 @@ pub struct DmesgEntry {
 pub struct Dmesg {
     buf: [DmesgEntry; DMESG_SIZE],
     idx: usize,
-    count: usize,
+    pub count: usize,
 }
 
 impl Dmesg {
@@ -122,18 +155,11 @@ impl<'a> Iterator for DmesgIter<'a> {
         let i = (self.start + self.pos) % DMESG_SIZE;
         let entry = &self.buf[i];
         let len = entry.len as usize;
-        let s = match core::str::from_utf8(&entry.msg[..len]) {
-            Ok(s) => s,
-            Err(_) => {
-                " "
-            }
-        };
+        let s = core::str::from_utf8(&entry.msg[..len]).unwrap_or(" ");
         self.pos += 1;
         Some((entry.level, s))
     }
 }
-
-use core::sync::atomic::{AtomicBool, Ordering};
 
 static DMESG_INIT: AtomicBool = AtomicBool::new(false);
 static DMESG_BUF: SpinLock<Dmesg> = SpinLock::new(Dmesg::new());
@@ -161,15 +187,15 @@ pub fn dmesg_snapshot() -> DmesgSnapshot {
     let buf = DMESG_BUF.lock();
     snap.count = buf.count;
     for (i, (level, msg)) in buf.iter().enumerate() {
-            if i >= DMESG_SIZE { break; }
-            let entry = &mut snap.entries[i];
-            entry.level = level;
-            let bytes = msg.as_bytes();
-            let n = bytes.len().min(127);
-            entry.msg[..n].copy_from_slice(&bytes[..n]);
-            entry.msg[n] = 0;
-            entry.len = n as u8;
-        }
+        if i >= DMESG_SIZE { break; }
+        let entry = &mut snap.entries[i];
+        entry.level = level;
+        let bytes = msg.as_bytes();
+        let n = bytes.len().min(127);
+        entry.msg[..n].copy_from_slice(&bytes[..n]);
+        entry.msg[n] = 0;
+        entry.len = n as u8;
+    }
     snap
 }
 
@@ -182,6 +208,12 @@ pub fn log(level: LogLevel, module: &str, msg: &str) {
     let mut serial = SerialPort::new(0x3F8);
     let _ = write!(serial, "[{}][{}] {}\n", level.prefix(), module, msg);
     dmesg_push(level, msg);
+    // During early boot (interrupts disabled), flush immediately so output
+    // is visible even if a crash/hang occurs before the next scheduled flush.
+    #[cfg(target_os = "none")]
+    if !x86_64::instructions::interrupts::are_enabled() {
+        crate::serial::flush_output_blocking();
+    }
 }
 
 #[macro_export]
@@ -293,10 +325,12 @@ macro_rules! kfatal_code {
 }
 
 /// Panic with structured error code — logs, dumps detailed card, then halts
+/// FLUSHES output buffer before halting so error is visible on serial.
 #[macro_export]
 macro_rules! kpanic_code {
     ($code:expr, $($arg:tt)*) => {{
         $crate::kfatal_code!($code, $($arg)*);
+        $crate::serial::flush_output_blocking();
         loop { x86_64::instructions::hlt(); }
     }};
 }

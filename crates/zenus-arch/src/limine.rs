@@ -249,6 +249,63 @@ pub fn hhdm_offset() -> u64 {
     HHDM_OFFSET.load(Ordering::Relaxed)
 }
 
+// === Framebuffer ===
+
+#[repr(C)]
+pub struct LimineFramebuffer {
+    pub address: LiminePtr,
+    pub width: u64,
+    pub height: u64,
+    pub bpp: u16,
+    pub pitch: u16,
+    pub edid_size: u16,
+    pub edid: LiminePtr,
+    pub mode: u64,
+}
+
+#[repr(C)]
+pub struct LimineFramebufferResponse {
+    pub revision: u64,
+    pub framebuffer_count: u64,
+    pub framebuffers: LiminePtr,
+}
+
+#[repr(C)]
+pub struct LimineFramebufferRequest {
+    pub id: [u64; 4],
+    pub revision: u64,
+    pub response: LiminePtr,
+}
+
+const LIMINE_FRAMEBUFFER_REQUEST_ID: [u64; 4] = [
+    LIMINE_COMMON_MAGIC[0], LIMINE_COMMON_MAGIC[1],
+    0x9d5820bcb5d339f2, 0xad207e38c359b05e,
+];
+
+#[link_section = ".limine_reqs"]
+#[used]
+pub static FRAMEBUFFER_REQUEST: LimineFramebufferRequest = LimineFramebufferRequest {
+    id: LIMINE_FRAMEBUFFER_REQUEST_ID,
+    revision: 0,
+    response: LiminePtr(0),
+};
+
+pub fn framebuffer_info() -> Option<(u64, u64, u64, u16, u16)> {
+    if FRAMEBUFFER_REQUEST.response.is_null() {
+        return None;
+    }
+    let resp: &LimineFramebufferResponse = unsafe { &*FRAMEBUFFER_REQUEST.response.as_ptr() };
+    if resp.framebuffer_count == 0 {
+        return None;
+    }
+    let fb_ptrs = resp.framebuffers.as_ptr::<*mut LimineFramebuffer>();
+    let fb = unsafe { &**fb_ptrs };
+    if fb.address.is_null() {
+        return None;
+    }
+    Some((fb.address.0, fb.width, fb.height, fb.bpp, fb.pitch))
+}
+
 // === Boot Info ===
 
 pub struct BootInfo;
