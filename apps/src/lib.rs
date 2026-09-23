@@ -53,11 +53,7 @@ fn gen_proc_meminfo() -> alloc::string::String {
     let fa = FRAME_ALLOCATOR.lock();
     let total_kb = fa.total_memory() / 1024;
     let used_kb = fa.used_memory() / 1024;
-    let free_kb = if total_kb > used_kb {
-        total_kb - used_kb
-    } else {
-        0
-    };
+    let free_kb = total_kb.saturating_sub(used_kb);
     drop(fa);
     let mut s = alloc::string::String::new();
     let _ = write!(s, "MemTotal:       {} kB\nMemFree:        {} kB\nMemAvailable:   {} kB\nBuffers:        0 kB\nCached:         0 kB\nSwapTotal:      0 kB\nSwapFree:       0 kB\nActive:         {} kB\nInactive:       0 kB\n", total_kb, free_kb, free_kb, used_kb);
@@ -69,7 +65,7 @@ fn gen_proc_uptime() -> alloc::string::String {
     let ticks = zenus_sched::scheduler::uptime_ticks();
     let secs = ticks / 100;
     let mut s = alloc::string::String::new();
-    let _ = write!(s, "{}.{} {}.{}\n", secs, 0u64, secs / 2, 0u64);
+    let _ = writeln!(s, "{}.{} {}.{}", secs, 0u64, secs / 2, 0u64);
     s
 }
 
@@ -89,7 +85,7 @@ fn gen_proc_loadavg() -> alloc::string::String {
     use core::fmt::Write;
     let running = zenus_sched::scheduler::task_count();
     let mut s = alloc::string::String::new();
-    let _ = write!(s, "0.00 0.00 0.00 {}/{} 0\n", running, running);
+    let _ = writeln!(s, "0.00 0.00 0.00 {}/{} 0", running, running);
     s
 }
 
@@ -275,7 +271,7 @@ fn boot_run_userspace(path: &str) -> bool {
     zenus_console::serial::flush_output_blocking();
     scheduler::signal_force_kill(pid);
     scheduler::reap_task(pid);
-    return false;
+    false
 }
 
 fn shell_task() {
@@ -555,7 +551,7 @@ pub extern "C" fn entry() -> ! {
         zenus_arch::watchdog::watchdog_init(zenus_arch::watchdog::WatchdogType::Software, 30);
 
         if zenus_arch::ata::device_count() > 0 {
-            if !zenus_fs::journal::journal_replay(0, 3000) {}
+            zenus_fs::journal::journal_replay(0, 3000);
             if zenus_fs::journal::journal_init(0, 3000, 16) {}
         }
 
@@ -580,7 +576,7 @@ pub extern "C" fn entry() -> ! {
         let _shell_tid = scheduler::create_task_named(shell_task, 65536, "shell");
         zenus_console::kinfo!("Shell PID={}", _shell_tid);
 
-        return run_after_init();
+        run_after_init()
     }
 }
 

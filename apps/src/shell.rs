@@ -230,11 +230,11 @@ impl Shell {
                 None => {
                     // housekeeping on empty input
                     yield_count += 1;
-                    if yield_count % 5 == 0 {
+                    if yield_count.is_multiple_of(5) {
                         zenus_net::nic::net_poll();
                         self.echo_server_poll();
                     }
-                    if yield_count % 50 == 0 {
+                    if yield_count.is_multiple_of(50) {
                         zenus_arch::watchdog::watchdog_pet();
                         zenus_sched::init::service_supervise();
                     }
@@ -252,11 +252,11 @@ impl Shell {
 
             // housekeeping after command
             yield_count += 1;
-            if yield_count % 5 == 0 {
+            if yield_count.is_multiple_of(5) {
                 zenus_net::nic::net_poll();
                 self.echo_server_poll();
             }
-            if yield_count % 50 == 0 {
+            if yield_count.is_multiple_of(50) {
                 zenus_arch::watchdog::watchdog_pet();
                 zenus_sched::init::service_supervise();
             }
@@ -333,7 +333,7 @@ impl Shell {
                         if self.line_pos > 0 {
                             // Check if buffer contains a space (meaning command + argument)
                             let has_space =
-                                self.line_buf[..self.line_pos].iter().any(|&b| b == b' ');
+                                self.line_buf[..self.line_pos].contains(&b' ');
                             if has_space {
                                 // ── File path completion ──
                                 self.tab_complete_path();
@@ -349,11 +349,11 @@ impl Shell {
                 }
             } else {
                 idle_count += 1;
-                if idle_count % 10 == 0 {
+                if idle_count.is_multiple_of(10) {
                     zenus_net::nic::net_poll();
                     self.echo_server_poll();
                 }
-                if idle_count % 50 == 0 {
+                if idle_count.is_multiple_of(50) {
                     zenus_arch::watchdog::watchdog_pet();
                 }
             }
@@ -799,7 +799,7 @@ impl Shell {
 
     fn cmd_sysctl(&mut self, line: &str, w: &mut ShellWriter) {
         let args = Args::parse(line);
-        if args.args().len() < 1 {
+        if args.args().is_empty() {
             let list = zenus_fs::sysctl::sysctl_list();
             w.write_str("Sysctl parameters:\r\n");
             for entry in list {
@@ -1549,7 +1549,7 @@ impl Shell {
             // it never detects TaskState::Terminated after exit_current_task().
 
             // Log every 100 iterations
-            if wait_loops % 100 == 0 {
+            if wait_loops.is_multiple_of(100) {
                 zenus_console::kinfo!("run: still waiting for PID {} (loop {})", pid, wait_loops);
             }
 
@@ -1587,12 +1587,10 @@ impl Shell {
         for cmd in COMMANDS {
             if cmd.len() >= prefix_lower.len()
                 && cmd[..prefix_lower.len()].eq_ignore_ascii_case(&prefix_lower)
-            {
-                if match_count < 32 {
+                && match_count < 32 {
                     matches[match_count] = cmd;
                     match_count += 1;
                 }
-            }
         }
         if match_count == 1 {
             // Unique match: complete the command name
@@ -1688,12 +1686,11 @@ impl Shell {
         let mut match_indices: [usize; 64] = [0; 64];
         let mut match_count = 0usize;
         for (idx, entry) in entries.iter().enumerate() {
-            if entry.name.starts_with(file_prefix) {
-                if match_count < 64 {
+            if entry.name.starts_with(file_prefix)
+                && match_count < 64 {
                     match_indices[match_count] = idx;
                     match_count += 1;
                 }
-            }
         }
 
         if match_count == 0 {
