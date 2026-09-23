@@ -8,7 +8,9 @@ static AP_READY_COUNT: AtomicU32 = AtomicU32::new(0);
 static mut AP_IDLE_FN: Option<fn() -> !> = None;
 
 pub fn set_ap_idle_fn(f: fn() -> !) {
-    unsafe { AP_IDLE_FN = Some(f); }
+    unsafe {
+        AP_IDLE_FN = Some(f);
+    }
 }
 
 #[repr(C)]
@@ -19,7 +21,10 @@ pub struct CpuInfo {
 }
 
 const MAX_CPUS: usize = 64;
-static mut CPU_TABLE: [CpuInfo; MAX_CPUS] = [CpuInfo { apic_id: 0, cpu_number: 0 }; MAX_CPUS];
+static mut CPU_TABLE: [CpuInfo; MAX_CPUS] = [CpuInfo {
+    apic_id: 0,
+    cpu_number: 0,
+}; MAX_CPUS];
 
 pub fn init() {
     if limine::MP_REQUEST.response.is_null() {
@@ -27,15 +32,40 @@ pub fn init() {
         return;
     }
 
-    let resp: &limine::LimineMpResponse =
-        unsafe { &*limine::MP_REQUEST.response.as_ptr() };
+    let resp: &limine::LimineMpResponse = unsafe { &*limine::MP_REQUEST.response.as_ptr() };
     let count = resp.cpu_count as u32;
     CPU_COUNT.store(count, Ordering::Relaxed);
 
-    let info_ptrs: *mut *mut LimineMpInfo = resp.cpus.0 as *mut *mut LimineMpInfo;
+    let info_ptrs_phys = resp.cpus.0;
+    let hhdm = limine::hhdm_offset();
+
+    if info_ptrs_phys == 0 || info_ptrs_phys == 0xFFFFFFFFFFFFFFFF {
+        zenus_console::kwarn!("MP response cpus pointer invalid: {:#x}", info_ptrs_phys);
+        return;
+    }
+
+    let info_ptrs_virt = info_ptrs_phys.saturating_add(hhdm);
+    if info_ptrs_virt == 0 || info_ptrs_virt == 0xFFFFFFFFFFFFFFFF {
+        zenus_console::kwarn!(
+            "MP response cpus virtual pointer invalid: {:#x}",
+            info_ptrs_virt
+        );
+        return;
+    }
+
+    let info_ptrs = info_ptrs_virt as *mut *mut LimineMpInfo;
     unsafe {
-        for i in 0..(count as usize) {
-            let info = &**info_ptrs.add(i);
+        for i in 0..(count as usize).min(MAX_CPUS) {
+            let info_ptr_phys = *info_ptrs.add(i);
+            let info_ptr_phys_val = info_ptr_phys as u64;
+            if info_ptr_phys_val == 0 || info_ptr_phys_val == 0xFFFFFFFFFFFFFFFF {
+                continue;
+            }
+            let info_virt = info_ptr_phys_val.saturating_add(hhdm);
+            if info_virt == 0 || info_virt == 0xFFFFFFFFFFFFFFFF {
+                continue;
+            }
+            let info = &*(info_virt as *const LimineMpInfo);
             CPU_TABLE[i] = CpuInfo {
                 apic_id: info.lapic_id,
                 cpu_number: i as u32,
@@ -51,19 +81,38 @@ pub fn wake_aps() {
         return;
     }
 
-    let resp: &limine::LimineMpResponse =
-        unsafe { &*limine::MP_REQUEST.response.as_ptr() };
+    let resp: &limine::LimineMpResponse = unsafe { &*limine::MP_REQUEST.response.as_ptr() };
     if resp.cpu_count <= 1 {
         return;
     }
 
     let bsp_lapic_id = resp.bsp_lapic_id;
-    let info_ptrs: *mut *mut LimineMpInfo = resp.cpus.0 as *mut *mut LimineMpInfo;
+    let info_ptrs_phys = resp.cpus.0;
+    let hhdm = limine::hhdm_offset();
+    let info_ptrs_virt = info_ptrs_phys.saturating_add(hhdm);
+
+    if info_ptrs_virt == 0 || info_ptrs_virt == 0xFFFFFFFFFFFFFFFF {
+        zenus_console::kwarn!(
+            "MP response cpus virtual pointer invalid in wake_aps: {:#x}",
+            info_ptrs_virt
+        );
+        return;
+    }
+
+    let info_ptrs = info_ptrs_virt as *mut *mut LimineMpInfo;
     let total = resp.cpu_count as usize;
 
     for i in 0..total {
-        let info_ptr: *mut LimineMpInfo = unsafe { *info_ptrs.add(i) };
-        let info = unsafe { &mut *info_ptr };
+        let info_ptr_phys = unsafe { *info_ptrs.add(i) };
+        let info_ptr_phys_val = info_ptr_phys as u64;
+        if info_ptr_phys_val == 0 || info_ptr_phys_val == 0xFFFFFFFFFFFFFFFF {
+            continue;
+        }
+        let info_virt = info_ptr_phys_val.saturating_add(hhdm);
+        if info_virt == 0 || info_virt == 0xFFFFFFFFFFFFFFFF {
+            continue;
+        }
+        let info = unsafe { &mut *(info_virt as *mut LimineMpInfo) };
         if info.lapic_id == bsp_lapic_id {
             continue;
         }
@@ -100,13 +149,17 @@ pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
     if let Some(f) = idle_fn {
         f()
     } else {
-        loop { x86_64::instructions::hlt(); }
+        loop {
+            x86_64::instructions::hlt();
+        }
     }
 }
 
 pub fn cpu_number_for_apic(lapic_id: u32) -> u32 {
     let count = CPU_COUNT.load(Ordering::Relaxed) as usize;
-    if count == 0 || count > MAX_CPUS { return 0; }
+    if count == 0 || count > MAX_CPUS {
+        return 0;
+    }
     unsafe {
         for i in 0..count {
             if CPU_TABLE[i].apic_id == lapic_id {
@@ -123,8 +176,12 @@ pub fn cpu_count() -> u32 {
 
 pub fn current_cpu() -> u32 {
     let count = CPU_COUNT.load(Ordering::Relaxed) as usize;
-    if count == 0 { return 0; }
-    if count > MAX_CPUS { return 0; }
+    if count == 0 {
+        return 0;
+    }
+    if count > MAX_CPUS {
+        return 0;
+    }
     let apic_id = crate::interrupts::apic::current_apic_id();
     unsafe {
         for i in 0..count {

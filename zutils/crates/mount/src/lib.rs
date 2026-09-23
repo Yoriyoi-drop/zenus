@@ -1,8 +1,8 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
 use zenus_fs::vfs;
 use zenus_sched::scheduler;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     let mnt_ns = scheduler::current_mnt_ns();

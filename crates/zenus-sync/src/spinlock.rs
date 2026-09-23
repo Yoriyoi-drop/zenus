@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering, AtomicU64};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use x86_64::instructions::interrupts;
 
 #[repr(C)]
@@ -68,7 +68,10 @@ impl<T> SpinLock<T> {
                 }
             }
         }
-        SpinLockGuard { lock: self, irq_was_enabled }
+        SpinLockGuard {
+            lock: self,
+            irq_was_enabled,
+        }
     }
 
     pub fn lock_no_irq(&self) -> SpinLockGuard<'_, T> {
@@ -91,7 +94,10 @@ impl<T> SpinLock<T> {
                 }
             }
         }
-        SpinLockGuard { lock: self, irq_was_enabled: false }
+        SpinLockGuard {
+            lock: self,
+            irq_was_enabled: false,
+        }
     }
 
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
@@ -104,7 +110,10 @@ impl<T> SpinLock<T> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            Some(SpinLockGuard { lock: self, irq_was_enabled })
+            Some(SpinLockGuard {
+                lock: self,
+                irq_was_enabled,
+            })
         } else {
             if irq_was_enabled {
                 interrupts::enable();
@@ -119,7 +128,10 @@ impl<T> SpinLock<T> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            Some(SpinLockGuard { lock: self, irq_was_enabled: false })
+            Some(SpinLockGuard {
+                lock: self,
+                irq_was_enabled: false,
+            })
         } else {
             None
         }

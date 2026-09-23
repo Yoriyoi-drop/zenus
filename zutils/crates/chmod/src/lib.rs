@@ -1,7 +1,7 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
 use zenus_fs::vfs;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
     if args.args().len() < 2 {

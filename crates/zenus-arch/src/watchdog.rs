@@ -54,7 +54,9 @@ pub fn watchdog_get_remaining() -> u32 {
     let now = WDT_TICK_COUNT.load(Ordering::Acquire);
     let elapsed_ticks = now.wrapping_sub(last);
     let elapsed_secs = (elapsed_ticks / TICKS_PER_SEC) as u32;
-    WDT_TIMEOUT_SECS.load(Ordering::Acquire).saturating_sub(elapsed_secs)
+    WDT_TIMEOUT_SECS
+        .load(Ordering::Acquire)
+        .saturating_sub(elapsed_secs)
 }
 
 pub fn watchdog_tick() {
@@ -70,7 +72,10 @@ pub fn watchdog_tick() {
         let elapsed_ticks = tick_count.wrapping_sub(last);
         let elapsed_secs = (elapsed_ticks / TICKS_PER_SEC) as u32;
         if elapsed_secs >= WDT_TIMEOUT_SECS.load(Ordering::Acquire) {
-            zenus_console::kpanic_code!(zenus_console::error::codes::DRV_COMM_TIMEOUT, "Watchdog timeout! Rebooting...");
+            zenus_console::kpanic_code!(
+                zenus_console::error::codes::DRV_COMM_TIMEOUT,
+                "Watchdog timeout! Rebooting..."
+            );
         }
     }
 }
@@ -84,5 +89,8 @@ pub fn watchdog_get_timeout() -> u32 {
 }
 
 pub fn watchdog_force_reboot() {
-    zenus_console::kpanic_code!(zenus_console::error::codes::DRV_COMM_TIMEOUT, "Watchdog forced reboot");
+    zenus_console::kpanic_code!(
+        zenus_console::error::codes::DRV_COMM_TIMEOUT,
+        "Watchdog forced reboot"
+    );
 }

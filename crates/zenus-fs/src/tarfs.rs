@@ -1,6 +1,6 @@
-use core::slice;
+use crate::vfs::{self, DirEntry, FileStat, FileSystem, FileType};
 use alloc::boxed::Box;
-use crate::vfs::{self, FileSystem, FileType, FileStat, DirEntry};
+use core::slice;
 use zenus_sync::spinlock::SpinLock;
 
 #[repr(C, packed)]
@@ -64,8 +64,11 @@ struct TarData {
 
 static TAR_DATA: SpinLock<TarData> = SpinLock::new(TarData {
     entries: [TarEntry {
-        inode: 0, name: "", file_type: FileType::None,
-        data_off: 0, data_len: 0,
+        inode: 0,
+        name: "",
+        file_type: FileType::None,
+        data_off: 0,
+        data_len: 0,
     }; MAX_ENTRIES],
     count: 0,
     data_base: 0,
@@ -77,8 +80,11 @@ impl TarFs {
     pub fn load(addr: u64, len: u64) -> Option<&'static Self> {
         let data = unsafe { slice::from_raw_parts(addr as *const u8, len as usize) };
         let mut tmp_entries: [TarEntry; MAX_ENTRIES] = [TarEntry {
-            inode: 0, name: "", file_type: FileType::None,
-            data_off: 0, data_len: 0,
+            inode: 0,
+            name: "",
+            file_type: FileType::None,
+            data_off: 0,
+            data_len: 0,
         }; MAX_ENTRIES];
         let mut count = 0usize;
         let mut offset = 0usize;
@@ -144,7 +150,8 @@ impl TarFs {
 
     fn find_inode(&self, name: &str) -> Option<u64> {
         let tar = TAR_DATA.lock();
-        tar.entries[..tar.count].iter()
+        tar.entries[..tar.count]
+            .iter()
             .find(|e| e.name == name)
             .map(|e| e.inode)
     }
@@ -249,13 +256,23 @@ impl FileSystem for TarFs {
                         return false;
                     }
                     let rest = &en[dir_name.len()..];
-                    let rest = if dir_ends_slash { rest } else {
-                        if !rest.starts_with('/') { return false; }
+                    let rest = if dir_ends_slash {
+                        rest
+                    } else {
+                        if !rest.starts_with('/') {
+                            return false;
+                        }
                         &rest[1..]
                     };
-                    if rest.len() < child.len() { return false; }
-                    if !rest.starts_with(child) { return false; }
-                    if rest.len() == child.len() { return true; }
+                    if rest.len() < child.len() {
+                        return false;
+                    }
+                    if !rest.starts_with(child) {
+                        return false;
+                    }
+                    if rest.len() == child.len() {
+                        return true;
+                    }
                     rest.as_bytes()[child.len()] == b'/'
                 })
             };
@@ -278,7 +295,12 @@ impl FileSystem for TarFs {
     fn stat(&self, inode: u64) -> FileStat {
         if inode == 0 {
             return FileStat {
-                size: 0, file_type: FileType::Directory, inode: 0, blocks: 0, uid: 0, gid: 0,
+                size: 0,
+                file_type: FileType::Directory,
+                inode: 0,
+                blocks: 0,
+                uid: 0,
+                gid: 0,
                 mode: vfs::DEFAULT_DIR_MODE,
             };
         }
@@ -294,7 +316,13 @@ impl FileSystem for TarFs {
                 mode: vfs::DEFAULT_FILE_MODE,
             },
             None => FileStat {
-                size: 0, file_type: FileType::None, inode, blocks: 0, uid: 0, gid: 0, mode: 0,
+                size: 0,
+                file_type: FileType::None,
+                inode,
+                blocks: 0,
+                uid: 0,
+                gid: 0,
+                mode: 0,
             },
         }
     }

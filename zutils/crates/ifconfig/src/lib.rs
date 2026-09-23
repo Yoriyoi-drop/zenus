@@ -1,7 +1,7 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
 use zenus_net::nic;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     let count = nic::iface_count();
@@ -12,7 +12,9 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
             w.write_str(":\r\n");
             w.write_str("  MAC: ");
             for (j, b) in iface.mac.iter().enumerate() {
-                if j > 0 { w.write_byte(b':'); }
+                if j > 0 {
+                    w.write_byte(b':');
+                }
                 w.write_hex(*b as u64);
             }
             w.write_str("\r\n  IP: ");

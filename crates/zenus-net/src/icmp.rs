@@ -65,15 +65,24 @@ pub fn handle_echo(
     let ip_total_len = (20 + 8 + data_len) as u16;
 
     let mut off = 14;
-    buf[off] = 0x45; off += 1;
-    buf[off] = 0; off += 1;
-    buf[off..off + 2].copy_from_slice(&ip_total_len.to_be_bytes()); off += 2;
-    buf[off..off + 2].copy_from_slice(&[0, 0]); off += 2;
-    buf[off..off + 2].copy_from_slice(&[0, 0]); off += 2;
-    buf[off] = 64; off += 1;
-    buf[off] = ipv4::PROTO_ICMP; off += 1;
-    buf[off..off + 2].copy_from_slice(&[0, 0]); off += 2;
-    buf[off..off + 4].copy_from_slice(our_ip); off += 4;
+    buf[off] = 0x45;
+    off += 1;
+    buf[off] = 0;
+    off += 1;
+    buf[off..off + 2].copy_from_slice(&ip_total_len.to_be_bytes());
+    off += 2;
+    buf[off..off + 2].copy_from_slice(&[0, 0]);
+    off += 2;
+    buf[off..off + 2].copy_from_slice(&[0, 0]);
+    off += 2;
+    buf[off] = 64;
+    off += 1;
+    buf[off] = ipv4::PROTO_ICMP;
+    off += 1;
+    buf[off..off + 2].copy_from_slice(&[0, 0]);
+    off += 2;
+    buf[off..off + 4].copy_from_slice(our_ip);
+    off += 4;
     buf[off..off + 4].copy_from_slice(&ip_hdr.src_ip);
 
     let ip_csum = ip_checksum(&buf[14..34]);

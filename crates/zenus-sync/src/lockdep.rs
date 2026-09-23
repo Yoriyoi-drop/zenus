@@ -1,5 +1,5 @@
-use core::sync::atomic::{AtomicBool, Ordering};
 use crate::spinlock::SpinLock;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 fn lockdep_serial(msg: &str) {
     for &b in msg.as_bytes() {
@@ -8,9 +8,13 @@ fn lockdep_serial(msg: &str) {
             loop {
                 let mut lsr: u8;
                 core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16, options(nostack, preserves_flags));
-                if lsr & 0x20 != 0 { break; }
+                if lsr & 0x20 != 0 {
+                    break;
+                }
                 timeout -= 1;
-                if timeout == 0 { return; }
+                if timeout == 0 {
+                    return;
+                }
                 core::hint::spin_loop();
             }
             core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nostack, preserves_flags));
@@ -48,7 +52,10 @@ struct LockdepState {
 
 impl LockdepState {
     const fn new() -> Self {
-        const EMPTY_CLASS: LockClass = LockClass { name: "", registered: false };
+        const EMPTY_CLASS: LockClass = LockClass {
+            name: "",
+            registered: false,
+        };
         const EMPTY_EDGE: LockEdge = LockEdge { from: 0, to: 0 };
         LockdepState {
             classes: [EMPTY_CLASS; MAX_LOCKS],
@@ -68,7 +75,9 @@ static LOCKDEP_ENABLED: AtomicBool = AtomicBool::new(true);
 
 fn current_cpu() -> usize {
     let cpu: u64;
-    unsafe { core::arch::asm!("mov {}, cr8", out(reg) cpu); }
+    unsafe {
+        core::arch::asm!("mov {}, cr8", out(reg) cpu);
+    }
     cpu as usize % MAX_CPUS
 }
 
@@ -90,7 +99,10 @@ pub fn lockdep_register(name: &'static str) -> usize {
         return 0;
     }
     let id = state.class_count;
-    state.classes[id] = LockClass { name, registered: true };
+    state.classes[id] = LockClass {
+        name,
+        registered: true,
+    };
     state.class_count += 1;
     id
 }
@@ -116,7 +128,10 @@ pub fn lockdep_acquire(lock_id: usize, caller: &'static str) -> bool {
             .iter()
             .any(|e| e.from == held && e.to == lock_id);
         if !already_recorded && ec < MAX_EDGES {
-            state.edges[ec] = LockEdge { from: held, to: lock_id };
+            state.edges[ec] = LockEdge {
+                from: held,
+                to: lock_id,
+            };
             state.edge_count = ec + 1;
         }
 

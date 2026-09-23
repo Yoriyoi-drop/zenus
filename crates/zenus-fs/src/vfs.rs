@@ -1,4 +1,3 @@
-
 use zenus_sync::spinlock::SpinLock;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,8 +45,12 @@ pub trait FileSystem: Send + Sync {
         }
         None
     }
-    fn chmod(&self, _inode: u64, _mode: u16) -> bool { false }
-    fn chown(&self, _inode: u64, _uid: u32, _gid: u32) -> bool { false }
+    fn chmod(&self, _inode: u64, _mode: u16) -> bool {
+        false
+    }
+    fn chown(&self, _inode: u64, _uid: u32, _gid: u32) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -70,7 +73,10 @@ struct MountTable {
     count: usize,
 }
 
-const EMPTY_MOUNT: Mount = Mount { path: "", fs: &crate::devfs::DevFs as &dyn FileSystem };
+const EMPTY_MOUNT: Mount = Mount {
+    path: "",
+    fs: &crate::devfs::DevFs as &dyn FileSystem,
+};
 
 fn empty_dir_entry() -> DirEntry {
     DirEntry {
@@ -156,7 +162,10 @@ fn with_mount_table<R>(ns_id: zenus_ns::NsId, f: impl FnOnce(&mut MountTable) ->
     }
 }
 
-fn find_mount_in_table(ns_id: zenus_ns::NsId, path: &str) -> Option<(&'static (dyn FileSystem + 'static), &'static str)> {
+fn find_mount_in_table(
+    ns_id: zenus_ns::NsId,
+    path: &str,
+) -> Option<(&'static (dyn FileSystem + 'static), &'static str)> {
     if ns_id == zenus_ns::NS_ROOT {
         let mt = MOUNT_TABLE.lock();
         let mut best: Option<(&dyn FileSystem, &str)> = None;
@@ -216,7 +225,10 @@ pub fn init() {
     }
     {
         let mut mt = MOUNT_TABLE.lock();
-        mt.mounts[0] = Mount { path: "/", fs: tmp_fs };
+        mt.mounts[0] = Mount {
+            path: "/",
+            fs: tmp_fs,
+        };
         mt.count = 1;
     }
 
@@ -238,7 +250,9 @@ pub fn umount_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
     if ns_id == zenus_ns::NS_ROOT {
         let mut mt = MOUNT_TABLE.lock();
         // Cannot unmount root
-        if mt.count <= 1 { return false; }
+        if mt.count <= 1 {
+            return false;
+        }
         let mut found = false;
         for i in 1..mt.count {
             let m_path = mt.mounts[i].path;
@@ -258,7 +272,9 @@ pub fn umount_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
     let mut tables = MNT_NS_TABLES.lock();
     for entry in tables.entries.iter_mut().flatten() {
         if entry.ns_id == ns_id {
-            if entry.table.count <= 1 { return false; }
+            if entry.table.count <= 1 {
+                return false;
+            }
             for i in 1..entry.table.count {
                 let m_path = entry.table.mounts[i].path;
                 if paths_equal(m_path, target) {
@@ -278,7 +294,9 @@ pub fn umount_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
 fn paths_equal(a: &str, b: &str) -> bool {
     let a = a.trim_end_matches('/');
     let b = b.trim_end_matches('/');
-    if a.is_empty() && b.is_empty() { return true; }
+    if a.is_empty() && b.is_empty() {
+        return true;
+    }
     a == b
 }
 
@@ -342,7 +360,10 @@ pub fn create_dir_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
     };
     let name = file_name(path);
     match open_in_ns(ns_id, &parent) {
-        Some(node) => node.fs.create(node.inode, name, FileType::Directory).is_some(),
+        Some(node) => node
+            .fs
+            .create(node.inode, name, FileType::Directory)
+            .is_some(),
         None => false,
     }
 }
@@ -365,7 +386,9 @@ pub fn remove_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
 
 pub(crate) fn parent_dir<'a>(path: &'a str) -> Option<&'a str> {
     let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() { return None; }
+    if trimmed.is_empty() {
+        return None;
+    }
     match trimmed.rfind('/') {
         Some(pos) if pos == 0 => Some("/"),
         Some(pos) => Some(&trimmed[..pos]),
@@ -457,7 +480,10 @@ pub fn open(path: &str) -> Option<VfsNode> {
 
 pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
     if path == "/" || path.is_empty() {
-        return root().map(|r| VfsNode { fs: r.fs, inode: r.inode });
+        return root().map(|r| VfsNode {
+            fs: r.fs,
+            inode: r.inode,
+        });
     }
 
     let (fs, mount_prefix) = find_mount_in_table(ns_id, path)?;
@@ -467,23 +493,35 @@ pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
         path
     } else if path.starts_with(mount_prefix) {
         let rest = &path[mount_prefix.len()..];
-        if rest.is_empty() { "/" } else { rest }
+        if rest.is_empty() {
+            "/"
+        } else {
+            rest
+        }
     } else {
         path
     };
 
     if rel_path == "/" || rel_path.is_empty() {
-        return Some(VfsNode { fs, inode: root_inode });
+        return Some(VfsNode {
+            fs,
+            inode: root_inode,
+        });
     }
 
     let trimmed = rel_path.trim_start_matches('/');
-    let mut current = VfsNode { fs, inode: root_inode };
+    let mut current = VfsNode {
+        fs,
+        inode: root_inode,
+    };
     let root_inode_num = root_inode;
     let mut path_segments: [&str; 32] = [""; 32];
     let mut seg_count = 0;
 
     for part in trimmed.split('/') {
-        if part.is_empty() || part == "." { continue; }
+        if part.is_empty() || part == "." {
+            continue;
+        }
         if part == ".." {
             if seg_count > 0 {
                 // Check if removing this segment would cross mount boundary
@@ -503,8 +541,15 @@ pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
     for i in 0..seg_count {
         let part = path_segments[i];
         match current.fs.lookup(current.inode, part) {
-            Some(inode) => { current = VfsNode { fs: current.fs, inode }; }
-            None => { return None; }
+            Some(inode) => {
+                current = VfsNode {
+                    fs: current.fs,
+                    inode,
+                };
+            }
+            None => {
+                return None;
+            }
         }
     }
     Some(current)
@@ -524,23 +569,38 @@ pub const S_IFDIR: u16 = 0x4000;
 pub const DEFAULT_FILE_MODE: u16 = 0x81A4;
 pub const DEFAULT_DIR_MODE: u16 = 0x41ED;
 
-pub fn access_check(_uid: u32, _gid: u32, euid: u32, egid: u32, stat: &FileStat, want_write: bool) -> bool {
+pub fn access_check(
+    _uid: u32,
+    _gid: u32,
+    euid: u32,
+    egid: u32,
+    stat: &FileStat,
+    want_write: bool,
+) -> bool {
     let mode = stat.mode;
     if euid == 0 {
         return true;
     }
     if euid == stat.uid {
         if want_write {
-            if (mode & S_IWUSR) == 0 { return false; }
-            if (mode & S_IXUSR) == 0 && stat.file_type == FileType::Directory { return false; }
+            if (mode & S_IWUSR) == 0 {
+                return false;
+            }
+            if (mode & S_IXUSR) == 0 && stat.file_type == FileType::Directory {
+                return false;
+            }
             return true;
         } else {
             return (mode & S_IRUSR) != 0;
         }
     } else if egid == stat.gid {
         if want_write {
-            if (mode & S_IWGRP) == 0 { return false; }
-            if (mode & S_IXGRP) == 0 && stat.file_type == FileType::Directory { return false; }
+            if (mode & S_IWGRP) == 0 {
+                return false;
+            }
+            if (mode & S_IXGRP) == 0 && stat.file_type == FileType::Directory {
+                return false;
+            }
             return true;
         } else {
             return (mode & S_IRGRP) != 0;
@@ -558,17 +618,40 @@ pub fn perm_str(mode: u16) -> [u8; 10] {
     let mut buf = *b"----------";
     let ft = (mode >> 12) & 0xF;
     buf[0] = match ft {
-        0x4 => b'd', 0x8 => b'-', 0x2 => b'c', 0x6 => b'b', 0xA => b'l', _ => b'?',
+        0x4 => b'd',
+        0x8 => b'-',
+        0x2 => b'c',
+        0x6 => b'b',
+        0xA => b'l',
+        _ => b'?',
     };
-    if mode & S_IRUSR != 0 { buf[1] = b'r'; }
-    if mode & S_IWUSR != 0 { buf[2] = b'w'; }
-    if mode & S_IXUSR != 0 { buf[3] = b'x'; }
-    if mode & S_IRGRP != 0 { buf[4] = b'r'; }
-    if mode & S_IWGRP != 0 { buf[5] = b'w'; }
-    if mode & S_IXGRP != 0 { buf[6] = b'x'; }
-    if mode & S_IROTH != 0 { buf[7] = b'r'; }
-    if mode & S_IWOTH != 0 { buf[8] = b'w'; }
-    if mode & S_IXOTH != 0 { buf[9] = b'x'; }
+    if mode & S_IRUSR != 0 {
+        buf[1] = b'r';
+    }
+    if mode & S_IWUSR != 0 {
+        buf[2] = b'w';
+    }
+    if mode & S_IXUSR != 0 {
+        buf[3] = b'x';
+    }
+    if mode & S_IRGRP != 0 {
+        buf[4] = b'r';
+    }
+    if mode & S_IWGRP != 0 {
+        buf[5] = b'w';
+    }
+    if mode & S_IXGRP != 0 {
+        buf[6] = b'x';
+    }
+    if mode & S_IROTH != 0 {
+        buf[7] = b'r';
+    }
+    if mode & S_IWOTH != 0 {
+        buf[8] = b'w';
+    }
+    if mode & S_IXOTH != 0 {
+        buf[9] = b'x';
+    }
     buf
 }
 

@@ -1,5 +1,5 @@
+use crate::{alloc_ns_id, NsId, NS_ROOT};
 use zenus_sync::spinlock::SpinLock;
-use crate::{NsId, alloc_ns_id, NS_ROOT};
 
 const MAX_PID_NAMESPACES: usize = 16;
 
@@ -93,7 +93,10 @@ pub fn register_task(ns_id: NsId, global_tid: u64) -> Option<u64> {
     }
     let local_pid = ns.next_local_pid;
     ns.next_local_pid += 1;
-    ns.entries[ns.entry_count] = Some(PidEntry { local_pid, global_tid });
+    ns.entries[ns.entry_count] = Some(PidEntry {
+        local_pid,
+        global_tid,
+    });
     ns.entry_count += 1;
     Some(local_pid)
 }

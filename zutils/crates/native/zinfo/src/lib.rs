@@ -1,7 +1,7 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
 use zenus_mem::allocator::ALLOCATOR;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     let hhdm = zenus_arch::limine::hhdm_offset();

@@ -4,17 +4,17 @@
 #![allow(bad_asm_style)]
 extern crate alloc;
 
-pub mod limine;
+pub mod acpi;
+pub mod ata;
 pub mod cpu;
+pub mod crash;
 pub mod gdt;
 pub mod interrupts;
-pub mod smp;
-pub mod pci;
-pub mod acpi;
 pub mod keyboard;
-pub mod ata;
-pub mod rtc;
-pub mod user;
+pub mod limine;
+pub mod pci;
 pub mod random;
-pub mod crash;
+pub mod rtc;
+pub mod smp;
+pub mod user;
 pub mod watchdog;

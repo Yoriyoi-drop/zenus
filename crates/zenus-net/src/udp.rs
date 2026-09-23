@@ -47,7 +47,14 @@ pub fn parse(packet: &[u8]) -> Option<(UdpHeader, &[u8])> {
     Some((header, udp_payload))
 }
 
-pub fn send(iface_idx: usize, src_port: u16, dst_port: u16, src_ip: [u8; 4], dst_ip: [u8; 4], payload: &[u8]) -> bool {
+pub fn send(
+    iface_idx: usize,
+    src_port: u16,
+    dst_port: u16,
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    payload: &[u8],
+) -> bool {
     let total_len = 8 + payload.len();
     if total_len > 1500 {
         return false;
@@ -57,14 +64,16 @@ pub fn send(iface_idx: usize, src_port: u16, dst_port: u16, src_ip: [u8; 4], dst
     buf[2..4].copy_from_slice(&dst_port.to_be_bytes());
     buf[4..6].copy_from_slice(&(total_len as u16).to_be_bytes());
     buf[8..total_len].copy_from_slice(payload);
-    ipv4::send_raw(iface_idx, src_ip, dst_ip, ipv4::PROTO_UDP, &buf[..total_len])
+    ipv4::send_raw(
+        iface_idx,
+        src_ip,
+        dst_ip,
+        ipv4::PROTO_UDP,
+        &buf[..total_len],
+    )
 }
 
-pub fn handle_receive(
-    iface_idx: usize,
-    src_ip: [u8; 4], dst_ip: [u8; 4],
-    packet: &[u8],
-) -> bool {
+pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], packet: &[u8]) -> bool {
     if packet.len() < 8 {
         return false;
     }

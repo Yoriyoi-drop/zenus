@@ -1,5 +1,5 @@
+use x86_64::structures::paging::{FrameAllocator as FrameAllocatorTrait, PhysFrame, Size4KiB};
 use x86_64::PhysAddr;
-use x86_64::structures::paging::{FrameAllocator as FrameAllocatorTrait, Size4KiB, PhysFrame};
 use zenus_sync::spinlock::SpinLock;
 
 use crate::paging::PAGE_SIZE;
@@ -85,7 +85,10 @@ impl FrameAllocator {
             0
         };
 
-        zenus_console::kinfo!("Memory: {} MB total", allocator.total_memory / (1024 * 1024));
+        zenus_console::kinfo!(
+            "Memory: {} MB total",
+            allocator.total_memory / (1024 * 1024)
+        );
 
         allocator
     }
@@ -160,9 +163,15 @@ impl FrameAllocator {
         self.used_memory = self.used_memory.saturating_sub(PAGE_SIZE as u64);
     }
 
-    pub fn used_memory(&self) -> u64 { self.used_memory }
-    pub fn total_memory(&self) -> u64 { self.total_memory }
-    pub fn free_frames_count(&self) -> usize { self.free_count }
+    pub fn used_memory(&self) -> u64 {
+        self.used_memory
+    }
+    pub fn total_memory(&self) -> u64 {
+        self.total_memory
+    }
+    pub fn free_frames_count(&self) -> usize {
+        self.free_count
+    }
 
     /// Clear all entries from the free stack.
     /// Used before loading user programs to prevent stale frame reuse
@@ -172,7 +181,9 @@ impl FrameAllocator {
     }
 
     pub fn reserve_region(&mut self, base: u64, length: u64) {
-        if length == 0 { return; }
+        if length == 0 {
+            return;
+        }
         let end = base + length;
         let mut i = 0;
         while i < self.region_count {
@@ -192,25 +203,37 @@ impl FrameAllocator {
             }
             // Overlap at start
             if base <= r.base {
-                self.regions[i] = MemRegion { base: end, length: r_end - end };
+                self.regions[i] = MemRegion {
+                    base: end,
+                    length: r_end - end,
+                };
                 i += 1;
                 continue;
             }
             // Overlap at end
             if end >= r_end {
-                self.regions[i] = MemRegion { base: r.base, length: base - r.base };
+                self.regions[i] = MemRegion {
+                    base: r.base,
+                    length: base - r.base,
+                };
                 i += 1;
                 continue;
             }
             // Split: kernel region in the middle
-            self.regions[i] = MemRegion { base: r.base, length: base - r.base };
+            self.regions[i] = MemRegion {
+                base: r.base,
+                length: base - r.base,
+            };
             if self.region_count < MAX_REGIONS {
                 let mut j = self.region_count;
                 while j > i + 1 {
                     self.regions[j] = self.regions[j - 1];
                     j -= 1;
                 }
-                self.regions[i + 1] = MemRegion { base: end, length: r_end - end };
+                self.regions[i + 1] = MemRegion {
+                    base: end,
+                    length: r_end - end,
+                };
                 self.region_count += 1;
             }
             i += 1;
@@ -224,7 +247,8 @@ impl FrameAllocator {
 
 unsafe impl FrameAllocatorTrait<Size4KiB> for FrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        self.alloc_frame().map(|addr| PhysFrame::containing_address(addr))
+        self.alloc_frame()
+            .map(|addr| PhysFrame::containing_address(addr))
     }
 }
 
@@ -241,7 +265,9 @@ unsafe impl FrameAllocatorTrait<Size4KiB> for FrameAllocator {
 /// stack and corrupts the shell's local variables.
 pub fn reserve_boot_stack(hhdm_offset: u64) {
     let rsp: u64;
-    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags));
+    }
     let rsp_phys = rsp.wrapping_sub(hhdm_offset);
     // Round down to page boundary, then reserve 512 KiB (128 pages) below current RSP
     let stack_page_base = (rsp_phys - 524288) & !0xFFF;
@@ -293,10 +319,16 @@ pub fn global_init(memory_map: &[MemoryRegion]) {
         for entry in memory_map {
             if entry.kind == 6 {
                 let candidate = entry.base + entry.length;
-                if candidate > kernel_end { kernel_end = candidate; }
+                if candidate > kernel_end {
+                    kernel_end = candidate;
+                }
             }
         }
-        if start < kernel_end { kernel_end } else { start }
+        if start < kernel_end {
+            kernel_end
+        } else {
+            start
+        }
     } else {
         0
     };

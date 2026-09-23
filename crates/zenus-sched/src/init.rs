@@ -1,7 +1,7 @@
+use super::scheduler;
 use core::sync::atomic::{AtomicBool, Ordering};
 use zenus_console::serial::SerialPort;
 use zenus_sync::spinlock::SpinLock;
-use super::scheduler;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ServiceState {
@@ -241,7 +241,9 @@ pub fn service_supervise() {
                     if svc.state != ServiceState::Running || svc.pid == 0 {
                         return None;
                     }
-                    let alive = task_list.iter().any(|t| matches!(t, Some(info) if info.id == svc.pid));
+                    let alive = task_list
+                        .iter()
+                        .any(|t| matches!(t, Some(info) if info.id == svc.pid));
                     if alive {
                         return None;
                     }
@@ -368,7 +370,10 @@ pub fn init_shutdown() -> ! {
         }
     }
 
-    zenus_console::kpanic_code!(zenus_console::error::codes::KRN_STACK_OVERFLOW, "System halted");
+    zenus_console::kpanic_code!(
+        zenus_console::error::codes::KRN_STACK_OVERFLOW,
+        "System halted"
+    );
     loop {
         x86_64::instructions::hlt();
     }
@@ -414,7 +419,10 @@ pub fn initrd_execute() -> bool {
     match node.fs.read(node.inode, 0, &mut buf) {
         Some(n) if n as usize == size => {}
         _ => {
-            zenus_console::kerror_code!(zenus_console::error::codes::FS_MOUNT_FAILED, "Initrd read failed");
+            zenus_console::kerror_code!(
+                zenus_console::error::codes::FS_MOUNT_FAILED,
+                "Initrd read failed"
+            );
             return false;
         }
     }
@@ -537,7 +545,10 @@ fn execute_command(cmdline: &str) {
             }
         }
         "sleep" => {
-            let secs = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
+            let secs = parts
+                .get(1)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(1);
             for _ in 0..secs * 100_000_000 {
                 core::hint::spin_loop();
             }

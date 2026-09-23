@@ -13,7 +13,12 @@ pub fn add(dest: [u8; 4], mask: [u8; 4], gateway: [u8; 4], iface: usize) -> bool
     unsafe {
         for i in 0..MAX_ROUTES {
             if ROUTE_TABLE[i].is_none() {
-                ROUTE_TABLE[i] = Some(Route { dest, mask, gateway, iface });
+                ROUTE_TABLE[i] = Some(Route {
+                    dest,
+                    mask,
+                    gateway,
+                    iface,
+                });
                 return true;
             }
         }
@@ -38,7 +43,12 @@ fn prefix_len(mask: [u8; 4]) -> u32 {
 }
 
 fn ip_masked(ip: [u8; 4], mask: [u8; 4]) -> [u8; 4] {
-    [ip[0] & mask[0], ip[1] & mask[1], ip[2] & mask[2], ip[3] & mask[3]]
+    [
+        ip[0] & mask[0],
+        ip[1] & mask[1],
+        ip[2] & mask[2],
+        ip[3] & mask[3],
+    ]
 }
 
 pub fn lookup(ip: [u8; 4]) -> Option<(GatewayAction, usize)> {

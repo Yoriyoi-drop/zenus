@@ -1,4 +1,4 @@
-use zenus_fs::vfs::{self, FileSystem, FileType, DirEntry};
+use zenus_fs::vfs::{self, DirEntry, FileSystem, FileType};
 use zenus_sync::spinlock::SpinLock;
 
 const MAX_FDS: usize = 256;
@@ -78,8 +78,8 @@ pub struct FdEntry {
     pub inode: u64,
     pub offset: u64,
     pub file_type: FileType,
-    pub pipe_id: u64,    // u64::MAX if not a pipe
-    pub socket_id: u64,  // u64::MAX if not a socket
+    pub pipe_id: u64,   // u64::MAX if not a pipe
+    pub socket_id: u64, // u64::MAX if not a socket
 }
 
 unsafe impl Send for FdEntry {}
@@ -99,7 +99,13 @@ impl FdTable {
         }
     }
 
-    fn alloc(&mut self, task_id: u64, fs: &'static dyn FileSystem, inode: u64, file_type: FileType) -> Option<u64> {
+    fn alloc(
+        &mut self,
+        task_id: u64,
+        fs: &'static dyn FileSystem,
+        inode: u64,
+        file_type: FileType,
+    ) -> Option<u64> {
         for i in 0..MAX_FDS {
             if self.entries[i].is_none() {
                 self.entries[i] = Some(FdEntry {
@@ -120,7 +126,11 @@ impl FdTable {
     fn alloc_pipe(&mut self, task_id: u64, pipe_id: u64, for_read: bool) -> Option<u64> {
         for i in 0..MAX_FDS {
             if self.entries[i].is_none() {
-                let file_type = if for_read { FileType::CharDevice } else { FileType::CharDevice };
+                let file_type = if for_read {
+                    FileType::CharDevice
+                } else {
+                    FileType::CharDevice
+                };
                 self.entries[i] = Some(FdEntry {
                     task_id,
                     fs: None,
@@ -155,7 +165,9 @@ impl FdTable {
     }
 
     fn close(&mut self, fd: u64) -> bool {
-        if fd as usize >= MAX_FDS { return false; }
+        if fd as usize >= MAX_FDS {
+            return false;
+        }
         let entry = match &self.entries[fd as usize] {
             Some(e) => e,
             None => return false,
@@ -183,12 +195,16 @@ impl FdTable {
     }
 
     fn get(&self, fd: u64) -> Option<&FdEntry> {
-        if fd as usize >= MAX_FDS { return None; }
+        if fd as usize >= MAX_FDS {
+            return None;
+        }
         self.entries[fd as usize].as_ref()
     }
 
     fn get_mut(&mut self, fd: u64) -> Option<&mut FdEntry> {
-        if fd as usize >= MAX_FDS { return None; }
+        if fd as usize >= MAX_FDS {
+            return None;
+        }
         self.entries[fd as usize].as_mut()
     }
 
@@ -214,10 +230,14 @@ impl FdTable {
     }
 
     fn clone_all_for_task(&mut self, src_task_id: u64, dst_task_id: u64) {
-        let fds: alloc::vec::Vec<(u64, FdEntry)> = self.entries.iter()
+        let fds: alloc::vec::Vec<(u64, FdEntry)> = self
+            .entries
+            .iter()
             .enumerate()
             .filter_map(|(fd, e)| {
-                e.as_ref().filter(|e| e.task_id == src_task_id).map(|e| (fd as u64, *e))
+                e.as_ref()
+                    .filter(|e| e.task_id == src_task_id)
+                    .map(|e| (fd as u64, *e))
             })
             .collect();
         for (fd, entry) in fds {
@@ -234,17 +254,12 @@ impl FdTable {
 
 static FD_TABLE: SpinLock<FdTable> = SpinLock::new(FdTable::new());
 
-static PIPE_TABLE: SpinLock<[Option<PipeBuffer>; MAX_PIPES]> =
-    SpinLock::new([
-        None, None, None, None, None, None, None, None,
-        None, None, None, None, None, None, None, None,
-        None, None, None, None, None, None, None, None,
-        None, None, None, None, None, None, None, None,
-        None, None, None, None, None, None, None, None,
-        None, None, None, None, None, None, None, None,
-        None, None, None, None, None, None, None, None,
-        None, None, None, None, None, None, None, None,
-    ]);
+static PIPE_TABLE: SpinLock<[Option<PipeBuffer>; MAX_PIPES]> = SpinLock::new([
+    None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+    None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+    None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+    None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+]);
 
 pub fn fd_pipe(task_id: u64) -> Option<(u64, u64)> {
     let mut pipes = PIPE_TABLE.lock();
@@ -317,7 +332,9 @@ pub fn fd_read(fd: u64, buf: &mut [u8]) -> Option<u64> {
             };
             *b = byte;
             read += 1;
-            if byte == b'\n' || byte == b'\r' { break; }
+            if byte == b'\n' || byte == b'\r' {
+                break;
+            }
         }
         return Some(read);
     }
@@ -347,8 +364,6 @@ pub fn fd_read(fd: u64, buf: &mut [u8]) -> Option<u64> {
 }
 
 pub fn fd_write(fd: u64, buf: &[u8]) -> Option<u64> {
-    // DEBUG: write 'W' to Bochs port when fd_write is entered
-    unsafe { core::arch::asm!("out 0xe9, al", in("al") b'\x57'); }
     // stdout/stderr (fd 1, 2) are special — handle BEFORE table lookup
     // so user tasks without explicit FD entries can still write.
     if fd == 1 || fd == 2 {
@@ -395,7 +410,8 @@ pub fn fd_seek(fd: u64, offset: i64, whence: u64) -> Option<u64> {
     match whence {
         0 => entry.offset = offset as u64, // SEEK_SET
         1 => entry.offset = entry.offset.wrapping_add_signed(offset), // SEEK_CUR
-        2 => { // SEEK_END
+        2 => {
+            // SEEK_END
             let fs = entry.fs?;
             let stat = fs.stat(entry.inode);
             entry.offset = stat.size.wrapping_add_signed(offset);
@@ -500,7 +516,9 @@ pub fn vfs_rmdir(path: &str) -> bool {
         None => return false,
     };
     let entries = node.fs.read_dir(node.inode);
-    if !entries.is_empty() { return false; }
+    if !entries.is_empty() {
+        return false;
+    }
     vfs::remove(path)
 }
 

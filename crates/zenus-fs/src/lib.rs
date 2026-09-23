@@ -3,16 +3,16 @@
 
 extern crate alloc;
 
-pub mod vfs;
-pub mod devfs;
-pub mod tmpfs;
-pub mod tarfs;
 pub mod block_cache;
+pub mod cgroup;
+pub mod devfs;
 pub mod ext2;
 pub mod ext2_fsck;
-pub mod journal;
 pub mod io_scheduler;
+pub mod journal;
 pub mod pkg;
-pub mod sysctl;
 pub mod procfs;
-pub mod cgroup;
+pub mod sysctl;
+pub mod tarfs;
+pub mod tmpfs;
+pub mod vfs;

@@ -1,5 +1,5 @@
-use crate::udp;
 use crate::nic;
+use crate::udp;
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
@@ -129,11 +129,15 @@ fn get_server_ip() -> [u8; 4] {
 }
 
 fn get_server_subnet() -> [u8; 4] {
-    nic::get_iface(1).map(|iface| iface.subnet_mask).unwrap_or([255, 255, 255, 0])
+    nic::get_iface(1)
+        .map(|iface| iface.subnet_mask)
+        .unwrap_or([255, 255, 255, 0])
 }
 
 fn get_server_gateway() -> [u8; 4] {
-    nic::get_iface(1).map(|iface| iface.gateway).unwrap_or([0; 4])
+    nic::get_iface(1)
+        .map(|iface| iface.gateway)
+        .unwrap_or([0; 4])
 }
 
 fn find_option(payload: &[u8], opt_type: u8) -> Option<&[u8]> {
@@ -331,18 +335,14 @@ pub fn handle_receive(iface_idx: usize, _src_ip: [u8; 4], packet: &[u8]) -> bool
             }
 
             let valid = match find_lease_by_ip(req_ip) {
-                Some(idx) => {
-                    unsafe {
-                        if let Some(ref l) = LEASES[idx] {
-                            l.mac == mac
-                        } else {
-                            false
-                        }
+                Some(idx) => unsafe {
+                    if let Some(ref l) = LEASES[idx] {
+                        l.mac == mac
+                    } else {
+                        false
                     }
-                }
-                None => {
-                    ip_to_pool_offset(req_ip).is_some() && req_ip != server_ip
-                }
+                },
+                None => ip_to_pool_offset(req_ip).is_some() && req_ip != server_ip,
             };
 
             if valid {
@@ -373,9 +373,8 @@ pub fn handle_receive(iface_idx: usize, _src_ip: [u8; 4], packet: &[u8]) -> bool
                 send_dhcp_udp(iface_idx, &reply, server_ip, [255; 4]);
                 true
             } else {
-                let reply = build_dhcp_reply(
-                    payload, MSG_NAK, [0; 4], server_ip, [0; 4], [0; 4], 0,
-                );
+                let reply =
+                    build_dhcp_reply(payload, MSG_NAK, [0; 4], server_ip, [0; 4], [0; 4], 0);
                 send_dhcp_udp(iface_idx, &reply, server_ip, [255; 4]);
                 true
             }
@@ -440,11 +439,21 @@ fn print_ip(write_str: &mut dyn FnMut(&str), ip: [u8; 4]) {
     let mut buf = [0u8; 16];
     let mut pos = 0;
     for j in 0..4 {
-        if j > 0 { buf[pos] = b'.'; pos += 1; }
+        if j > 0 {
+            buf[pos] = b'.';
+            pos += 1;
+        }
         let n = ip[j] as u32;
-        if n >= 100 { buf[pos] = b'0' + (n / 100) as u8; pos += 1; }
-        if n >= 10 { buf[pos] = b'0' + ((n / 10) % 10) as u8; pos += 1; }
-        buf[pos] = b'0' + (n % 10) as u8; pos += 1;
+        if n >= 100 {
+            buf[pos] = b'0' + (n / 100) as u8;
+            pos += 1;
+        }
+        if n >= 10 {
+            buf[pos] = b'0' + ((n / 10) % 10) as u8;
+            pos += 1;
+        }
+        buf[pos] = b'0' + (n % 10) as u8;
+        pos += 1;
     }
     if let Ok(s) = core::str::from_utf8(&buf[..pos]) {
         write_str(s);
@@ -455,7 +464,9 @@ fn print_mac(write_str: &mut dyn FnMut(&str), mac: &[u8; 6]) {
     let hex = b"0123456789abcdef";
     let mut buf = [0u8; 17];
     for j in 0..6 {
-        if j > 0 { buf[j * 3 - 1] = b':'; }
+        if j > 0 {
+            buf[j * 3 - 1] = b':';
+        }
         buf[j * 3] = hex[(mac[j] >> 4) as usize];
         buf[j * 3 + 1] = hex[(mac[j] & 0xF) as usize];
     }

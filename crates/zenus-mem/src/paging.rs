@@ -1,10 +1,10 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::structures::paging::{
-    FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB,
-    OffsetPageTable, page_table::PageTable,
+    page_table::PageTable, FrameAllocator, Mapper, OffsetPageTable, Page, PageTableFlags,
+    PhysFrame, Size4KiB,
 };
-use x86_64::VirtAddr;
 use x86_64::PhysAddr;
+use x86_64::VirtAddr;
 
 pub const PAGE_SIZE: usize = 4096;
 const MAX_FREED_CR3: usize = 64;
@@ -49,9 +49,13 @@ pub fn kernel_cr3() -> u64 {
 /// and BEFORE enable_smep_smap().
 pub fn ensure_kernel_pages_supervisor() {
     let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
-    if hhdm == 0 { return; }
+    if hhdm == 0 {
+        return;
+    }
     let cr3_phys = KERNEL_CR3.load(Ordering::Acquire) & !0xFFF;
-    if cr3_phys == 0 { return; }
+    if cr3_phys == 0 {
+        return;
+    }
 
     const US_BIT: u64 = 1u64 << 2;
 
@@ -62,37 +66,51 @@ pub fn ensure_kernel_pages_supervisor() {
         // pages in entries 0-255 that the kernel currently executes from.
         for pml4_idx in 0..512 {
             let pml4e = *pml4_virt.add(pml4_idx);
-            if (pml4e & 1) == 0 { continue; }
+            if (pml4e & 1) == 0 {
+                continue;
+            }
             *pml4_virt.add(pml4_idx) = pml4e & !US_BIT;
 
-            if (pml4e & 0x80) != 0 { continue; } // 1 GiB huge page
+            if (pml4e & 0x80) != 0 {
+                continue;
+            } // 1 GiB huge page
 
             let pdpt_phys = pml4e & 0x000FFFFFFFFFF000;
             let pdpt_virt = (pdpt_phys + hhdm) as *mut u64;
 
             for pdpt_idx in 0..512 {
                 let pdpte = *pdpt_virt.add(pdpt_idx);
-                if (pdpte & 1) == 0 { continue; }
+                if (pdpte & 1) == 0 {
+                    continue;
+                }
                 *pdpt_virt.add(pdpt_idx) = pdpte & !US_BIT;
 
-                if (pdpte & 0x80) != 0 { continue; } // 2 MiB huge page
+                if (pdpte & 0x80) != 0 {
+                    continue;
+                } // 2 MiB huge page
 
                 let pd_phys = pdpte & 0x000FFFFFFFFFF000;
                 let pd_virt = (pd_phys + hhdm) as *mut u64;
 
                 for pd_idx in 0..512 {
                     let pde = *pd_virt.add(pd_idx);
-                    if (pde & 1) == 0 { continue; }
+                    if (pde & 1) == 0 {
+                        continue;
+                    }
                     *pd_virt.add(pd_idx) = pde & !US_BIT;
 
-                    if (pde & 0x80) != 0 { continue; } // 2 MiB page
+                    if (pde & 0x80) != 0 {
+                        continue;
+                    } // 2 MiB page
 
                     let pt_phys = pde & 0x000FFFFFFFFFF000;
                     let pt_virt = (pt_phys + hhdm) as *mut u64;
 
                     for pt_idx in 0..512 {
                         let pte = *pt_virt.add(pt_idx);
-                        if (pte & 1) == 0 { continue; }
+                        if (pte & 1) == 0 {
+                            continue;
+                        }
                         *pt_virt.add(pt_idx) = pte & !US_BIT;
                     }
                 }
@@ -170,11 +188,15 @@ pub fn unmap_page(virt: VirtAddr) {
     })
 }
 
-
-
 #[inline(never)]
 #[no_mangle]
-pub extern "C" fn map_user_page_raw(cr3_phys_raw: u64, virt: u64, phys: u64, writable: bool, executable: bool) -> bool {
+pub extern "C" fn map_user_page_raw(
+    cr3_phys_raw: u64,
+    virt: u64,
+    phys: u64,
+    writable: bool,
+    executable: bool,
+) -> bool {
     let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
     let offset = VirtAddr::new(hhdm);
     let cr3_phys = cr3_phys_raw & !0xFFF;
@@ -246,11 +268,17 @@ pub fn protect_page_raw(cr3_raw: u64, virt: u64, writable: bool, executable: boo
         for &(level, shift) in &levels {
             let idx = (virt >> shift) & 0x1FF;
             let entry = *table_virt.add(idx as usize);
-            if (entry & 1) == 0 { return false; }
+            if (entry & 1) == 0 {
+                return false;
+            }
             if level == 1 {
                 let mut new_entry = entry & !(1u64 << 1) & !(1u64 << 63);
-                if writable { new_entry |= 1u64 << 1; }
-                if !executable { new_entry |= 1u64 << 63; }
+                if writable {
+                    new_entry |= 1u64 << 1;
+                }
+                if !executable {
+                    new_entry |= 1u64 << 63;
+                }
                 table_virt.add(idx as usize).write(new_entry);
                 core::arch::asm!("invlpg [{0}]", in(reg) virt, options(nostack, preserves_flags));
                 return true;
@@ -331,7 +359,9 @@ pub fn clone_user_address_space(source_cr3_raw: u64) -> Option<u64> {
         drop(allocator);
         let new_pdpt_phys = new_pdpt_frame.as_u64() & !0xFFF;
         let new_pdpt_virt = (new_pdpt_phys + hhdm) as *mut u64;
-        unsafe { core::ptr::write_bytes(new_pdpt_virt, 0, 512 * 8); }
+        unsafe {
+            core::ptr::write_bytes(new_pdpt_virt, 0, 512 * 8);
+        }
 
         let pdpt_virt = (pdpt_phys + hhdm) as *const u64;
 
@@ -350,7 +380,9 @@ pub fn clone_user_address_space(source_cr3_raw: u64) -> Option<u64> {
             drop(allocator);
             let new_pd_phys = new_pd_frame.as_u64() & !0xFFF;
             let new_pd_virt = (new_pd_phys + hhdm) as *mut u64;
-            unsafe { core::ptr::write_bytes(new_pd_virt, 0, 512 * 8); }
+            unsafe {
+                core::ptr::write_bytes(new_pd_virt, 0, 512 * 8);
+            }
 
             let pd_virt = (pd_phys + hhdm) as *const u64;
 
@@ -369,7 +401,9 @@ pub fn clone_user_address_space(source_cr3_raw: u64) -> Option<u64> {
                 drop(allocator);
                 let new_pt_phys = new_pt_frame.as_u64() & !0xFFF;
                 let new_pt_virt = (new_pt_phys + hhdm) as *mut u64;
-                unsafe { core::ptr::write_bytes(new_pt_virt, 0, 512 * 8); }
+                unsafe {
+                    core::ptr::write_bytes(new_pt_virt, 0, 512 * 8);
+                }
 
                 let pt_virt = (pt_phys + hhdm) as *const u64;
 
@@ -398,27 +432,36 @@ pub fn clone_user_address_space(source_cr3_raw: u64) -> Option<u64> {
                             );
                         }
 
-                        let new_entry = (new_frame.as_u64() & !0xFFF)
-                            | (pt_entry & 0xFFF);
-                        unsafe { new_pt_virt.add(pt_idx).write(new_entry); }
+                        let new_entry = (new_frame.as_u64() & !0xFFF) | (pt_entry & 0xFFF);
+                        unsafe {
+                            new_pt_virt.add(pt_idx).write(new_entry);
+                        }
                     } else {
-                        unsafe { new_pt_virt.add(pt_idx).write(pt_entry); }
+                        unsafe {
+                            new_pt_virt.add(pt_idx).write(pt_entry);
+                        }
                     }
                 }
 
                 // Link PT into child's PD (copy flags from source PD entry)
                 let new_pd_entry = (new_pt_phys & !0xFFF) | (_pd_flags & 0xFFF & !0x1);
-                unsafe { new_pd_virt.add(pd_idx).write(new_pd_entry | 1); }
+                unsafe {
+                    new_pd_virt.add(pd_idx).write(new_pd_entry | 1);
+                }
             }
 
             // Link PD into child's PDPT
             let new_pdpt_entry = (new_pd_phys & !0xFFF) | (pdpt_flags & 0xFFF & !0x1);
-            unsafe { new_pdpt_virt.add(pdpt_idx).write(new_pdpt_entry | 1); }
+            unsafe {
+                new_pdpt_virt.add(pdpt_idx).write(new_pdpt_entry | 1);
+            }
         }
 
         // Link PDPT into child's PML4
         let new_pml4_entry = (new_pdpt_phys & !0xFFF) | (pml4_flags & 0xFFF & !0x1);
-        unsafe { dst_pml4.add(pml4_idx).write(new_pml4_entry | 1); }
+        unsafe {
+            dst_pml4.add(pml4_idx).write(new_pml4_entry | 1);
+        }
     }
 
     let flags = source_cr3_raw & (0b11000u64);
@@ -428,22 +471,70 @@ pub fn clone_user_address_space(source_cr3_raw: u64) -> Option<u64> {
 /// Tracks freed address spaces to prevent double-free.
 static FREED_CR3_COUNT: AtomicU64 = AtomicU64::new(0);
 static FREED_CR3_LIST: [AtomicU64; MAX_FREED_CR3] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 fn is_already_freed(cr3_phys: u64) -> bool {

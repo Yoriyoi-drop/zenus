@@ -1,6 +1,6 @@
-use x86_64::instructions::port::Port;
-use x86_64::instructions::interrupts;
 use crate::limine;
+use x86_64::instructions::interrupts;
+use x86_64::instructions::port::Port;
 
 const KBD_CMD: u16 = 0x64;
 #[allow(dead_code)]
@@ -26,11 +26,11 @@ pub fn reboot_via_keyboard() -> ! {
         unsafe {
             let header_len = *(fadt_addr as *const u8).add(8) as usize;
             if header_len >= 129 {
-                let flags = *(fadt_addr as *const u32).add(112/4);
+                let flags = *(fadt_addr as *const u32).add(112 / 4);
                 if (flags & (1 << 10)) != 0 {
                     let addr_space_id = *(fadt_addr as *const u8).add(116);
                     let reg_width = *(fadt_addr as *const u8).add(117);
-                    let reg_addr = *(fadt_addr as *const u64).add(120/8);
+                    let reg_addr = *(fadt_addr as *const u64).add(120 / 8);
                     let reset_val = *(fadt_addr as *const u8).add(128);
                     if addr_space_id == 1 && reg_width == 8 && reg_addr != 0 {
                         zenus_console::kinfo!("Rebooting via ACPI reset register...");
@@ -72,7 +72,9 @@ pub fn reboot_via_keyboard() -> ! {
     unsafe {
         core::arch::asm!("push 0; push 0; lidt [rsp]; add rsp, 16; ud2");
     }
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 pub fn shutdown_via_acpi() -> ! {
@@ -80,20 +82,35 @@ pub fn shutdown_via_acpi() -> ! {
 
     let fadt_addr = find_fadt();
     if fadt_addr == 0 {
-        zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "FADT not found, shutdown not possible");
-        loop { x86_64::instructions::hlt(); }
+        zenus_console::kerror_code!(
+            zenus_console::error::codes::DRV_INIT_FAILED,
+            "FADT not found, shutdown not possible"
+        );
+        loop {
+            x86_64::instructions::hlt();
+        }
     }
     unsafe {
         let header_len = *(fadt_addr as *const u8).add(8) as usize;
         if header_len < 68 {
-            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "FADT too short for PM1a_CNT_BLK");
-            loop { x86_64::instructions::hlt(); }
+            zenus_console::kerror_code!(
+                zenus_console::error::codes::DRV_INIT_FAILED,
+                "FADT too short for PM1a_CNT_BLK"
+            );
+            loop {
+                x86_64::instructions::hlt();
+            }
         }
-        let pm1a_cnt_blk = *(fadt_addr as *const u32).add(64/4) as u16;
+        let pm1a_cnt_blk = *(fadt_addr as *const u32).add(64 / 4) as u16;
 
         if pm1a_cnt_blk == 0 {
-            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "PM1a_CNT_BLK is 0");
-            loop { x86_64::instructions::hlt(); }
+            zenus_console::kerror_code!(
+                zenus_console::error::codes::DRV_INIT_FAILED,
+                "PM1a_CNT_BLK is 0"
+            );
+            loop {
+                x86_64::instructions::hlt();
+            }
         }
 
         let mut port = Port::<u16>::new(pm1a_cnt_blk);
@@ -103,7 +120,9 @@ pub fn shutdown_via_acpi() -> ! {
         let val = (pm1a_cnt_val & !0x3FFF) | (slp_typa << 10) | slp_en;
         port.write(val);
     }
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 fn find_fadt() -> u64 {
@@ -121,10 +140,10 @@ fn find_fadt() -> u64 {
     let revision = unsafe { *(rsdp as *const u8).add(15) };
     let (table_addr, is_xsdt) = if revision == 0 {
         let ptr = rsdp as *const u32;
-        (unsafe { *(ptr.add(16/4)) as u64 }, false)
+        (unsafe { *(ptr.add(16 / 4)) as u64 }, false)
     } else {
         let ptr = rsdp as *const u64;
-        (unsafe { *(ptr.add(24/8)) }, true)
+        (unsafe { *(ptr.add(24 / 8)) }, true)
     };
 
     if table_addr == 0 {
@@ -146,9 +165,9 @@ fn find_fadt() -> u64 {
 
     for i in 0..entry_count {
         let entry = if is_xsdt {
-            unsafe { *(table_virt as *const u64).add(36/8 + i) }
+            unsafe { *(table_virt as *const u64).add(36 / 8 + i) }
         } else {
-            unsafe { *(table_virt as *const u32).add(36/4 + i) as u64 }
+            unsafe { *(table_virt as *const u32).add(36 / 4 + i) as u64 }
         };
         let entry_virt = entry + hhdm;
         let sig = unsafe {
@@ -168,8 +187,7 @@ fn get_rsdp() -> Option<u64> {
     if limine::RSDP_REQUEST.response.is_null() {
         return None;
     }
-    let resp: &limine::LimineRsdpResponse =
-        unsafe { &*limine::RSDP_REQUEST.response.as_ptr() };
+    let resp: &limine::LimineRsdpResponse = unsafe { &*limine::RSDP_REQUEST.response.as_ptr() };
     if resp.address.is_null() {
         None
     } else {

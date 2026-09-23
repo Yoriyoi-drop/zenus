@@ -5,7 +5,9 @@ const CACHE_SIZE: usize = 512;
 const SECTOR_SIZE: usize = 512;
 
 fn hash(dev_id: u8, block: u64) -> usize {
-    let h = (dev_id as u64).wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(block);
+    let h = (dev_id as u64)
+        .wrapping_mul(0x9E3779B97F4A7C15)
+        .wrapping_add(block);
     (h ^ (h >> 16) ^ (h >> 32) ^ (h >> 48)) as usize & (CACHE_SIZE - 1)
 }
 

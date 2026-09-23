@@ -1,7 +1,7 @@
-use zenus_mem::paging;
 use crate::pci::VirtioPciTransport;
-use crate::queue::{VirtioQueue, VirtioQueueMem, VirtioAvail, VirtioDesc};
+use crate::queue::{VirtioAvail, VirtioDesc, VirtioQueue, VirtioQueueMem};
 use crate::QUEUE_SIZE;
+use zenus_mem::paging;
 
 static mut CONSOLE_BUF: [u8; 4096] = [0u8; 4096];
 static mut RX_QUEUE_MEM: VirtioQueueMem = VirtioQueueMem::new();
@@ -18,37 +18,50 @@ impl VirtioConsole {
         zenus_console::kinfo!("VIRTIO-CONSOLE: Initializing...");
 
         transport.set_device_status(0);
-        while transport.device_status() != 0 { core::hint::spin_loop(); }
+        while transport.device_status() != 0 {
+            core::hint::spin_loop();
+        }
         transport.set_device_status(transport.device_status() | 1);
         transport.set_device_status(transport.device_status() | 2);
 
         transport.negotiate_features(0);
         transport.set_device_status(transport.device_status() | 8);
         if transport.device_status() & 8 == 0 {
-            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-CONSOLE: FEATURES_OK rejected");
+            zenus_console::kerror_code!(
+                zenus_console::error::codes::DRV_INIT_FAILED,
+                "VIRTIO-CONSOLE: FEATURES_OK rejected"
+            );
             return None;
         }
 
         let cr3 = paging::kernel_cr3();
         let rx_mem: &'static mut VirtioQueueMem = &mut RX_QUEUE_MEM;
-        let rx_dp = paging::virt_to_phys_raw(cr3, rx_mem as *mut VirtioQueueMem as u64).unwrap_or(0);
+        let rx_dp =
+            paging::virt_to_phys_raw(cr3, rx_mem as *mut VirtioQueueMem as u64).unwrap_or(0);
         let rx_ap = rx_dp + core::mem::size_of::<[VirtioDesc; QUEUE_SIZE]>() as u64;
         let rx_up = rx_ap + core::mem::size_of::<VirtioAvail>() as u64;
 
         let qsize0 = transport.setup_queue(0, rx_dp, rx_ap, rx_up);
         if qsize0 == 0 {
-            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-CONSOLE: RX queue setup failed");
+            zenus_console::kerror_code!(
+                zenus_console::error::codes::DRV_INIT_FAILED,
+                "VIRTIO-CONSOLE: RX queue setup failed"
+            );
             return None;
         }
 
         let tx_mem: &'static mut VirtioQueueMem = &mut TX_QUEUE_MEM;
-        let tx_dp = paging::virt_to_phys_raw(cr3, tx_mem as *mut VirtioQueueMem as u64).unwrap_or(0);
+        let tx_dp =
+            paging::virt_to_phys_raw(cr3, tx_mem as *mut VirtioQueueMem as u64).unwrap_or(0);
         let tx_ap = tx_dp + core::mem::size_of::<[VirtioDesc; QUEUE_SIZE]>() as u64;
         let tx_up = tx_ap + core::mem::size_of::<VirtioAvail>() as u64;
 
         let qsize1 = transport.setup_queue(1, tx_dp, tx_ap, tx_up);
         if qsize1 == 0 {
-            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-CONSOLE: TX queue setup failed");
+            zenus_console::kerror_code!(
+                zenus_console::error::codes::DRV_INIT_FAILED,
+                "VIRTIO-CONSOLE: TX queue setup failed"
+            );
             return None;
         }
 
@@ -58,7 +71,11 @@ impl VirtioConsole {
         transport.set_device_status(transport.device_status() | 4);
 
         zenus_console::kinfo!("VIRTIO-CONSOLE: Ready");
-        Some(VirtioConsole { transport, rx_queue, tx_queue })
+        Some(VirtioConsole {
+            transport,
+            rx_queue,
+            tx_queue,
+        })
     }
 
     pub fn write(&mut self, data: &[u8]) -> bool {

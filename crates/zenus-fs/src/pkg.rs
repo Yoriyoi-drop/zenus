@@ -1,7 +1,7 @@
+use crate::vfs::{self, FileType};
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use crate::vfs::{self, FileType};
 
 pub const PKG_INSTALL_DIR: &str = "/usr/local";
 pub const PKG_DB_DIR: &str = "/var/db/zpk";
@@ -132,7 +132,10 @@ pub fn pkg_init() -> bool {
     if ok {
         zenus_console::kinfo!("Package manager initialized");
     } else {
-        zenus_console::kerror_code!(zenus_console::error::codes::FS_MOUNT_FAILED, "Package manager: failed to create DB dir");
+        zenus_console::kerror_code!(
+            zenus_console::error::codes::FS_MOUNT_FAILED,
+            "Package manager: failed to create DB dir"
+        );
     }
     ok
 }
@@ -206,7 +209,10 @@ pub fn pkg_install(data: &[u8], _dev_id: usize) -> bool {
 
     let mut manifest = alloc::format!(
         "{}\n{}\n{}\n{}\n",
-        pkg_name, pkg_version, file_count, _total_size
+        pkg_name,
+        pkg_version,
+        file_count,
+        _total_size
     );
     for f in &installed_files {
         manifest.push_str(f);
@@ -257,5 +263,8 @@ pub fn pkg_info(name: &str) -> Option<PkgInfo> {
 
 pub fn pkg_installed_count() -> usize {
     let entries = vfs::read_dir(PKG_DB_DIR);
-    entries.iter().filter(|e| e.file_type == FileType::Directory).count()
+    entries
+        .iter()
+        .filter(|e| e.file_type == FileType::Directory)
+        .count()
 }

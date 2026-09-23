@@ -2,12 +2,12 @@
 
 extern crate alloc;
 
-pub mod uts;
-pub mod pid;
+pub mod ipc;
 pub mod mnt;
 pub mod net;
+pub mod pid;
 pub mod user;
-pub mod ipc;
+pub mod uts;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 

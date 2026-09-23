@@ -117,7 +117,10 @@ pub fn socket(domain: u8, type_: u8, _protocol: u8) -> Option<usize> {
                 dst_ip: [0; 4],
                 dst_port: 0,
                 connected: false,
-                recv_buf: [UdpBuffer { data: [0; 1500], len: 0 }; MAX_UDP_RECV],
+                recv_buf: [UdpBuffer {
+                    data: [0; 1500],
+                    len: 0,
+                }; MAX_UDP_RECV],
                 recv_count: 0,
                 recv_head: 0,
             }),
@@ -137,16 +140,14 @@ pub fn bind(fd: usize, port: u16) -> bool {
     unsafe {
         let s = &mut SOCKET_POOL.sockets[fd];
         match s.kind {
-            SocketKind::Tcp { ref mut conn } => {
-                match tcp::listen(port) {
-                    Some(c) => {
-                        *conn = c;
-                        s.state = SocketState::Bound;
-                        true
-                    }
-                    None => false,
+            SocketKind::Tcp { ref mut conn } => match tcp::listen(port) {
+                Some(c) => {
+                    *conn = c;
+                    s.state = SocketState::Bound;
+                    true
                 }
-            }
+                None => false,
+            },
             SocketKind::Udp(ref mut us) => {
                 us.local_port = port;
                 s.state = SocketState::Bound;
@@ -179,7 +180,9 @@ pub fn accept(fd: usize, iface_idx: usize) -> Option<usize> {
     find_tcp_listener_port(fd)?;
     unsafe {
         for i in 0..16 {
-            if let Some((state, _remote_ip, _remote_port, _local_ip, _local_port)) = tcp::get_conn_info(i) {
+            if let Some((state, _remote_ip, _remote_port, _local_ip, _local_port)) =
+                tcp::get_conn_info(i)
+            {
                 if state == 4 && !is_socket_for_conn(i) {
                     let new_fd = alloc_sock()?;
                     let s = &mut SOCKET_POOL.sockets[new_fd];
@@ -200,7 +203,9 @@ fn is_socket_for_conn(conn: usize) -> bool {
         for i in 0..MAX_SOCKETS {
             let s = &SOCKET_POOL.sockets[i];
             if let SocketKind::Tcp { conn: c } = s.kind {
-                if c == conn && (s.state == SocketState::Connected || s.state == SocketState::Closing) {
+                if c == conn
+                    && (s.state == SocketState::Connected || s.state == SocketState::Closing)
+                {
                     return true;
                 }
             }
@@ -254,13 +259,18 @@ pub fn connect(fd: usize, iface_idx: usize, dst_ip: [u8; 4], dst_port: u16) -> b
 }
 
 fn allocate_ephemeral_port() -> u16 {
-    static NEXT_EPHEMERAL: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(49152);
+    static NEXT_EPHEMERAL: core::sync::atomic::AtomicU16 =
+        core::sync::atomic::AtomicU16::new(49152);
     let port = NEXT_EPHEMERAL.fetch_update(
         core::sync::atomic::Ordering::SeqCst,
         core::sync::atomic::Ordering::SeqCst,
         |p| {
-            if p >= 65534 { Some(49152) } else { Some(p + 1) }
-        }
+            if p >= 65534 {
+                Some(49152)
+            } else {
+                Some(p + 1)
+            }
+        },
     );
     port.unwrap_or(49152)
 }
@@ -286,7 +296,14 @@ pub fn send(fd: usize, data: &[u8], iface_idx: usize) -> bool {
                 let local_ip = crate::nic::get_iface(iface_idx)
                     .map(|iface| iface.ip)
                     .unwrap_or([0; 4]);
-                crate::udp::send(iface_idx, us.local_port, us.dst_port, local_ip, us.dst_ip, data)
+                crate::udp::send(
+                    iface_idx,
+                    us.local_port,
+                    us.dst_port,
+                    local_ip,
+                    us.dst_ip,
+                    data,
+                )
             }
         }
     }
@@ -311,9 +328,7 @@ pub fn recv(fd: usize, buf: &mut [u8]) -> Option<usize> {
     unsafe {
         let s = &mut SOCKET_POOL.sockets[fd];
         match s.kind {
-            SocketKind::Tcp { conn } => {
-                tcp::receive_data(conn, buf)
-            }
+            SocketKind::Tcp { conn } => tcp::receive_data(conn, buf),
             SocketKind::Udp(ref mut us) => {
                 if us.recv_count == 0 {
                     return None;
@@ -335,9 +350,7 @@ pub fn close(fd: usize, iface_idx: usize) -> bool {
         let kind = s.kind;
         s.state = SocketState::Free;
         match kind {
-            SocketKind::Tcp { conn } => {
-                tcp::close(conn, iface_idx)
-            }
+            SocketKind::Tcp { conn } => tcp::close(conn, iface_idx),
             SocketKind::Udp(_) => true,
         }
     }
@@ -389,9 +402,7 @@ pub fn is_connected(fd: usize) -> bool {
         }
         let s = &SOCKET_POOL.sockets[fd];
         match s.kind {
-            SocketKind::Tcp { conn } => {
-                crate::tcp::is_connected(conn)
-            }
+            SocketKind::Tcp { conn } => crate::tcp::is_connected(conn),
             _ => false,
         }
     }

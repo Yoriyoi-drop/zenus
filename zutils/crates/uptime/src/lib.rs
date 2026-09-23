@@ -12,10 +12,14 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     w.write_str(" days, ");
     w.write_u64(hours % 24);
     w.write_str(":");
-    if minutes % 60 < 10 { w.write_byte(b'0'); }
+    if minutes % 60 < 10 {
+        w.write_byte(b'0');
+    }
     w.write_u64(minutes % 60);
     w.write_str(":");
-    if seconds % 60 < 10 { w.write_byte(b'0'); }
+    if seconds % 60 < 10 {
+        w.write_byte(b'0');
+    }
     w.write_u64(seconds % 60);
     w.write_str("\r\n");
 }

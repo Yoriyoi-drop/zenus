@@ -72,8 +72,10 @@ pub struct LimineMemmapRequest {
 }
 
 const LIMINE_MEMMAP_REQUEST_ID: [u64; 4] = [
-    LIMINE_COMMON_MAGIC[0], LIMINE_COMMON_MAGIC[1],
-    0x67cf3d9d378a806f, 0xe304acdfc50c3c62,
+    LIMINE_COMMON_MAGIC[0],
+    LIMINE_COMMON_MAGIC[1],
+    0x67cf3d9d378a806f,
+    0xe304acdfc50c3c62,
 ];
 
 #[link_section = ".limine_reqs"]
@@ -100,8 +102,10 @@ pub struct LimineRsdpRequest {
 }
 
 const LIMINE_RSDP_REQUEST_ID: [u64; 4] = [
-    LIMINE_COMMON_MAGIC[0], LIMINE_COMMON_MAGIC[1],
-    0xc5e77b6b397e7b43, 0x27637845accdcf3c,
+    LIMINE_COMMON_MAGIC[0],
+    LIMINE_COMMON_MAGIC[1],
+    0xc5e77b6b397e7b43,
+    0x27637845accdcf3c,
 ];
 
 #[link_section = ".limine_reqs"]
@@ -147,8 +151,10 @@ pub struct LimineModuleRequest {
 }
 
 const LIMINE_MODULE_REQUEST_ID: [u64; 4] = [
-    LIMINE_COMMON_MAGIC[0], LIMINE_COMMON_MAGIC[1],
-    0x3e7e279702be32af, 0xca1c4f3bd1280cee,
+    LIMINE_COMMON_MAGIC[0],
+    LIMINE_COMMON_MAGIC[1],
+    0x3e7e279702be32af,
+    0xca1c4f3bd1280cee,
 ];
 
 #[link_section = ".limine_reqs"]
@@ -175,8 +181,10 @@ pub struct LimineHhdmRequest {
 }
 
 const LIMINE_HHDM_REQUEST_ID: [u64; 4] = [
-    LIMINE_COMMON_MAGIC[0], LIMINE_COMMON_MAGIC[1],
-    0x48dcf1cb8ad2b852, 0x63984e959a98244b,
+    LIMINE_COMMON_MAGIC[0],
+    LIMINE_COMMON_MAGIC[1],
+    0x48dcf1cb8ad2b852,
+    0x63984e959a98244b,
 ];
 
 #[link_section = ".limine_reqs"]
@@ -216,8 +224,10 @@ pub struct LimineMpRequest {
 }
 
 const LIMINE_MP_REQUEST_ID: [u64; 4] = [
-    LIMINE_COMMON_MAGIC[0], LIMINE_COMMON_MAGIC[1],
-    0x95a67b819a1b857e, 0xa0b61b723b6a73e0,
+    LIMINE_COMMON_MAGIC[0],
+    LIMINE_COMMON_MAGIC[1],
+    0x95a67b819a1b857e,
+    0xa0b61b723b6a73e0,
 ];
 
 #[link_section = ".limine_reqs"]
@@ -278,8 +288,10 @@ pub struct LimineFramebufferRequest {
 }
 
 const LIMINE_FRAMEBUFFER_REQUEST_ID: [u64; 4] = [
-    LIMINE_COMMON_MAGIC[0], LIMINE_COMMON_MAGIC[1],
-    0x9d5820bcb5d339f2, 0xad207e38c359b05e,
+    LIMINE_COMMON_MAGIC[0],
+    LIMINE_COMMON_MAGIC[1],
+    0x9d5820bcb5d339f2,
+    0xad207e38c359b05e,
 ];
 
 #[link_section = ".limine_reqs"]
@@ -316,22 +328,19 @@ impl BootInfo {
     }
 
     pub fn memmap_count(&self) -> usize {
-        let response: &LimineMemmapResponse =
-            unsafe { &*MEMMAP_REQUEST.response.as_ptr() };
+        let response: &LimineMemmapResponse = unsafe { &*MEMMAP_REQUEST.response.as_ptr() };
         response.entry_count as usize
     }
 
     pub fn memmap_entry(&self, index: usize) -> LimineMemmapEntry {
-        let response: &LimineMemmapResponse =
-            unsafe { &*MEMMAP_REQUEST.response.as_ptr() };
+        let response: &LimineMemmapResponse = unsafe { &*MEMMAP_REQUEST.response.as_ptr() };
         let entry_ptrs = response.entries.as_ptr::<*mut LimineMemmapEntry>();
         let entry_ptr = unsafe { *entry_ptrs.add(index) };
         unsafe { core::ptr::read(entry_ptr) }
     }
 
     pub fn memory_map(&self) -> &'static [LimineMemmapEntry] {
-        let response: &LimineMemmapResponse =
-            unsafe { &*MEMMAP_REQUEST.response.as_ptr() };
+        let response: &LimineMemmapResponse = unsafe { &*MEMMAP_REQUEST.response.as_ptr() };
         let count = response.entry_count as usize;
         if count == 0 {
             return &[];

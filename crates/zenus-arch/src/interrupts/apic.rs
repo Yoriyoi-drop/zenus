@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub static LAPIC_VIRT_BASE: AtomicU64 = AtomicU64::new(0);
 static X2APIC_MODE: AtomicBool = AtomicBool::new(false);
@@ -25,7 +25,9 @@ fn lapic_write(reg: u32, val: u32) {
     if X2APIC_MODE.load(Ordering::Relaxed) {
         // x2APIC: use MSR-based access. MSR = 0x800 + (reg >> 4)
         let msr = 0x800u32 + (reg >> 4);
-        unsafe { crate::cpu::write_msr(msr as u32, val as u64); }
+        unsafe {
+            crate::cpu::write_msr(msr as u32, val as u64);
+        }
     } else {
         // xAPIC: use memory-mapped access
         unsafe {
@@ -73,7 +75,9 @@ fn enable_lapic() {
     if apic_was_disabled {
         zenus_console::kinfo!("Enabling APIC (IA32_APIC_BASE.EN)");
         // Just enable APIC, don't touch x2APIC bit (may be locked)
-        unsafe { crate::cpu::write_msr(0x1B, base_raw | (1 << 10)); }
+        unsafe {
+            crate::cpu::write_msr(0x1B, base_raw | (1 << 10));
+        }
     }
 
     let val = lapic_read(0xF0);
@@ -87,15 +91,15 @@ fn enable_lapic() {
     if !X2APIC_MODE.load(Ordering::Relaxed) {
         // CMCI MSR (0x82F) may not be accessible in x2APIC mode on some CPUs (KVM).
         // Skip it to avoid #GP.
-        lapic_write(0x2F0, 0x0100FF);      // CMCI: masked
+        lapic_write(0x2F0, 0x0100FF); // CMCI: masked
     }
-    lapic_write(0x320, 0x00010000);    // Timer: masked
-    lapic_write(0x330, 0x0100FF);      // Thermal: masked
-    lapic_write(0x340, 0x0100FF);      // Performance Counter: masked
-    lapic_write(0x350, 0x0100FF);      // LINT0: masked by default; BSP calls enable_pic_lint0()
-    lapic_write(0x360, 0x0100FF);      // LINT1: masked (bit 16), vector 0xFF
-    lapic_write(0x370, 0x0100FF);      // Error: masked
-    lapic_write(0x380, 0);             // Timer initial count = 0 (no fire)
+    lapic_write(0x320, 0x00010000); // Timer: masked
+    lapic_write(0x330, 0x0100FF); // Thermal: masked
+    lapic_write(0x340, 0x0100FF); // Performance Counter: masked
+    lapic_write(0x350, 0x0100FF); // LINT0: masked by default; BSP calls enable_pic_lint0()
+    lapic_write(0x360, 0x0100FF); // LINT1: masked (bit 16), vector 0xFF
+    lapic_write(0x370, 0x0100FF); // Error: masked
+    lapic_write(0x380, 0); // Timer initial count = 0 (no fire)
 }
 
 /// Enable LINT0 in ExtINT mode to accept PIC interrupts.
@@ -109,7 +113,7 @@ pub fn enable_pic_lint0() {
         zenus_console::kinfo!("LINT0: routing PIT through IOAPIC (x2APIC mode)");
         crate::interrupts::ioapic::route_irq(0, 32, 0); // PIT IRQ0 → vector 32
     } else {
-        lapic_write(0x350, 0x700 | 32);    // LINT0: ExtINT mode, unmasked
+        lapic_write(0x350, 0x700 | 32); // LINT0: ExtINT mode, unmasked
         zenus_console::kinfo!("LINT0: ExtINT mode enabled");
     }
 }
@@ -132,14 +136,14 @@ pub extern "C" fn apic_timer_eoi() {
 }
 
 pub fn init_timer(vector: u8) {
-    lapic_write(0x3E0, 0xB);          // divide by 1
-    // Use a count large enough that the timer NEVER fires during the ISR.
-    // On QEMU KVM the APIC timer runs at TSC frequency (~2 GHz), so each
-    // tick is 50 μs with INITCNT=100_000 — shorter than the ISR execution
-    // time. This causes a nested timer interrupt between popfq and jmp rax
-    // in the ISR return path, corrupting the target task's saved RIP.
-    // With 50_000_000 ticks: 25 ms at 2 GHz, 500 ms at 100 MHz.
-    // TIME_SLICE=5 → every task runs for ~125 ms, which is still snappy.
+    lapic_write(0x3E0, 0xB); // divide by 1
+                             // Use a count large enough that the timer NEVER fires during the ISR.
+                             // On QEMU KVM the APIC timer runs at TSC frequency (~2 GHz), so each
+                             // tick is 50 μs with INITCNT=100_000 — shorter than the ISR execution
+                             // time. This causes a nested timer interrupt between popfq and jmp rax
+                             // in the ISR return path, corrupting the target task's saved RIP.
+                             // With 50_000_000 ticks: 25 ms at 2 GHz, 500 ms at 100 MHz.
+                             // TIME_SLICE=5 → every task runs for ~125 ms, which is still snappy.
     lapic_write(0x380, 1_000_000);
     lapic_write(0x320, vector as u32 | 0x20000); // periodic mode, unmasked
 }

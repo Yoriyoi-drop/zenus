@@ -1,7 +1,7 @@
 use core::sync::atomic::Ordering;
 
-use zenus_mem::paging;
 use crate::QUEUE_SIZE;
+use zenus_mem::paging;
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
@@ -46,9 +46,22 @@ pub struct VirtioQueueMem {
 impl VirtioQueueMem {
     pub const fn new() -> Self {
         VirtioQueueMem {
-            desc: [VirtioDesc { addr: 0, len: 0, flags: 0, next: 0 }; QUEUE_SIZE],
-            avail: VirtioAvail { flags: 0, idx: 0, ring: [0; QUEUE_SIZE] },
-            used: VirtioUsed { flags: 0, idx: 0, ring: [VirtioUsedElem { id: 0, len: 0 }; QUEUE_SIZE] },
+            desc: [VirtioDesc {
+                addr: 0,
+                len: 0,
+                flags: 0,
+                next: 0,
+            }; QUEUE_SIZE],
+            avail: VirtioAvail {
+                flags: 0,
+                idx: 0,
+                ring: [0; QUEUE_SIZE],
+            },
+            used: VirtioUsed {
+                flags: 0,
+                idx: 0,
+                ring: [VirtioUsedElem { id: 0, len: 0 }; QUEUE_SIZE],
+            },
         }
     }
 }

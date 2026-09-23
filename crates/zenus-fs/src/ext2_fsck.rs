@@ -84,7 +84,12 @@ pub fn fsck(dev_id: u8) -> FsckReport {
     let raw_sb = match read_raw_sb(dev_id) {
         Some(sb) => sb,
         None => {
-            add_msg(&mut report, FsckSeverity::Fatal, 1, "Cannot read superblock");
+            add_msg(
+                &mut report,
+                FsckSeverity::Fatal,
+                1,
+                "Cannot read superblock",
+            );
             return report;
         }
     };
@@ -97,32 +102,67 @@ pub fn fsck(dev_id: u8) -> FsckReport {
 
     let state = raw_sb.state;
     if state == EXT2_VALID_FS {
-        add_msg(&mut report, FsckSeverity::Info, 4, "Filesystem was cleanly unmounted");
+        add_msg(
+            &mut report,
+            FsckSeverity::Info,
+            4,
+            "Filesystem was cleanly unmounted",
+        );
     } else if state == EXT2_ERROR_FS {
-        add_msg(&mut report, FsckSeverity::Error, 5, "Filesystem has errors (not cleanly unmounted)");
+        add_msg(
+            &mut report,
+            FsckSeverity::Error,
+            5,
+            "Filesystem has errors (not cleanly unmounted)",
+        );
     } else {
-        add_msg(&mut report, FsckSeverity::Warning, 6, "Unknown filesystem state");
+        add_msg(
+            &mut report,
+            FsckSeverity::Warning,
+            6,
+            "Unknown filesystem state",
+        );
     }
 
     let rev = raw_sb.rev_level;
     if rev != EXT2_GOOD_OLD_REV && rev != EXT2_DYNAMIC_REV {
-        add_msg(&mut report, FsckSeverity::Error, 7, "Unknown revision level");
+        add_msg(
+            &mut report,
+            FsckSeverity::Error,
+            7,
+            "Unknown revision level",
+        );
     }
 
     let log_block_size = raw_sb.log_block_size;
     let block_size = (1024u64) << log_block_size;
     if log_block_size > 2 {
-        add_msg(&mut report, FsckSeverity::Error, 8, "Unsupported block size (max 4096)");
+        add_msg(
+            &mut report,
+            FsckSeverity::Error,
+            8,
+            "Unsupported block size (max 4096)",
+        );
     }
 
     let blocks_per_group = raw_sb.blocks_per_group;
     if blocks_per_group == 0 || blocks_per_group % 8 != 0 {
-        add_msg(&mut report, FsckSeverity::Error, 9, "Invalid blocks_per_group");
+        add_msg(
+            &mut report,
+            FsckSeverity::Error,
+            9,
+            "Invalid blocks_per_group",
+        );
     }
 
     let inodes_per_group = raw_sb.inodes_per_group;
     if inodes_per_group == 0 {
-        add_msg(&mut report, FsckSeverity::Error, 10, "inodes_per_group is zero");
+        add_msg(
+            &mut report,
+            FsckSeverity::Error,
+            10,
+            "inodes_per_group is zero",
+        );
     }
 
     let inodes_count = raw_sb.inodes_count;
@@ -131,7 +171,12 @@ pub fn fsck(dev_id: u8) -> FsckReport {
     let num_groups = (inodes_count + inodes_per_group - 1) / inodes_per_group;
     let blocks_groups = (blocks_count + blocks_per_group - 1) / blocks_per_group;
     if num_groups != blocks_groups {
-        add_msg(&mut report, FsckSeverity::Warning, 11, "Group count mismatch (inodes vs blocks)");
+        add_msg(
+            &mut report,
+            FsckSeverity::Warning,
+            11,
+            "Group count mismatch (inodes vs blocks)",
+        );
     }
     let num_groups = core::cmp::max(num_groups, blocks_groups);
     if num_groups == 0 {
@@ -140,10 +185,20 @@ pub fn fsck(dev_id: u8) -> FsckReport {
     }
 
     if raw_sb.free_blocks_count > raw_sb.blocks_count {
-        add_msg(&mut report, FsckSeverity::Error, 13, "free_blocks > blocks_count");
+        add_msg(
+            &mut report,
+            FsckSeverity::Error,
+            13,
+            "free_blocks > blocks_count",
+        );
     }
     if raw_sb.free_inodes_count > raw_sb.inodes_count {
-        add_msg(&mut report, FsckSeverity::Error, 14, "free_inodes > inodes_count");
+        add_msg(
+            &mut report,
+            FsckSeverity::Error,
+            14,
+            "free_inodes > inodes_count",
+        );
     }
 
     let inode_size = if rev >= EXT2_DYNAMIC_REV {
@@ -170,9 +225,19 @@ pub fn fsck(dev_id: u8) -> FsckReport {
     let unsupported = feature_incompat & !supported;
     if unsupported != 0 {
         if unsupported & EXT2_FEATURE_INCOMPAT_EXTENTS != 0 {
-            add_msg(&mut report, FsckSeverity::Warning, 18, "EXTENTS feature (ext4) not supported");
+            add_msg(
+                &mut report,
+                FsckSeverity::Warning,
+                18,
+                "EXTENTS feature (ext4) not supported",
+            );
         } else {
-            add_msg(&mut report, FsckSeverity::Error, 17, "Unsupported feature_incompat flags");
+            add_msg(
+                &mut report,
+                FsckSeverity::Error,
+                17,
+                "Unsupported feature_incompat flags",
+            );
         }
     }
 
@@ -180,7 +245,12 @@ pub fn fsck(dev_id: u8) -> FsckReport {
     let supported_ro = EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER;
     let unsupported_ro = feature_ro_compat & !supported_ro;
     if unsupported_ro != 0 {
-        add_msg(&mut report, FsckSeverity::Warning, 19, "Unsupported read-only compat features");
+        add_msg(
+            &mut report,
+            FsckSeverity::Warning,
+            19,
+            "Unsupported read-only compat features",
+        );
     }
 
     let bgdt_start = if block_size == 1024 { 2u64 } else { 1u64 };
@@ -189,7 +259,12 @@ pub fn fsck(dev_id: u8) -> FsckReport {
         let bgd = match read_bgd(dev_id, bgdt_start, block_size, g) {
             Some(b) => b,
             None => {
-                add_msg(&mut report, FsckSeverity::Error, 20, "Cannot read BGDT entry");
+                add_msg(
+                    &mut report,
+                    FsckSeverity::Error,
+                    20,
+                    "Cannot read BGDT entry",
+                );
                 continue;
             }
         };
@@ -217,25 +292,56 @@ pub fn fsck(dev_id: u8) -> FsckReport {
         };
 
         if bgd.free_blocks_count as u64 > this_group_blocks {
-            add_msg(&mut report, FsckSeverity::Warning, 24, "free_blocks > group block count");
+            add_msg(
+                &mut report,
+                FsckSeverity::Warning,
+                24,
+                "free_blocks > group block count",
+            );
         }
         if bgd.free_inodes_count as u64 > this_group_inodes as u64 {
-            add_msg(&mut report, FsckSeverity::Warning, 25, "free_inodes > group inode count");
+            add_msg(
+                &mut report,
+                FsckSeverity::Warning,
+                25,
+                "free_inodes > group inode count",
+            );
         }
 
         if bgd.block_bitmap as u64 >= blocks_count as u64 {
-            add_msg(&mut report, FsckSeverity::Error, 26, "block_bitmap beyond device");
+            add_msg(
+                &mut report,
+                FsckSeverity::Error,
+                26,
+                "block_bitmap beyond device",
+            );
         }
         if bgd.inode_bitmap as u64 >= blocks_count as u64 {
-            add_msg(&mut report, FsckSeverity::Error, 27, "inode_bitmap beyond device");
+            add_msg(
+                &mut report,
+                FsckSeverity::Error,
+                27,
+                "inode_bitmap beyond device",
+            );
         }
         if bgd.inode_table as u64 >= blocks_count as u64 {
-            add_msg(&mut report, FsckSeverity::Error, 28, "inode_table beyond device");
+            add_msg(
+                &mut report,
+                FsckSeverity::Error,
+                28,
+                "inode_table beyond device",
+            );
         }
 
-        let inode_table_blocks = (this_group_inodes as u64 * inode_size as u64 + block_size - 1) / block_size;
+        let inode_table_blocks =
+            (this_group_inodes as u64 * inode_size as u64 + block_size - 1) / block_size;
         if bgd.inode_table as u64 + inode_table_blocks > blocks_count as u64 {
-            add_msg(&mut report, FsckSeverity::Error, 29, "inode_table spans beyond device");
+            add_msg(
+                &mut report,
+                FsckSeverity::Error,
+                29,
+                "inode_table spans beyond device",
+            );
         }
 
         let mut buf = [0u8; 4096];
@@ -245,7 +351,9 @@ pub fn fsck(dev_id: u8) -> FsckReport {
         if block_size as usize <= buf.len() {
             for i in 0..sectors {
                 let off = i * 512;
-                if off + 512 > buf.len() { break; }
+                if off + 512 > buf.len() {
+                    break;
+                }
                 if !bc_read(dev_id, bitmap_sector + i as u64, &mut buf[off..off + 512]) {
                     ok = false;
                     break;
@@ -277,32 +385,52 @@ pub fn fsck(dev_id: u8) -> FsckReport {
     let root_raw = match read_inode(dev_id, inode_size, block_size, inodes_per_group, 2) {
         Some(r) => r,
         None => {
-            add_msg(&mut report, FsckSeverity::Error, 31, "Cannot read root inode");
+            add_msg(
+                &mut report,
+                FsckSeverity::Error,
+                31,
+                "Cannot read root inode",
+            );
             return report;
         }
     };
 
     if root_raw.mode & 0xF000 != 0x4000 {
-        add_msg(&mut report, FsckSeverity::Error, 32, "Root inode is not a directory");
+        add_msg(
+            &mut report,
+            FsckSeverity::Error,
+            32,
+            "Root inode is not a directory",
+        );
     } else {
-        add_msg(&mut report, FsckSeverity::Info, 33, "Root inode is a directory");
+        add_msg(
+            &mut report,
+            FsckSeverity::Info,
+            33,
+            "Root inode is a directory",
+        );
     }
 
     if root_raw.links_count < 2 {
-        add_msg(&mut report, FsckSeverity::Warning, 34, "Root inode links_count < 2");
+        add_msg(
+            &mut report,
+            FsckSeverity::Warning,
+            34,
+            "Root inode links_count < 2",
+        );
     }
 
-    add_msg(
-        &mut report,
-        FsckSeverity::Info,
-        35,
-        "fsck complete",
-    );
+    add_msg(&mut report, FsckSeverity::Info, 35, "fsck complete");
 
     report
 }
 
-fn read_bgd(dev_id: u8, bgdt_start: u64, block_size: u64, group: u32) -> Option<RawBlockGroupDescriptor> {
+fn read_bgd(
+    dev_id: u8,
+    bgdt_start: u64,
+    block_size: u64,
+    group: u32,
+) -> Option<RawBlockGroupDescriptor> {
     let entry_size = core::mem::size_of::<RawBlockGroupDescriptor>() as u64;
     let offset = group as u64 * entry_size;
     let sector = (bgdt_start * block_size / 512) + (offset / 512);
@@ -312,7 +440,8 @@ fn read_bgd(dev_id: u8, bgdt_start: u64, block_size: u64, group: u32) -> Option<
     if !bc_read(dev_id, sector, &mut buf) {
         return None;
     }
-    let ptr = unsafe { buf.as_ptr().add(offset_in_sector as usize) as *const RawBlockGroupDescriptor };
+    let ptr =
+        unsafe { buf.as_ptr().add(offset_in_sector as usize) as *const RawBlockGroupDescriptor };
     Some(unsafe { *ptr })
 }
 

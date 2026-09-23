@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-pub mod task;
-pub mod scheduler;
 pub mod init;
+pub mod scheduler;
 pub mod signal;
+pub mod task;

@@ -11,7 +11,9 @@ pub fn switch_to_user(entry: u64, stack_top: u64) -> ! {
     // Set KERNEL_GS_BASE to PerCpu address so the next SYSCALL's
     // SWAPGS produces a valid GS base. DO NOT zero it.
     let percpu_addr = cpu::percpu_virt_addr(0);
-    unsafe { cpu::write_msr(0xC0000102, percpu_addr); }
+    unsafe {
+        cpu::write_msr(0xC0000102, percpu_addr);
+    }
 
     unsafe {
         core::arch::asm!(

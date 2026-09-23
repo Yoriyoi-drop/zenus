@@ -75,7 +75,9 @@ impl<'a> Args<'a> {
         let mut parts: [&str; MAX_ARGS] = [""; MAX_ARGS];
         let mut count = 0;
         for arg in line.split_whitespace() {
-            if count >= MAX_ARGS { break; }
+            if count >= MAX_ARGS {
+                break;
+            }
             parts[count] = arg;
             count += 1;
         }
@@ -84,7 +86,11 @@ impl<'a> Args<'a> {
     }
 
     pub fn args(&self) -> &[&'a str] {
-        if self.count > 1 { &self.parts[1..self.count] } else { &[] }
+        if self.count > 1 {
+            &self.parts[1..self.count]
+        } else {
+            &[]
+        }
     }
 
     pub fn has_flag(&self, flag: &str) -> bool {
@@ -92,7 +98,11 @@ impl<'a> Args<'a> {
     }
 
     pub fn get(&self, index: usize) -> Option<&'a str> {
-        if index < self.count { Some(self.parts[index]) } else { None }
+        if index < self.count {
+            Some(self.parts[index])
+        } else {
+            None
+        }
     }
 }
 
@@ -106,7 +116,9 @@ impl<'a> OutputBuf<'a> {
         OutputBuf { buf, pos: 0 }
     }
 
-    pub fn len(&self) -> usize { self.pos }
+    pub fn len(&self) -> usize {
+        self.pos
+    }
 }
 
 impl Writer for OutputBuf<'_> {

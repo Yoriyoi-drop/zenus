@@ -1,6 +1,6 @@
-use crate::udp;
-use crate::nic;
 use crate::ipv4;
+use crate::nic;
+use crate::udp;
 use zenus_sync::spinlock::SpinLock;
 
 const DHCP_SERVER_PORT: u16 = 67;
@@ -60,7 +60,15 @@ static DHCP: SpinLock<DhcpInner> = SpinLock::new(DhcpInner {
     resp_ready: false,
 });
 
-fn build_dhcp_msg(op: u8, xid: u32, ciaddr: [u8; 4], mac: &[u8; 6], msg_type: u8, server_id: Option<[u8; 4]>, req_ip: Option<[u8; 4]>) -> [u8; 548] {
+fn build_dhcp_msg(
+    op: u8,
+    xid: u32,
+    ciaddr: [u8; 4],
+    mac: &[u8; 6],
+    msg_type: u8,
+    server_id: Option<[u8; 4]>,
+    req_ip: Option<[u8; 4]>,
+) -> [u8; 548] {
     let mut buf = [0u8; 548];
     buf[0] = op;
     buf[1] = 1;
@@ -174,19 +182,29 @@ fn parse_dhcp_options(payload: &[u8]) -> (u8, [u8; 4], [u8; 4], [u8; 4], u32) {
         let val = &payload[off + 2..off + 2 + len];
         match opt {
             OPT_MSG_TYPE => {
-                if len >= 1 { msg_type = val[0]; }
+                if len >= 1 {
+                    msg_type = val[0];
+                }
             }
             OPT_SERVER_ID => {
-                if len >= 4 { server_id.copy_from_slice(&val[..4]); }
+                if len >= 4 {
+                    server_id.copy_from_slice(&val[..4]);
+                }
             }
             OPT_SUBNET_MASK => {
-                if len >= 4 { subnet_mask.copy_from_slice(&val[..4]); }
+                if len >= 4 {
+                    subnet_mask.copy_from_slice(&val[..4]);
+                }
             }
             OPT_ROUTER => {
-                if len >= 4 { gateway.copy_from_slice(&val[..4]); }
+                if len >= 4 {
+                    gateway.copy_from_slice(&val[..4]);
+                }
             }
             OPT_LEASE_TIME => {
-                if len >= 4 { lease_time = u32::from_be_bytes([val[0], val[1], val[2], val[3]]); }
+                if len >= 4 {
+                    lease_time = u32::from_be_bytes([val[0], val[1], val[2], val[3]]);
+                }
             }
             _ => {}
         }
@@ -208,7 +226,9 @@ pub fn dhcp_start(iface_idx: usize) -> bool {
     };
 
     let mac = iface.mac;
-    let xid = u32::from_le_bytes([mac[0], mac[1], mac[2], mac[3]]).wrapping_mul(0x01000001).wrapping_add(0xDEAD0001);
+    let xid = u32::from_le_bytes([mac[0], mac[1], mac[2], mac[3]])
+        .wrapping_mul(0x01000001)
+        .wrapping_add(0xDEAD0001);
     DHCP.lock().xid = xid;
 
     let bcast_ip = [255u8; 4];
@@ -235,12 +255,29 @@ pub fn dhcp_start(iface_idx: usize) -> bool {
         }
 
         if is_discover || DHCP.lock().state == State::Requesting {
-            let msg_type = if is_discover { MSG_DISCOVER } else { MSG_REQUEST };
-            let ciaddr = if is_discover { zero_ip } else { DHCP.lock().offered_ip };
-            let server_id = if is_discover { None } else { Some(DHCP.lock().server_id) };
-            let req_ip = if is_discover { None } else { Some(DHCP.lock().offered_ip) };
+            let msg_type = if is_discover {
+                MSG_DISCOVER
+            } else {
+                MSG_REQUEST
+            };
+            let ciaddr = if is_discover {
+                zero_ip
+            } else {
+                DHCP.lock().offered_ip
+            };
+            let server_id = if is_discover {
+                None
+            } else {
+                Some(DHCP.lock().server_id)
+            };
+            let req_ip = if is_discover {
+                None
+            } else {
+                Some(DHCP.lock().offered_ip)
+            };
 
-            let dhcp_msg = build_dhcp_msg(OP_REQUEST, xid, ciaddr, &mac, msg_type, server_id, req_ip);
+            let dhcp_msg =
+                build_dhcp_msg(OP_REQUEST, xid, ciaddr, &mac, msg_type, server_id, req_ip);
             send_dhcp_udp(iface_idx, &dhcp_msg, zero_ip, bcast_ip);
             retries += 1;
         }
@@ -350,13 +387,23 @@ fn dhcp_handle_response(our_mac: [u8; 6]) -> bool {
             if dhcp.state != State::Requesting {
                 return false;
             }
-            let gw = if gateway == [0; 4] { server_id } else { gateway };
+            let gw = if gateway == [0; 4] {
+                server_id
+            } else {
+                gateway
+            };
             drop(dhcp);
             nic::set_iface_ip(1, offered, subnet_mask, gw);
             crate::route::clear();
             crate::route::add_direct(
-                [offered[0] & subnet_mask[0], offered[1] & subnet_mask[1], offered[2] & subnet_mask[2], offered[3] & subnet_mask[3]],
-                subnet_mask, 1,
+                [
+                    offered[0] & subnet_mask[0],
+                    offered[1] & subnet_mask[1],
+                    offered[2] & subnet_mask[2],
+                    offered[3] & subnet_mask[3],
+                ],
+                subnet_mask,
+                1,
             );
             crate::route::add_default(gw, 1);
             DHCP.lock().state = State::Bound;

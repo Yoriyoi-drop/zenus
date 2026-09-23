@@ -1,5 +1,5 @@
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use zenus_sync::spinlock::SpinLock;
 
 pub const MAX_SYSCTLS: usize = 64;
@@ -80,7 +80,10 @@ impl SysctlTable {
             value: SysctlValue::IntVal(0),
             read_only: false,
         };
-        SysctlTable { entries: [EMPTY; MAX_SYSCTLS], count: 0 }
+        SysctlTable {
+            entries: [EMPTY; MAX_SYSCTLS],
+            count: 0,
+        }
     }
 
     fn register(&mut self, name: &'static str, desc: &'static str, initial: SysctlValue) -> usize {
@@ -119,14 +122,46 @@ pub fn sysctl_tick() {
 
 pub fn sysctl_init() {
     let mut table = SYSCTL_TABLE.lock();
-    table.register("kernel.hostname", "System hostname", SysctlValue::StrVal("zenus"));
-    table.register("kernel.log_level", "Console log level (0=Trace..5=Critical)", SysctlValue::IntVal(2));
-    table.register("kernel.version", "Kernel version string", SysctlValue::StrVal("Zenus OS v0.1.0"));
-    table.register("kernel.uptime", "System uptime in seconds", SysctlValue::UintVal(0));
-    table.register("kernel.max_tasks", "Maximum number of tasks", SysctlValue::IntVal(128));
-    table.register("kernel.watchdog_timeout", "Watchdog timeout in seconds", SysctlValue::IntVal(30));
-    table.register("net.ipv4.ip_forward", "IP forwarding enabled", SysctlValue::BoolVal(false));
-    table.register("net.dns.server", "DNS server address", SysctlValue::StrVal("10.0.2.3"));
+    table.register(
+        "kernel.hostname",
+        "System hostname",
+        SysctlValue::StrVal("zenus"),
+    );
+    table.register(
+        "kernel.log_level",
+        "Console log level (0=Trace..5=Critical)",
+        SysctlValue::IntVal(2),
+    );
+    table.register(
+        "kernel.version",
+        "Kernel version string",
+        SysctlValue::StrVal("Zenus OS v0.1.0"),
+    );
+    table.register(
+        "kernel.uptime",
+        "System uptime in seconds",
+        SysctlValue::UintVal(0),
+    );
+    table.register(
+        "kernel.max_tasks",
+        "Maximum number of tasks",
+        SysctlValue::IntVal(128),
+    );
+    table.register(
+        "kernel.watchdog_timeout",
+        "Watchdog timeout in seconds",
+        SysctlValue::IntVal(30),
+    );
+    table.register(
+        "net.ipv4.ip_forward",
+        "IP forwarding enabled",
+        SysctlValue::BoolVal(false),
+    );
+    table.register(
+        "net.dns.server",
+        "DNS server address",
+        SysctlValue::StrVal("10.0.2.3"),
+    );
 
     if let Some(idx) = table.find("kernel.uptime") {
         table.entries[idx].read_only = true;

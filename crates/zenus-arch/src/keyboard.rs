@@ -43,22 +43,18 @@ const SCANCODE_SET1: [u8; 128] = [
     0, 0x1B, b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0', b'-', b'=', 0x08, 0x09,
     b'q', b'w', b'e', b'r', b't', b'y', b'u', b'i', b'o', b'p', b'[', b']', b'\n', 0, b'a', b's',
     b'd', b'f', b'g', b'h', b'j', b'k', b'l', b';', b'\'', b'`', 0, b'\\', b'z', b'x', b'c', b'v',
-    b'b', b'n', b'm', b',', b'.', b'/', 0, b'*', 0, b' ', 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    b'b', b'n', b'm', b',', b'.', b'/', 0, b'*', 0, b' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 const SCANCODE_SHIFT: [u8; 128] = [
     0, 0x1B, b'!', b'@', b'#', b'$', b'%', b'^', b'&', b'*', b'(', b')', b'_', b'+', 0x08, 0x09,
     b'Q', b'W', b'E', b'R', b'T', b'Y', b'U', b'I', b'O', b'P', b'{', b'}', b'\n', 0, b'A', b'S',
     b'D', b'F', b'G', b'H', b'J', b'K', b'L', b':', b'"', b'~', 0, b'|', b'Z', b'X', b'C', b'V',
-    b'B', b'N', b'M', b'<', b'>', b'?', 0, b'*', 0, b' ', 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    b'B', b'N', b'M', b'<', b'>', b'?', 0, b'*', 0, b' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 pub fn init() {
@@ -74,9 +70,19 @@ pub fn init() {
         cmd.write(CMD_READ_CONFIG);
         let mut config = data.read();
         config |= 0x01;
+
+        while (status.read() & 0x02) != 0 {
+            core::hint::spin_loop();
+        }
         cmd.write(CMD_WRITE_CONFIG);
+        while (status.read() & 0x02) != 0 {
+            core::hint::spin_loop();
+        }
         data.write(config);
 
+        while (status.read() & 0x02) != 0 {
+            core::hint::spin_loop();
+        }
         cmd.write(CMD_ENABLE);
 
         while (status.read() & STATUS_OUTPUT_FULL) != 0 {
@@ -102,17 +108,17 @@ pub fn init() {
 /// Format: byte sequence stored in pending buffer (e.g., [0x1B, 0x5B, 0x41] for up arrow).
 fn extended_to_escape(scancode: u8) -> ([u8; 4], usize) {
     match scancode & 0x7F {
-        0x48 => ([0x1B, 0x5B, 0x41, 0], 3), // Up    → ESC [ A
-        0x50 => ([0x1B, 0x5B, 0x42, 0], 3), // Down  → ESC [ B
-        0x4D => ([0x1B, 0x5B, 0x43, 0], 3), // Right → ESC [ C
-        0x4B => ([0x1B, 0x5B, 0x44, 0], 3), // Left  → ESC [ D
-        0x47 => ([0x1B, 0x5B, 0x48, 0], 3), // Home  → ESC [ H
-        0x4F => ([0x1B, 0x5B, 0x46, 0], 3), // End   → ESC [ F
+        0x48 => ([0x1B, 0x5B, 0x41, 0], 3),    // Up    → ESC [ A
+        0x50 => ([0x1B, 0x5B, 0x42, 0], 3),    // Down  → ESC [ B
+        0x4D => ([0x1B, 0x5B, 0x43, 0], 3),    // Right → ESC [ C
+        0x4B => ([0x1B, 0x5B, 0x44, 0], 3),    // Left  → ESC [ D
+        0x47 => ([0x1B, 0x5B, 0x48, 0], 3),    // Home  → ESC [ H
+        0x4F => ([0x1B, 0x5B, 0x46, 0], 3),    // End   → ESC [ F
         0x52 => ([0x1B, 0x5B, 0x32, 0x7E], 4), // Insert → ESC [ 2 ~
         0x53 => ([0x1B, 0x5B, 0x33, 0x7E], 4), // Delete → ESC [ 3 ~
         0x49 => ([0x1B, 0x5B, 0x35, 0x7E], 4), // PgUp  → ESC [ 5 ~
         0x51 => ([0x1B, 0x5B, 0x36, 0x7E], 4), // PgDn  → ESC [ 6 ~
-        _    => ([0, 0, 0, 0], 0),
+        _ => ([0, 0, 0, 0], 0),
     }
 }
 
@@ -170,7 +176,11 @@ pub fn handle_irq1() {
     }
 
     if key_down && key < 128 {
-        let base = if kbd.shift { SCANCODE_SHIFT } else { SCANCODE_SET1 };
+        let base = if kbd.shift {
+            SCANCODE_SHIFT
+        } else {
+            SCANCODE_SET1
+        };
         let mut c = base[key as usize];
         if kbd.caps && c >= b'a' && c <= b'z' {
             c -= 32;
@@ -270,7 +280,11 @@ pub fn poll_ps2_controller() -> bool {
     }
 
     if key_down && key < 128 {
-        let base = if kbd.shift { SCANCODE_SHIFT } else { SCANCODE_SET1 };
+        let base = if kbd.shift {
+            SCANCODE_SHIFT
+        } else {
+            SCANCODE_SET1
+        };
         let mut c = base[key as usize];
         if kbd.caps && c >= b'a' && c <= b'z' {
             c -= 32;

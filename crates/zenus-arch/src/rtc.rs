@@ -1,6 +1,6 @@
+use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::instructions::port::Port;
 use zenus_sync::spinlock::SpinLock;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 const CMOS_ADDR: u16 = 0x70;
 const CMOS_DATA: u16 = 0x71;
@@ -64,7 +64,11 @@ fn bcd_to_binary(bcd: u8) -> u8 {
 
 fn cmos_read_rtc(reg: u8, binary: bool) -> u8 {
     let val = cmos_read(reg);
-    if binary { val } else { bcd_to_binary(val) }
+    if binary {
+        val
+    } else {
+        bcd_to_binary(val)
+    }
 }
 
 fn read_all() -> RtcTime {
@@ -79,14 +83,29 @@ fn read_all() -> RtcTime {
     let year_raw = cmos_read_rtc(RTC_YEAR, binary);
     let year = 2000 + year_raw as u16;
 
-    RtcTime { second, minute, hour, day, month, year }
+    RtcTime {
+        second,
+        minute,
+        hour,
+        day,
+        month,
+        year,
+    }
 }
 
 pub fn init() {
     let boot = read_all();
     *BOOT_TIME.lock() = Some(boot);
     let t = boot;
-    zenus_console::kinfo!("RTC: {:04}-{:02}-{:02} {:02}:{:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute, t.second);
+    zenus_console::kinfo!(
+        "RTC: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        t.year,
+        t.month,
+        t.day,
+        t.hour,
+        t.minute,
+        t.second
+    );
 }
 
 pub fn read_time() -> RtcTime {

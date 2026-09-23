@@ -1,30 +1,99 @@
 use alloc::borrow::ToOwned;
 use alloc::format;
-use zutils_common::{Args, Writer};
 use zenus_console::serial::SerialPort;
+use zutils_common::{Args, Writer};
 
 const MAX_LINE: usize = 256;
 const PROMPT: &str = "zenus$ ";
 
 /// Tab completion: list of all known commands
 const COMMANDS: &[&str] = &[
-    "help", "echo", "ls", "cat", "clear", "cd", "timer", "ps", "kill",
-    "mkdir", "rm", "touch", "ifconfig", "meminfo", "reboot", "shutdown",
-    "uname", "version", "dmesg", "id", "whoami", "chmod", "cp", "mv",
-    "mount", "pwd", "df", "grep", "find", "du", "chown", "pgrep",
-    "top", "uptime", "which", "zerrors",
-    "bcache", "fsck", "journal-init", "journal-test",
-    "tcp-listen", "tcp-status", "tcp-send", "tcp-echo", "tcp-connect",
-    "udp-bind", "udp-send", "udp-recv",
-    "dhcp", "dhcp-server", "resolve", "readdev",
-    "init-start", "init-shutdown",
-    "service-list", "service-start", "service-stop", "service-restart",
-    "sysctl", "pkg-install", "pkg-list", "pkg-remove", "pkg-info",
-    "watchdog-pet", "watchdog-status", "crashdump", "lockdep-status", "syslog",
-    "ssh-start", "ssh-status",
-    "ns-info", "ns-sethost", "ns-clone",
-    "firewall-list", "firewall-add", "firewall-remove",            "run", "pipe-test",
-    "zbench", "zdiag", "zdoctor", "zinfo", "zmem", "zpkg", "zsys", "ztrace",
+    "help",
+    "echo",
+    "ls",
+    "cat",
+    "clear",
+    "cd",
+    "timer",
+    "ps",
+    "kill",
+    "mkdir",
+    "rm",
+    "touch",
+    "ifconfig",
+    "meminfo",
+    "reboot",
+    "shutdown",
+    "uname",
+    "version",
+    "dmesg",
+    "id",
+    "whoami",
+    "chmod",
+    "cp",
+    "mv",
+    "mount",
+    "pwd",
+    "df",
+    "grep",
+    "find",
+    "du",
+    "chown",
+    "pgrep",
+    "top",
+    "uptime",
+    "which",
+    "zerrors",
+    "bcache",
+    "fsck",
+    "journal-init",
+    "journal-test",
+    "tcp-listen",
+    "tcp-status",
+    "tcp-send",
+    "tcp-echo",
+    "tcp-connect",
+    "udp-bind",
+    "udp-send",
+    "udp-recv",
+    "dhcp",
+    "dhcp-server",
+    "resolve",
+    "readdev",
+    "init-start",
+    "init-shutdown",
+    "service-list",
+    "service-start",
+    "service-stop",
+    "service-restart",
+    "sysctl",
+    "pkg-install",
+    "pkg-list",
+    "pkg-remove",
+    "pkg-info",
+    "watchdog-pet",
+    "watchdog-status",
+    "crashdump",
+    "lockdep-status",
+    "syslog",
+    "ssh-start",
+    "ssh-status",
+    "ns-info",
+    "ns-sethost",
+    "ns-clone",
+    "firewall-list",
+    "firewall-add",
+    "firewall-remove",
+    "run",
+    "pipe-test",
+    "zbench",
+    "zdiag",
+    "zdoctor",
+    "zinfo",
+    "zmem",
+    "zpkg",
+    "zsys",
+    "ztrace",
 ];
 
 struct ShellWriter {
@@ -39,7 +108,8 @@ impl Writer for ShellWriter {
     }
 
     fn write_byte(&mut self, b: u8) {
-        self.serial.write_str_noirq(core::str::from_utf8(&[b]).unwrap_or(""));
+        self.serial
+            .write_str_noirq(core::str::from_utf8(&[b]).unwrap_or(""));
         let arr = [b];
         if let Ok(s) = core::str::from_utf8(&arr) {
             zenus_console::display::write_str(s);
@@ -109,13 +179,21 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
     let mut parts = [0u8; 4];
     let mut i = 0;
     for octet in s.split('.') {
-        if i >= 4 { return None; }
+        if i >= 4 {
+            return None;
+        }
         let val = octet.parse::<u16>().ok()?;
-        if val > 255 { return None; }
+        if val > 255 {
+            return None;
+        }
         parts[i] = val as u8;
         i += 1;
     }
-    if i != 4 { None } else { Some(parts) }
+    if i != 4 {
+        None
+    } else {
+        Some(parts)
+    }
 }
 
 pub struct Shell {
@@ -254,7 +332,8 @@ impl Shell {
                         // Tab completion: detect if we're completing a command or a path
                         if self.line_pos > 0 {
                             // Check if buffer contains a space (meaning command + argument)
-                            let has_space = self.line_buf[..self.line_pos].iter().any(|&b| b == b' ');
+                            let has_space =
+                                self.line_buf[..self.line_pos].iter().any(|&b| b == b' ');
                             if has_space {
                                 // ── File path completion ──
                                 self.tab_complete_path();
@@ -637,7 +716,9 @@ impl Shell {
         w.write_str("----------------------------------------\r\n");
         for (name, state, pid, restarts) in services {
             w.write_str(name);
-            for _ in name.len()..16 { w.write_byte(b' '); }
+            for _ in name.len()..16 {
+                w.write_byte(b' ');
+            }
             let state_str = match state {
                 zenus_sched::init::ServiceState::Running => "Running",
                 zenus_sched::init::ServiceState::Stopped => "Stopped",
@@ -646,7 +727,9 @@ impl Shell {
             };
             w.write_str(" ");
             w.write_str(state_str);
-            for _ in state_str.len()..10 { w.write_byte(b' '); }
+            for _ in state_str.len()..10 {
+                w.write_byte(b' ');
+            }
             w.write_u64(pid);
             w.write_str("   ");
             w.write_u64(restarts as u64);
@@ -726,10 +809,14 @@ impl Shell {
                 match &entry.value {
                     zenus_fs::sysctl::SysctlValue::IntVal(v) => w.write_i64(*v),
                     zenus_fs::sysctl::SysctlValue::UintVal(v) => w.write_u64(*v),
-                    zenus_fs::sysctl::SysctlValue::BoolVal(v) => w.write_str(if *v { "true" } else { "false" }),
+                    zenus_fs::sysctl::SysctlValue::BoolVal(v) => {
+                        w.write_str(if *v { "true" } else { "false" })
+                    }
                     zenus_fs::sysctl::SysctlValue::StrVal(v) => w.write_str(v),
                 }
-                if entry.read_only { w.write_str(" (read-only)"); }
+                if entry.read_only {
+                    w.write_str(" (read-only)");
+                }
                 w.write_str("\r\n");
             }
             return;
@@ -741,23 +828,40 @@ impl Shell {
             let val_str = &arg[eq_pos + 1..];
             let idx = match zenus_fs::sysctl::sysctl_find(name) {
                 Some(i) => i,
-                None => { w.write_str("sysctl: not found\r\n"); return; }
+                None => {
+                    w.write_str("sysctl: not found\r\n");
+                    return;
+                }
             };
             let entry = match zenus_fs::sysctl::sysctl_get(idx) {
                 Some(e) => e,
-                None => { w.write_str("sysctl: error reading\r\n"); return; }
+                None => {
+                    w.write_str("sysctl: error reading\r\n");
+                    return;
+                }
             };
             let value = match entry.value {
-                zenus_fs::sysctl::SysctlValue::IntVal(_) => {
-                    match val_str.parse() { Ok(v) => zenus_fs::sysctl::SysctlValue::IntVal(v), Err(_) => { w.write_str("sysctl: invalid integer\r\n"); return; } }
-                }
-                zenus_fs::sysctl::SysctlValue::UintVal(_) => {
-                    match val_str.parse() { Ok(v) => zenus_fs::sysctl::SysctlValue::UintVal(v), Err(_) => { w.write_str("sysctl: invalid unsigned\r\n"); return; } }
-                }
+                zenus_fs::sysctl::SysctlValue::IntVal(_) => match val_str.parse() {
+                    Ok(v) => zenus_fs::sysctl::SysctlValue::IntVal(v),
+                    Err(_) => {
+                        w.write_str("sysctl: invalid integer\r\n");
+                        return;
+                    }
+                },
+                zenus_fs::sysctl::SysctlValue::UintVal(_) => match val_str.parse() {
+                    Ok(v) => zenus_fs::sysctl::SysctlValue::UintVal(v),
+                    Err(_) => {
+                        w.write_str("sysctl: invalid unsigned\r\n");
+                        return;
+                    }
+                },
                 zenus_fs::sysctl::SysctlValue::BoolVal(_) => {
                     zenus_fs::sysctl::SysctlValue::BoolVal(val_str == "1" || val_str == "true")
                 }
-                zenus_fs::sysctl::SysctlValue::StrVal(_) => { w.write_str("sysctl: string values cannot be set\r\n"); return; }
+                zenus_fs::sysctl::SysctlValue::StrVal(_) => {
+                    w.write_str("sysctl: string values cannot be set\r\n");
+                    return;
+                }
             };
             if zenus_fs::sysctl::sysctl_set(idx, value) {
                 w.write_str("sysctl: ");
@@ -769,18 +873,26 @@ impl Shell {
         } else {
             let idx = match zenus_fs::sysctl::sysctl_find(arg) {
                 Some(i) => i,
-                None => { w.write_str("sysctl: not found\r\n"); return; }
+                None => {
+                    w.write_str("sysctl: not found\r\n");
+                    return;
+                }
             };
             let entry = match zenus_fs::sysctl::sysctl_get(idx) {
                 Some(e) => e,
-                None => { w.write_str("sysctl: error reading\r\n"); return; }
+                None => {
+                    w.write_str("sysctl: error reading\r\n");
+                    return;
+                }
             };
             w.write_str(entry.name);
             w.write_str(" = ");
             match &entry.value {
                 zenus_fs::sysctl::SysctlValue::IntVal(v) => w.write_i64(*v),
                 zenus_fs::sysctl::SysctlValue::UintVal(v) => w.write_u64(*v),
-                zenus_fs::sysctl::SysctlValue::BoolVal(v) => w.write_str(if *v { "true" } else { "false" }),
+                zenus_fs::sysctl::SysctlValue::BoolVal(v) => {
+                    w.write_str(if *v { "true" } else { "false" })
+                }
                 zenus_fs::sysctl::SysctlValue::StrVal(v) => w.write_str(v),
             }
             w.write_str("\r\n");
@@ -791,17 +903,29 @@ impl Shell {
         let args = Args::parse(line);
         let path = match args.get(1) {
             Some(p) => p,
-            None => { w.write_str("Usage: pkg-install <path>\r\n"); return; }
+            None => {
+                w.write_str("Usage: pkg-install <path>\r\n");
+                return;
+            }
         };
         let node = match zenus_fs::vfs::open(path) {
             Some(n) => n,
-            None => { w.write_str("pkg-install: file not found\r\n"); return; }
+            None => {
+                w.write_str("pkg-install: file not found\r\n");
+                return;
+            }
         };
         let stat = node.fs.stat(node.inode);
         let size = stat.size as usize;
-        if size == 0 || size > 65536 { w.write_str("pkg-install: invalid file size\r\n"); return; }
+        if size == 0 || size > 65536 {
+            w.write_str("pkg-install: invalid file size\r\n");
+            return;
+        }
         let mut buf = alloc::vec![0u8; size];
-        if node.fs.read(node.inode, 0, &mut buf).is_none() { w.write_str("pkg-install: read failed\r\n"); return; }
+        if node.fs.read(node.inode, 0, &mut buf).is_none() {
+            w.write_str("pkg-install: read failed\r\n");
+            return;
+        }
         if zenus_fs::pkg::pkg_install(&buf, 0) {
             w.write_str("pkg-install: installed successfully\r\n");
         } else {
@@ -811,7 +935,10 @@ impl Shell {
 
     fn cmd_pkg_list(&mut self, w: &mut ShellWriter) {
         let pkgs = zenus_fs::pkg::pkg_list();
-        if pkgs.is_empty() { w.write_str("No packages installed\r\n"); return; }
+        if pkgs.is_empty() {
+            w.write_str("No packages installed\r\n");
+            return;
+        }
         w.write_str("Installed packages:\r\n");
         for pkg in pkgs {
             w.write_str("  ");
@@ -828,7 +955,10 @@ impl Shell {
         let args = Args::parse(line);
         let name = match args.get(1) {
             Some(n) => n,
-            None => { w.write_str("Usage: pkg-remove <name>\r\n"); return; }
+            None => {
+                w.write_str("Usage: pkg-remove <name>\r\n");
+                return;
+            }
         };
         if zenus_fs::pkg::pkg_remove(name) {
             w.write_str("Removed: ");
@@ -843,7 +973,10 @@ impl Shell {
         let args = Args::parse(line);
         let name = match args.get(1) {
             Some(n) => n,
-            None => { w.write_str("Usage: pkg-info <name>\r\n"); return; }
+            None => {
+                w.write_str("Usage: pkg-info <name>\r\n");
+                return;
+            }
         };
         match zenus_fs::pkg::pkg_info(name) {
             Some(info) => {
@@ -860,7 +993,9 @@ impl Shell {
                     w.write_str("\r\n");
                 }
             }
-            None => { w.write_str("Package not found\r\n"); }
+            None => {
+                w.write_str("Package not found\r\n");
+            }
         }
     }
 
@@ -873,8 +1008,11 @@ impl Shell {
         let active = zenus_arch::watchdog::watchdog_is_active();
         let remaining = zenus_arch::watchdog::watchdog_get_remaining();
         let timeout = zenus_arch::watchdog::watchdog_get_timeout();
-        if active { w.write_str("Watchdog: ACTIVE\r\n"); }
-        else { w.write_str("Watchdog: INACTIVE\r\n"); }
+        if active {
+            w.write_str("Watchdog: ACTIVE\r\n");
+        } else {
+            w.write_str("Watchdog: INACTIVE\r\n");
+        }
         w.write_str("Timeout: ");
         w.write_u64(timeout as u64);
         w.write_str("s\r\nRemaining: ");
@@ -888,7 +1026,9 @@ impl Shell {
                 w.write_str("Crash dump available:\r\n");
                 zenus_arch::crash::crash_dump_print(dump);
             }
-            None => { w.write_str("No crash dump recorded\r\n"); }
+            None => {
+                w.write_str("No crash dump recorded\r\n");
+            }
         }
     }
 
@@ -916,9 +1056,15 @@ impl Shell {
 
     fn cmd_syslog(&mut self, line: &str, w: &mut ShellWriter) {
         let args = Args::parse(line);
-        let count = args.get(1).and_then(|a| a.parse::<usize>().ok()).unwrap_or(20);
+        let count = args
+            .get(1)
+            .and_then(|a| a.parse::<usize>().ok())
+            .unwrap_or(20);
         let total = zenus_console::syslog::syslog_get_count();
-        if total == 0 { w.write_str("(no syslog entries)\r\n"); return; }
+        if total == 0 {
+            w.write_str("(no syslog entries)\r\n");
+            return;
+        }
         let start = total.saturating_sub(count);
         w.write_str("Syslog (last ");
         w.write_u64(count.min(total) as u64);
@@ -998,7 +1144,10 @@ impl Shell {
         let args = Args::parse(line);
         let hostname = match args.get(1) {
             Some(h) => h,
-            None => { w.write_str("Usage: ns-sethost <hostname>\r\n"); return; }
+            None => {
+                w.write_str("Usage: ns-sethost <hostname>\r\n");
+                return;
+            }
         };
         let uts_ns = zenus_sched::scheduler::current_uts_ns();
         if zenus_ns::uts::set_hostname(uts_ns, hostname.as_bytes()) {
@@ -1013,12 +1162,24 @@ impl Shell {
     fn cmd_ns_clone(&mut self, line: &str, w: &mut ShellWriter) {
         let args = Args::parse(line);
         let mut flags = 0u64;
-        if args.has_flag("--uts") || args.has_flag("uts") { flags |= zenus_ns::CLONE_NEWUTS; }
-        if args.has_flag("--pid") || args.has_flag("pid") { flags |= zenus_ns::CLONE_NEWPID; }
-        if args.has_flag("--mnt") || args.has_flag("mnt") { flags |= zenus_ns::CLONE_NEWNS; }
-        if args.has_flag("--net") || args.has_flag("net") { flags |= zenus_ns::CLONE_NEWNET; }
-        if args.has_flag("--user") || args.has_flag("user") { flags |= zenus_ns::CLONE_NEWUSER; }
-        if args.has_flag("--ipc") || args.has_flag("ipc") { flags |= zenus_ns::CLONE_NEWIPC; }
+        if args.has_flag("--uts") || args.has_flag("uts") {
+            flags |= zenus_ns::CLONE_NEWUTS;
+        }
+        if args.has_flag("--pid") || args.has_flag("pid") {
+            flags |= zenus_ns::CLONE_NEWPID;
+        }
+        if args.has_flag("--mnt") || args.has_flag("mnt") {
+            flags |= zenus_ns::CLONE_NEWNS;
+        }
+        if args.has_flag("--net") || args.has_flag("net") {
+            flags |= zenus_ns::CLONE_NEWNET;
+        }
+        if args.has_flag("--user") || args.has_flag("user") {
+            flags |= zenus_ns::CLONE_NEWUSER;
+        }
+        if args.has_flag("--ipc") || args.has_flag("ipc") {
+            flags |= zenus_ns::CLONE_NEWIPC;
+        }
         w.write_str("Cloning with flags: 0x");
         w.write_hex(flags);
         w.write_str("\r\n");
@@ -1039,7 +1200,11 @@ impl Shell {
                 if name_len > 0 {
                     w.write_str(core::str::from_utf8(&r.name[..name_len]).unwrap_or("?"));
                 }
-                w.write_str(if r.enabled { " ENABLED  " } else { " DISABLED " });
+                w.write_str(if r.enabled {
+                    " ENABLED  "
+                } else {
+                    " DISABLED "
+                });
                 match r.action {
                     zenus_net::firewall::FirewallAction::Accept => w.write_str("ACCEPT "),
                     zenus_net::firewall::FirewallAction::Drop => w.write_str("DROP   "),
@@ -1062,7 +1227,9 @@ impl Shell {
                 w.write_u64(r.src_port as u64);
                 w.write_str(" -> :");
                 w.write_u64(r.dst_port as u64);
-                if r.established { w.write_str(" EST"); }
+                if r.established {
+                    w.write_str(" EST");
+                }
                 w.write_str(" pkts:");
                 w.write_u64(r.packets_matched);
                 w.write_str("\r\n");
@@ -1099,14 +1266,20 @@ impl Shell {
             "accept" => zenus_net::firewall::FirewallAction::Accept,
             "drop" => zenus_net::firewall::FirewallAction::Drop,
             "reject" => zenus_net::firewall::FirewallAction::Reject,
-            _ => { w.write_str("firewall-add: invalid action\r\n"); return; }
+            _ => {
+                w.write_str("firewall-add: invalid action\r\n");
+                return;
+            }
         };
         let proto = match proto_str {
             "any" => zenus_net::firewall::FirewallProto::Any,
             "tcp" => zenus_net::firewall::FirewallProto::Tcp,
             "udp" => zenus_net::firewall::FirewallProto::Udp,
             "icmp" => zenus_net::firewall::FirewallProto::Icmp,
-            _ => { w.write_str("firewall-add: invalid proto\r\n"); return; }
+            _ => {
+                w.write_str("firewall-add: invalid proto\r\n");
+                return;
+            }
         };
 
         let src_ip = parse_ip(src_str);
@@ -1151,7 +1324,10 @@ impl Shell {
         let args = Args::parse(line);
         let idx = match args.get(1).and_then(|s| s.parse::<usize>().ok()) {
             Some(i) => i,
-            None => { w.write_str("Usage: firewall-remove <index>\r\n"); return; }
+            None => {
+                w.write_str("Usage: firewall-remove <index>\r\n");
+                return;
+            }
         };
         if zenus_net::firewall::firewall_remove_rule(idx) {
             w.write_str("firewall-remove: rule removed\r\n");
@@ -1224,8 +1400,12 @@ impl Shell {
             }
         };
 
-        zenus_console::kinfo!("run: ELF loaded entry=0x{:x} stack_top=0x{:x} heap=0x{:x}",
-            loaded.entry, loaded.stack_top, loaded.heap_base);
+        zenus_console::kinfo!(
+            "run: ELF loaded entry=0x{:x} stack_top=0x{:x} heap=0x{:x}",
+            loaded.entry,
+            loaded.stack_top,
+            loaded.heap_base
+        );
 
         // ── Set up argv on user stack ──
         // Layout (from high address to low):
@@ -1388,12 +1568,19 @@ impl Shell {
     fn tab_complete_command(&mut self) {
         // Find end of first word
         let mut word_end = 0;
-        while word_end < self.line_pos && self.line_buf[word_end] != b' ' && self.line_buf[word_end] != 0 {
+        while word_end < self.line_pos
+            && self.line_buf[word_end] != b' '
+            && self.line_buf[word_end] != 0
+        {
             word_end += 1;
         }
-        if word_end == 0 { return; }
+        if word_end == 0 {
+            return;
+        }
         let prefix = core::str::from_utf8(&self.line_buf[..word_end]).unwrap_or("");
-        if prefix.is_empty() { return; }
+        if prefix.is_empty() {
+            return;
+        }
         let prefix_lower = prefix.to_ascii_lowercase();
         let mut matches: [&str; 32] = [""; 32];
         let mut match_count = 0usize;
@@ -1472,12 +1659,21 @@ impl Shell {
             }
         }
         // Text after last space (skip the space itself)
-        let path_start = if last_space + 1 < self.line_pos { last_space + 1 } else { return; };
-        let path_prefix = core::str::from_utf8(&self.line_buf[path_start..self.line_pos]).unwrap_or("");
-        
+        let path_start = if last_space + 1 < self.line_pos {
+            last_space + 1
+        } else {
+            return;
+        };
+        let path_prefix =
+            core::str::from_utf8(&self.line_buf[path_start..self.line_pos]).unwrap_or("");
+
         // Determine directory and file prefix
         let (dir_path, file_prefix) = if let Some(slash_pos) = path_prefix.rfind('/') {
-            let dir = if slash_pos == 0 { "/" } else { &path_prefix[..slash_pos] };
+            let dir = if slash_pos == 0 {
+                "/"
+            } else {
+                &path_prefix[..slash_pos]
+            };
             let file_pref = &path_prefix[slash_pos + 1..];
             (dir.to_owned(), file_pref)
         } else {
@@ -1576,10 +1772,11 @@ impl Shell {
     fn echo_server_poll(&mut self) {
         const MAX_ECHO_LISTENS: usize = 8;
         const MAX_ECHO_CLIENTS: usize = 16;
-        static ECHO_STATE: zenus_sync::spinlock::SpinLock<super::EchoState> = zenus_sync::spinlock::SpinLock::new(super::EchoState {
-            listen_fds: [None; 8],
-            client_fds: [None; 16],
-        });
+        static ECHO_STATE: zenus_sync::spinlock::SpinLock<super::EchoState> =
+            zenus_sync::spinlock::SpinLock::new(super::EchoState {
+                listen_fds: [None; 8],
+                client_fds: [None; 16],
+            });
 
         zenus_net::socket::poll_all(1);
         let mut state = ECHO_STATE.lock();
@@ -1596,12 +1793,19 @@ impl Shell {
             }
         }
         for i in 0..MAX_ECHO_CLIENTS {
-            let fd = match state.client_fds[i] { Some(fd) => fd, None => continue };
+            let fd = match state.client_fds[i] {
+                Some(fd) => fd,
+                None => continue,
+            };
             let mut buf = [0u8; 1500];
             if let Some(len) = zenus_net::socket::recv(fd, &mut buf) {
-                if len > 0 { zenus_net::socket::send(fd, &buf[..len], 1); }
+                if len > 0 {
+                    zenus_net::socket::send(fd, &buf[..len], 1);
+                }
             }
-            if !zenus_net::socket::is_connected(fd) { state.client_fds[i] = None; }
+            if !zenus_net::socket::is_connected(fd) {
+                state.client_fds[i] = None;
+            }
         }
     }
 }

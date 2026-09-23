@@ -3,7 +3,10 @@
 use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
-    let iterations = args.get(1).and_then(|a| a.parse::<u64>().ok()).unwrap_or(10000);
+    let iterations = args
+        .get(1)
+        .and_then(|a| a.parse::<u64>().ok())
+        .unwrap_or(10000);
     w.write_str("Zenus Benchmark\r\n");
     w.write_str("Iterations: ");
     w.write_u64(iterations);

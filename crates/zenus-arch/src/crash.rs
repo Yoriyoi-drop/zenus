@@ -2,11 +2,26 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(C)]
 pub struct CpuRegisters {
-    pub rax: u64, rbx: u64, rcx: u64, rdx: u64,
-    pub rsi: u64, rdi: u64, rbp: u64, rsp: u64,
-    pub r8: u64, r9: u64, r10: u64, r11: u64,
-    pub r12: u64, r13: u64, r14: u64, r15: u64,
-    pub rip: u64, rflags: u64, cs: u64, ss: u64,
+    pub rax: u64,
+    rbx: u64,
+    rcx: u64,
+    rdx: u64,
+    pub rsi: u64,
+    rdi: u64,
+    rbp: u64,
+    rsp: u64,
+    pub r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    pub r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    pub rip: u64,
+    rflags: u64,
+    cs: u64,
+    ss: u64,
 }
 
 pub struct CrashDump {
@@ -26,11 +41,26 @@ impl CrashDump {
             magic: [0; 16],
             timestamp: 0,
             registers: CpuRegisters {
-                rax: 0, rbx: 0, rcx: 0, rdx: 0,
-                rsi: 0, rdi: 0, rbp: 0, rsp: 0,
-                r8: 0, r9: 0, r10: 0, r11: 0,
-                r12: 0, r13: 0, r14: 0, r15: 0,
-                rip: 0, rflags: 0, cs: 0, ss: 0,
+                rax: 0,
+                rbx: 0,
+                rcx: 0,
+                rdx: 0,
+                rsi: 0,
+                rdi: 0,
+                rbp: 0,
+                rsp: 0,
+                r8: 0,
+                r9: 0,
+                r10: 0,
+                r11: 0,
+                r12: 0,
+                r13: 0,
+                r14: 0,
+                r15: 0,
+                rip: 0,
+                rflags: 0,
+                cs: 0,
+                ss: 0,
             },
             task_id: 0,
             cr3: 0,
@@ -43,19 +73,31 @@ impl CrashDump {
 
 const MAX_CRASH_CPUS: usize = 8;
 static mut CRASH_DUMPS: [CrashDump; MAX_CRASH_CPUS] = [
-    CrashDump::new(), CrashDump::new(), CrashDump::new(), CrashDump::new(),
-    CrashDump::new(), CrashDump::new(), CrashDump::new(), CrashDump::new(),
+    CrashDump::new(),
+    CrashDump::new(),
+    CrashDump::new(),
+    CrashDump::new(),
+    CrashDump::new(),
+    CrashDump::new(),
+    CrashDump::new(),
+    CrashDump::new(),
 ];
 static CRASH_SAVED: [AtomicBool; MAX_CRASH_CPUS] = [
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
-    AtomicBool::new(false), AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
 ];
 
 fn crash_cpu() -> usize {
     let cpu: u64;
-    unsafe { core::arch::asm!("mov {}, cr8", out(reg) cpu); }
+    unsafe {
+        core::arch::asm!("mov {}, cr8", out(reg) cpu);
+    }
     (cpu as usize) % MAX_CRASH_CPUS
 }
 
@@ -116,7 +158,10 @@ pub fn crash_dump_save(msg: &str) -> &'static CrashDump {
     dump.panic_message[..n].copy_from_slice(&msg_bytes[..n]);
     dump.panic_message[n] = 0;
 
-    dump.cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
+    dump.cr3 = x86_64::registers::control::Cr3::read()
+        .0
+        .start_address()
+        .as_u64();
 
     dump.backtrace_count = capture_backtrace(&mut dump.backtrace);
 
@@ -144,30 +189,69 @@ fn capture_backtrace(buf: &mut [u64; 16]) -> usize {
 pub fn crash_dump_print(dump: &CrashDump) {
     let serial = zenus_console::serial::SerialPort::new(0x3F8);
     serial.write_str("\n===== CRASH DUMP =====\n");
-    serial.write_str("RAX: 0x"); serial.write_hex(dump.registers.rax);
-    serial.write_str("  RBX: 0x"); serial.write_hex(dump.registers.rbx); serial.write_str("\n");
-    serial.write_str("RCX: 0x"); serial.write_hex(dump.registers.rcx);
-    serial.write_str("  RDX: 0x"); serial.write_hex(dump.registers.rdx); serial.write_str("\n");
-    serial.write_str("RSI: 0x"); serial.write_hex(dump.registers.rsi);
-    serial.write_str("  RDI: 0x"); serial.write_hex(dump.registers.rdi); serial.write_str("\n");
-    serial.write_str("RBP: 0x"); serial.write_hex(dump.registers.rbp);
-    serial.write_str("  RSP: 0x"); serial.write_hex(dump.registers.rsp); serial.write_str("\n");
-    serial.write_str("R8:  0x"); serial.write_hex(dump.registers.r8);
-    serial.write_str("  R9:  0x"); serial.write_hex(dump.registers.r9); serial.write_str("\n");
-    serial.write_str("R10: 0x"); serial.write_hex(dump.registers.r10);
-    serial.write_str("  R11: 0x"); serial.write_hex(dump.registers.r11); serial.write_str("\n");
-    serial.write_str("R12: 0x"); serial.write_hex(dump.registers.r12);
-    serial.write_str("  R13: 0x"); serial.write_hex(dump.registers.r13); serial.write_str("\n");
-    serial.write_str("R14: 0x"); serial.write_hex(dump.registers.r14);
-    serial.write_str("  R15: 0x"); serial.write_hex(dump.registers.r15); serial.write_str("\n");
-    serial.write_str("RIP: 0x"); serial.write_hex(dump.registers.rip); serial.write_str("\n");
-    serial.write_str("RFLAGS: 0x"); serial.write_hex(dump.registers.rflags); serial.write_str("\n");
-    serial.write_str("CS: 0x"); serial.write_hex(dump.registers.cs as u64);
-    serial.write_str("  SS: 0x"); serial.write_hex(dump.registers.ss as u64); serial.write_str("\n");
-    serial.write_str("CR3: 0x"); serial.write_hex(dump.cr3); serial.write_str("\n");
-    serial.write_str("Task ID: "); serial.write_u64(dump.task_id); serial.write_str("\n");
+    serial.write_str("RAX: 0x");
+    serial.write_hex(dump.registers.rax);
+    serial.write_str("  RBX: 0x");
+    serial.write_hex(dump.registers.rbx);
+    serial.write_str("\n");
+    serial.write_str("RCX: 0x");
+    serial.write_hex(dump.registers.rcx);
+    serial.write_str("  RDX: 0x");
+    serial.write_hex(dump.registers.rdx);
+    serial.write_str("\n");
+    serial.write_str("RSI: 0x");
+    serial.write_hex(dump.registers.rsi);
+    serial.write_str("  RDI: 0x");
+    serial.write_hex(dump.registers.rdi);
+    serial.write_str("\n");
+    serial.write_str("RBP: 0x");
+    serial.write_hex(dump.registers.rbp);
+    serial.write_str("  RSP: 0x");
+    serial.write_hex(dump.registers.rsp);
+    serial.write_str("\n");
+    serial.write_str("R8:  0x");
+    serial.write_hex(dump.registers.r8);
+    serial.write_str("  R9:  0x");
+    serial.write_hex(dump.registers.r9);
+    serial.write_str("\n");
+    serial.write_str("R10: 0x");
+    serial.write_hex(dump.registers.r10);
+    serial.write_str("  R11: 0x");
+    serial.write_hex(dump.registers.r11);
+    serial.write_str("\n");
+    serial.write_str("R12: 0x");
+    serial.write_hex(dump.registers.r12);
+    serial.write_str("  R13: 0x");
+    serial.write_hex(dump.registers.r13);
+    serial.write_str("\n");
+    serial.write_str("R14: 0x");
+    serial.write_hex(dump.registers.r14);
+    serial.write_str("  R15: 0x");
+    serial.write_hex(dump.registers.r15);
+    serial.write_str("\n");
+    serial.write_str("RIP: 0x");
+    serial.write_hex(dump.registers.rip);
+    serial.write_str("\n");
+    serial.write_str("RFLAGS: 0x");
+    serial.write_hex(dump.registers.rflags);
+    serial.write_str("\n");
+    serial.write_str("CS: 0x");
+    serial.write_hex(dump.registers.cs as u64);
+    serial.write_str("  SS: 0x");
+    serial.write_hex(dump.registers.ss as u64);
+    serial.write_str("\n");
+    serial.write_str("CR3: 0x");
+    serial.write_hex(dump.cr3);
+    serial.write_str("\n");
+    serial.write_str("Task ID: ");
+    serial.write_u64(dump.task_id);
+    serial.write_str("\n");
     serial.write_str("Message: ");
-    let end = dump.panic_message.iter().position(|&b| b == 0).unwrap_or(255);
+    let end = dump
+        .panic_message
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(255);
     if let Ok(msg) = core::str::from_utf8(&dump.panic_message[..end]) {
         serial.write_str(msg);
     }

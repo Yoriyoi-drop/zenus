@@ -1,5 +1,5 @@
-use crate::udp;
 use crate::nic;
+use crate::udp;
 use zenus_sync::spinlock::SpinLock;
 
 const DNS_PORT: u16 = 53;
@@ -210,11 +210,25 @@ pub fn resolve(iface_idx: usize, dns_server: [u8; 4], domain: &str) -> Option<[u
     let mut query = [0u8; 512];
     let qlen = build_query(id, domain, &mut query)?;
 
-    udp::send(iface_idx, src_port, DNS_PORT, src_ip, dns_server, &query[..qlen]);
+    udp::send(
+        iface_idx,
+        src_port,
+        DNS_PORT,
+        src_ip,
+        dns_server,
+        &query[..qlen],
+    );
 
     for tick in 0..50000 {
         if tick > 0 && tick % 5000 == 0 {
-            udp::send(iface_idx, src_port, DNS_PORT, src_ip, dns_server, &query[..qlen]);
+            udp::send(
+                iface_idx,
+                src_port,
+                DNS_PORT,
+                src_ip,
+                dns_server,
+                &query[..qlen],
+            );
         }
         nic::net_poll();
         let mut state = DNS_STATE.lock();

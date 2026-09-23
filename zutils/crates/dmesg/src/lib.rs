@@ -1,7 +1,7 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
 use zenus_console::log;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     let snap = log::dmesg_snapshot();

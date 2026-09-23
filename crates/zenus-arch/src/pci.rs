@@ -32,11 +32,24 @@ struct PciState {
 
 static PCI_STATE: SpinLock<PciState> = SpinLock::new(PciState {
     devices: [PciDevice {
-        bus: 0, device: 0, function: 0,
-        vendor_id: 0, device_id: 0, class_code: 0, subclass: 0,
-        prog_if: 0, revision: 0, header_type: 0,
-        bar0: 0, bar1: 0, bar2: 0, bar3: 0, bar4: 0, bar5: 0,
-        interrupt_line: 0, interrupt_pin: 0,
+        bus: 0,
+        device: 0,
+        function: 0,
+        vendor_id: 0,
+        device_id: 0,
+        class_code: 0,
+        subclass: 0,
+        prog_if: 0,
+        revision: 0,
+        header_type: 0,
+        bar0: 0,
+        bar1: 0,
+        bar2: 0,
+        bar3: 0,
+        bar4: 0,
+        bar5: 0,
+        interrupt_line: 0,
+        interrupt_pin: 0,
     }; MAX_PCI_DEVICES],
     count: 0,
 });
@@ -194,8 +207,14 @@ pub unsafe fn enable_bus_master(bus: u8, dev: u8, func: u8) {
 }
 
 fn log_device(dev: &PciDevice) {
-    zenus_console::kinfo!("  PCI {:x}:{:x}.{:x}  {:x}:{:x}  Class {:x}:{:x}",
-        dev.bus, dev.device, dev.function,
-        dev.vendor_id, dev.device_id,
-        dev.class_code, dev.subclass);
+    zenus_console::kinfo!(
+        "  PCI {:x}:{:x}.{:x}  {:x}:{:x}  Class {:x}:{:x}",
+        dev.bus,
+        dev.device,
+        dev.function,
+        dev.vendor_id,
+        dev.device_id,
+        dev.class_code,
+        dev.subclass
+    );
 }

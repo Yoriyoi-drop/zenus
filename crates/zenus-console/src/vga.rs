@@ -35,7 +35,10 @@ static ATTR: AtomicUsize = AtomicUsize::new(0);
 
 pub fn init(hhdm_offset: u64) {
     HHDM.store(hhdm_offset, Ordering::Relaxed);
-    ATTR.store(make_attr(Color::LightGray, Color::Black) as usize, Ordering::Relaxed);
+    ATTR.store(
+        make_attr(Color::LightGray, Color::Black) as usize,
+        Ordering::Relaxed,
+    );
     clear();
     ROW.store(0, Ordering::Relaxed);
     COL.store(0, Ordering::Relaxed);
@@ -78,7 +81,9 @@ fn scroll() {
 }
 
 pub fn write_str(s: &str) {
-    if HHDM.load(Ordering::Relaxed) == 0 { return; }
+    if HHDM.load(Ordering::Relaxed) == 0 {
+        return;
+    }
     let base = vga_base();
 
     let mut in_escape = false;
@@ -122,13 +127,13 @@ pub fn write_str(s: &str) {
             b'\r' => {
                 COL.store(0, Ordering::Relaxed);
             }
-            b'\t' => {
-                loop {
-                    let col = COL.load(Ordering::Relaxed);
-                    if col >= WIDTH || col % 4 == 0 { break; }
-                    put_char(base, b' ');
+            b'\t' => loop {
+                let col = COL.load(Ordering::Relaxed);
+                if col >= WIDTH || col % 4 == 0 {
+                    break;
                 }
-            }
+                put_char(base, b' ');
+            },
             0x20..=0x7E => {
                 put_char(base, byte);
             }

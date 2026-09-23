@@ -2,12 +2,16 @@
 
 extern crate alloc;
 
+use zenus_fs::vfs::{self, FileType};
 use zutils_common::{Args, Writer};
-use zenus_fs::vfs::{self, FileSystem as _, FileType};
 
 pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
     let long = args.has_flag("-l");
-    let path = args.args().iter().find(|a| !a.is_empty() && **a != "-l").unwrap_or(&"/");
+    let path = args
+        .args()
+        .iter()
+        .find(|a| !a.is_empty() && **a != "-l")
+        .unwrap_or(&"/");
     let path = if path.is_empty() { "/" } else { path };
 
     match vfs::open(path) {

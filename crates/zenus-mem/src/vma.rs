@@ -35,8 +35,13 @@ pub struct VmaRegion {
 impl VmaRegion {
     pub const fn new() -> Self {
         VmaRegion {
-            start: 0, end: 0, prot: 0, flags: 0,
-            file_offset: 0, inode: 0, valid: false,
+            start: 0,
+            end: 0,
+            prot: 0,
+            flags: 0,
+            file_offset: 0,
+            inode: 0,
+            valid: false,
         }
     }
 
@@ -44,13 +49,21 @@ impl VmaRegion {
         self.valid && addr >= self.start && addr < self.end
     }
 
-    pub fn page_aligned_start(&self) -> u64 { self.start & !0xFFF }
-    pub fn page_aligned_end(&self) -> u64 { (self.end + 0xFFF) & !0xFFF }
+    pub fn page_aligned_start(&self) -> u64 {
+        self.start & !0xFFF
+    }
+    pub fn page_aligned_end(&self) -> u64 {
+        (self.end + 0xFFF) & !0xFFF
+    }
 
     pub fn to_page_flags(&self) -> u64 {
         let mut flags = PAGE_USER;
-        if self.prot & PROT_WRITE != 0 { flags |= PAGE_WRITABLE; }
-        if self.prot & PROT_EXEC == 0 { flags |= PAGE_NO_EXECUTE; }
+        if self.prot & PROT_WRITE != 0 {
+            flags |= PAGE_WRITABLE;
+        }
+        if self.prot & PROT_EXEC == 0 {
+            flags |= PAGE_NO_EXECUTE;
+        }
         flags
     }
 }
@@ -72,11 +85,18 @@ impl VmaTable {
     }
 
     pub fn insert(&mut self, start: u64, end: u64, prot: u64, flags: u64) -> Option<usize> {
-        if self.count >= MAX_VMAS { return None; }
+        if self.count >= MAX_VMAS {
+            return None;
+        }
         let idx = self.count;
         self.regions[idx] = VmaRegion {
-            start, end, prot, flags,
-            file_offset: 0, inode: 0, valid: true,
+            start,
+            end,
+            prot,
+            flags,
+            file_offset: 0,
+            inode: 0,
+            valid: true,
         };
         self.count += 1;
         Some(idx)
@@ -93,7 +113,8 @@ impl VmaTable {
 
     pub fn find_exact(&self, start: u64, end: u64) -> Option<usize> {
         for i in 0..self.count {
-            if self.regions[i].valid && self.regions[i].start == start && self.regions[i].end == end {
+            if self.regions[i].valid && self.regions[i].start == start && self.regions[i].end == end
+            {
                 return Some(i);
             }
         }
@@ -101,7 +122,9 @@ impl VmaTable {
     }
 
     pub fn remove(&mut self, idx: usize) -> bool {
-        if idx >= self.count { return false; }
+        if idx >= self.count {
+            return false;
+        }
         self.regions[idx].valid = false;
         // Compact
         let mut write = 0;
@@ -120,13 +143,21 @@ impl VmaTable {
     pub fn find_free(&self, size: u64, hint: u64) -> Option<u64> {
         let start = hint & !0xFFF;
         let end = start + size;
-        if end > 0x7F00_0000_0000 { return None; }
+        if end > 0x7F00_0000_0000 {
+            return None;
+        }
 
         for i in 0..self.count {
             let r = &self.regions[i];
-            if !r.valid { continue; }
-            if start >= r.start && start < r.end { return self.find_free(size, r.end); }
-            if end > r.start && end <= r.end { return self.find_free(size, r.end); }
+            if !r.valid {
+                continue;
+            }
+            if start >= r.start && start < r.end {
+                return self.find_free(size, r.end);
+            }
+            if end > r.start && end <= r.end {
+                return self.find_free(size, r.end);
+            }
         }
         Some(start)
     }

@@ -1,7 +1,7 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
 use zenus_sched::scheduler;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     w.write_str("PID\tState\t\tName\t\t\t\tUID\tGID\r\n");
@@ -12,7 +12,9 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
         w.write_str("\t");
         w.write_str(info.state.to_str());
         let pad = 16usize.saturating_sub(info.state.to_str().len());
-        for _ in 0..pad { w.write_byte(b' '); }
+        for _ in 0..pad {
+            w.write_byte(b' ');
+        }
         // Display task name
         let name_len = info.name.iter().position(|&b| b == 0).unwrap_or(32);
         if name_len > 0 {
@@ -20,7 +22,9 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
         } else {
             w.write_str("-");
         }
-        for _ in name_len..24 { w.write_byte(b' '); }
+        for _ in name_len..24 {
+            w.write_byte(b' ');
+        }
         w.write_u64(info.uid as u64);
         w.write_str("\t");
         w.write_u64(info.gid as u64);

@@ -1,4 +1,4 @@
-use crate::block_cache::{bc_read, bc_write, bc_flush};
+use crate::block_cache::{bc_flush, bc_read, bc_write};
 use crate::devfs::block_device_write;
 
 const JOURNAL_MAGIC: u32 = 0x4A524E4C; // "JRNL"
@@ -42,7 +42,10 @@ pub fn journal_init(dev_id: u8, start_block: u64, num_blocks: u64) -> bool {
         targets: [0; MAX_ENTRIES],
     };
     let raw = unsafe {
-        core::slice::from_raw_parts(&hdr as *const JournalHeader as *const u8, core::mem::size_of::<JournalHeader>())
+        core::slice::from_raw_parts(
+            &hdr as *const JournalHeader as *const u8,
+            core::mem::size_of::<JournalHeader>(),
+        )
     };
     block_device_write(dev_id as usize, start_block, raw)
 }
@@ -85,7 +88,9 @@ pub fn journal_write(target_block: u64, data: &[u8]) -> bool {
 
     let max_data_block = unsafe { JNL_START_BLOCK + 1 + MAX_ENTRIES as u64 - 1 };
     let data_block = unsafe { JNL_START_BLOCK + 1 + idx as u64 };
-    if data_block > max_data_block { return false; }
+    if data_block > max_data_block {
+        return false;
+    }
     if !bc_write(unsafe { JNL_DEV_ID }, data_block, &sector_buf) {
         return false;
     }
@@ -125,7 +130,9 @@ pub fn journal_commit() -> bool {
         let mut data = [0u8; 512];
         let max_data_block = unsafe { JNL_START_BLOCK + 1 + MAX_ENTRIES as u64 - 1 };
         let data_block = unsafe { JNL_START_BLOCK + 1 + i as u64 };
-        if data_block > max_data_block { return false; }
+        if data_block > max_data_block {
+            return false;
+        }
         if !bc_read(unsafe { JNL_DEV_ID }, data_block, &mut data) {
             return false;
         }
@@ -160,7 +167,9 @@ pub fn journal_commit() -> bool {
     write_header(&hdr);
     bc_flush();
 
-    unsafe { JNL_ACTIVE = false; }
+    unsafe {
+        JNL_ACTIVE = false;
+    }
     true
 }
 

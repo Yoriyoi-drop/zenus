@@ -2,8 +2,8 @@
 
 extern crate alloc;
 
-use zutils_common::{Args, Writer};
 use zenus_fs::vfs::{self, FileSystem as _, FileType};
+use zutils_common::{Args, Writer};
 
 fn du_recursive<W: Writer + ?Sized>(path: &str, w: &mut W) -> u64 {
     let mut total = 0u64;

@@ -1,10 +1,10 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
+use zenus_arch::acpi;
 use zenus_arch::interrupts::pit::get_ticks;
 use zenus_sched::scheduler;
 use zenus_sched::task::TaskState;
-use zenus_arch::acpi;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
     let subcmd = args.get(1).unwrap_or("status");
@@ -16,7 +16,11 @@ pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
             w.write_u64(seconds);
             w.write_str("s\r\n");
             let tasks = scheduler::list_tasks();
-            let active = tasks.iter().flatten().filter(|t| t.state == TaskState::Ready || t.state == TaskState::Running).count();
+            let active = tasks
+                .iter()
+                .flatten()
+                .filter(|t| t.state == TaskState::Ready || t.state == TaskState::Running)
+                .count();
             w.write_str("  Tasks:   ");
             w.write_u64(active as u64);
             w.write_str(" active\r\n");

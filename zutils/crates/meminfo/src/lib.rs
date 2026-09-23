@@ -1,8 +1,8 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
-use zenus_mem::frame_allocator;
 use zenus_mem::allocator::ALLOCATOR;
+use zenus_mem::frame_allocator;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     let free_head = ALLOCATOR.free_head_addr();
@@ -16,12 +16,12 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     w.write_str("  Total: ");
     w.write_u64(fa.total_memory() / 4096);
     w.write_str(" frames (");
-    w.write_u64(fa.total_memory() / (1024*1024));
+    w.write_u64(fa.total_memory() / (1024 * 1024));
     w.write_str(" MB)\r\n");
     w.write_str("  Used:  ");
     w.write_u64(fa.used_memory() / 4096);
     w.write_str(" frames (");
-    w.write_u64(fa.used_memory() / (1024*1024));
+    w.write_u64(fa.used_memory() / (1024 * 1024));
     w.write_str(" MB)\r\n");
     w.write_str("  Free stack: ");
     w.write_u64(fa.free_frames_count() as u64);

@@ -1,7 +1,7 @@
-use core::fmt::Write;
 use crate::serial::SerialPort;
+use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use zenus_sync::spinlock::SpinLock;
-use core::sync::atomic::{AtomicU8, AtomicBool, Ordering};
 
 /// Buffer log sementara untuk formatting pesan kernel.
 /// Ukuran diperbesar ke 512 byte agar pesan panjang tidak terpotong diam-diam.
@@ -14,7 +14,11 @@ pub struct LogBuf {
 
 impl LogBuf {
     pub fn new() -> Self {
-        LogBuf { buf: [0u8; 512], pos: 0, truncated: false }
+        LogBuf {
+            buf: [0u8; 512],
+            pos: 0,
+            truncated: false,
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -45,29 +49,29 @@ impl core::fmt::Write for LogBuf {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum LogLevel {
-    Trace    = 0,
-    Debug    = 1,
-    Notice   = 2,
-    Info     = 3,
-    Warn     = 4,
-    Error    = 5,
+    Trace = 0,
+    Debug = 1,
+    Notice = 2,
+    Info = 3,
+    Warn = 4,
+    Error = 5,
     Critical = 6,
-    Fatal    = 7,
-    Panic    = 8,
+    Fatal = 7,
+    Panic = 8,
 }
 
 impl LogLevel {
     pub fn prefix(self) -> &'static str {
         match self {
-            LogLevel::Trace    => "TRACE",
-            LogLevel::Debug    => "DEBUG",
-            LogLevel::Notice   => "NOTICE",
-            LogLevel::Info     => "INFO ",
-            LogLevel::Warn     => "WARN ",
-            LogLevel::Error    => "ERROR",
+            LogLevel::Trace => "TRACE",
+            LogLevel::Debug => "DEBUG",
+            LogLevel::Notice => "NOTICE",
+            LogLevel::Info => "INFO ",
+            LogLevel::Warn => "WARN ",
+            LogLevel::Error => "ERROR",
             LogLevel::Critical => "CRIT ",
-            LogLevel::Fatal    => "FATAL",
-            LogLevel::Panic    => "PANIC",
+            LogLevel::Fatal => "FATAL",
+            LogLevel::Panic => "PANIC",
         }
     }
 
@@ -115,8 +119,16 @@ pub struct Dmesg {
 
 impl Dmesg {
     const fn new() -> Self {
-        const EMPTY: DmesgEntry = DmesgEntry { level: LogLevel::Info, msg: [0u8; 128], len: 0 };
-        Dmesg { buf: [EMPTY; DMESG_SIZE], idx: 0, count: 0 }
+        const EMPTY: DmesgEntry = DmesgEntry {
+            level: LogLevel::Info,
+            msg: [0u8; 128],
+            len: 0,
+        };
+        Dmesg {
+            buf: [EMPTY; DMESG_SIZE],
+            idx: 0,
+            count: 0,
+        }
     }
 
     pub fn push(&mut self, level: LogLevel, msg: &str) {
@@ -134,8 +146,17 @@ impl Dmesg {
     }
 
     pub fn iter(&self) -> DmesgIter<'_> {
-        let start = if self.count < DMESG_SIZE { 0 } else { self.idx % DMESG_SIZE };
-        DmesgIter { buf: &self.buf, pos: 0, count: self.count, start }
+        let start = if self.count < DMESG_SIZE {
+            0
+        } else {
+            self.idx % DMESG_SIZE
+        };
+        DmesgIter {
+            buf: &self.buf,
+            pos: 0,
+            count: self.count,
+            start,
+        }
     }
 }
 
@@ -169,7 +190,9 @@ pub fn dmesg_init() {
 }
 
 pub fn dmesg_push(level: LogLevel, msg: &str) {
-    if !DMESG_INIT.load(Ordering::Acquire) { return; }
+    if !DMESG_INIT.load(Ordering::Acquire) {
+        return;
+    }
     DMESG_BUF.lock().push(level, msg);
 }
 
@@ -180,14 +203,22 @@ pub struct DmesgSnapshot {
 
 pub fn dmesg_snapshot() -> DmesgSnapshot {
     let mut snap = DmesgSnapshot {
-        entries: [DmesgEntry { level: LogLevel::Info, msg: [0u8; 128], len: 0 }; DMESG_SIZE],
+        entries: [DmesgEntry {
+            level: LogLevel::Info,
+            msg: [0u8; 128],
+            len: 0,
+        }; DMESG_SIZE],
         count: 0,
     };
-    if !DMESG_INIT.load(Ordering::Acquire) { return snap; }
+    if !DMESG_INIT.load(Ordering::Acquire) {
+        return snap;
+    }
     let buf = DMESG_BUF.lock();
     snap.count = buf.count;
     for (i, (level, msg)) in buf.iter().enumerate() {
-        if i >= DMESG_SIZE { break; }
+        if i >= DMESG_SIZE {
+            break;
+        }
         let entry = &mut snap.entries[i];
         entry.level = level;
         let bytes = msg.as_bytes();
@@ -200,7 +231,9 @@ pub fn dmesg_snapshot() -> DmesgSnapshot {
 }
 
 pub fn dmesg_count() -> usize {
-    if !DMESG_INIT.load(Ordering::Acquire) { return 0; }
+    if !DMESG_INIT.load(Ordering::Acquire) {
+        return 0;
+    }
     DMESG_BUF.lock().count
 }
 

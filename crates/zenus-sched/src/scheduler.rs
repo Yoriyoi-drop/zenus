@@ -1,8 +1,8 @@
-use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
-use zenus_sync::spinlock::SpinLock;
 use super::task::{Task, TaskInfo, TaskState, MAX_TASKS};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use zenus_mem::allocator::ALLOCATOR;
 use zenus_ns::{NsId, NS_ROOT};
+use zenus_sync::spinlock::SpinLock;
 
 const MAX_ZOMBIES: usize = 64;
 
@@ -20,11 +20,16 @@ struct ZombieList {
 
 impl ZombieList {
     const fn new() -> Self {
-        ZombieList { records: [None; MAX_ZOMBIES], count: 0 }
+        ZombieList {
+            records: [None; MAX_ZOMBIES],
+            count: 0,
+        }
     }
 
     fn push(&mut self, rec: ZombieRecord) -> bool {
-        if self.count >= MAX_ZOMBIES { return false; }
+        if self.count >= MAX_ZOMBIES {
+            return false;
+        }
         self.records[self.count] = Some(rec);
         self.count += 1;
         true
@@ -93,12 +98,24 @@ pub const IDLE_TASK_IDX: u32 = u32::MAX;
 
 #[no_mangle]
 static CURRENT_TASK: [AtomicU32; MAX_CPUS] = [
-    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
-    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
 ];
 static CPU_TASK_COUNT: [AtomicU32; MAX_CPUS] = [
-    AtomicU32::new(1), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
-    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(1),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
 ];
 static TASK_COUNT: AtomicU32 = AtomicU32::new(0);
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
@@ -119,7 +136,10 @@ struct TaskArray {
 
 impl TaskArray {
     const fn new() -> Self {
-        TaskArray { tasks: [None; MAX_TASKS], next_free: 0 }
+        TaskArray {
+            tasks: [None; MAX_TASKS],
+            next_free: 0,
+        }
     }
 
     fn find_free(&mut self) -> Option<usize> {
@@ -292,7 +312,7 @@ core::arch::global_asm!(
     ".globl bochs_putchar",
     "bochs_putchar:",
     "  mov al, dil",
-    "  mov dx, 0xE9",               // Bochs/QEMU debug port
+    "  mov dx, 0xE9", // Bochs/QEMU debug port
     "  out dx, al",
     "  ret",
     ".att_syntax prefix",
@@ -430,14 +450,14 @@ pub fn init() {
     let mut idle_sp = idle_stack_top as *mut u64;
     unsafe {
         idle_sp = idle_sp.sub(1);
-        idle_sp.write(0x202u64);                   // RFLAGS (IF set)
+        idle_sp.write(0x202u64); // RFLAGS (IF set)
         idle_sp = idle_sp.sub(1);
-        idle_sp.write(0x08u64);                    // CS (kernel)
+        idle_sp.write(0x08u64); // CS (kernel)
         idle_sp = idle_sp.sub(1);
         idle_sp.write(idle as *const () as usize as u64);
         for _ in 0..15 {
             idle_sp = idle_sp.sub(1);
-            idle_sp.write(0u64);                   // zeroed GP registers
+            idle_sp.write(0u64); // zeroed GP registers
         }
         // Zero the rest of the stack to prevent stale data from being
         // misinterpreted as interrupt frames or return addresses.
@@ -561,17 +581,27 @@ pub fn clone_task(
 
     unsafe {
         let mut sp = stack_top as *mut u64;
-        sp = sp.sub(1); sp.write(0x1bu64);
-        sp = sp.sub(1); sp.write(user_rsp);
-        sp = sp.sub(1); sp.write(0x202u64);
-        sp = sp.sub(1); sp.write(0x23u64);
-        sp = sp.sub(1); sp.write(entry);
+        sp = sp.sub(1);
+        sp.write(0x1bu64);
+        sp = sp.sub(1);
+        sp.write(user_rsp);
+        sp = sp.sub(1);
+        sp.write(0x202u64);
+        sp = sp.sub(1);
+        sp.write(0x23u64);
+        sp = sp.sub(1);
+        sp.write(entry);
         for _ in 0..15 {
-            sp = sp.sub(1); sp.write(0u64);
+            sp = sp.sub(1);
+            sp.write(0u64);
         }
         let initial_rsp = sp as u64;
 
-        let mut task = Task::new(id, initial_rsp, core::str::from_utf8(&parent.name).unwrap_or(""));
+        let mut task = Task::new(
+            id,
+            initial_rsp,
+            core::str::from_utf8(&parent.name).unwrap_or(""),
+        );
         task.rsp = initial_rsp;
         task.stack_alloc = stack_base;
         task.stack_size = stack_size as u64;
@@ -614,7 +644,13 @@ pub fn clone_task(
     id
 }
 
-pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64, heap_base: u64) -> u64 {
+pub fn create_user_task(
+    entry: u64,
+    stack_size: usize,
+    user_rsp: u64,
+    cr3: u64,
+    heap_base: u64,
+) -> u64 {
     // Validate entry point: must be a canonical user-space address.
     // Entry values in the 1-16MB range likely indicate a physical address
     // was accidentally passed as the virtual entry point.
@@ -632,7 +668,11 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64, 
     let aslr_user_rsp = if user_rsp == 0 {
         let slide = zenus_arch::random::get_random_page_aligned(0, 0x2000_0000u64);
         let rsp = 0x7FFF_FFFF_F000u64.saturating_sub(slide);
-        if rsp < 0x1000 { 0x7FFF_FFFF_F000u64 } else { rsp }
+        if rsp < 0x1000 {
+            0x7FFF_FFFF_F000u64
+        } else {
+            rsp
+        }
     } else {
         user_rsp
     };
@@ -640,20 +680,24 @@ pub fn create_user_task(entry: u64, stack_size: usize, user_rsp: u64, cr3: u64, 
     let heap_brk = if heap_base != 0 {
         heap_base
     } else {
-        zenus_arch::random::get_random_page_aligned(
-            0x6000_0000_0000u64, 0x6000_0020_0000u64,
-        )
+        zenus_arch::random::get_random_page_aligned(0x6000_0000_0000u64, 0x6000_0020_0000u64)
     };
 
     unsafe {
         let mut sp = stack_top as *mut u64;
-        sp = sp.sub(1); sp.write(0x1bu64);
-        sp = sp.sub(1); sp.write(aslr_user_rsp);
-        sp = sp.sub(1); sp.write(0x202u64);
-        sp = sp.sub(1); sp.write(0x23u64);
-        sp = sp.sub(1); sp.write(entry);
+        sp = sp.sub(1);
+        sp.write(0x1bu64);
+        sp = sp.sub(1);
+        sp.write(aslr_user_rsp);
+        sp = sp.sub(1);
+        sp.write(0x202u64);
+        sp = sp.sub(1);
+        sp.write(0x23u64);
+        sp = sp.sub(1);
+        sp.write(entry);
         for _ in 0..15 {
-            sp = sp.sub(1); sp.write(0u64);
+            sp = sp.sub(1);
+            sp.write(0u64);
         }
         let initial_rsp = sp as u64;
 
@@ -716,11 +760,15 @@ pub fn create_task_named(entry: fn(), stack_size: usize, name: &str) -> u64 {
     unsafe {
         let mut sp = stack_top as *mut u64;
         // 3-item kernel frame: RFLAGS, CS, RIP
-        sp = sp.sub(1); sp.write(0x202u64);
-        sp = sp.sub(1); sp.write(0x08u64);
-        sp = sp.sub(1); sp.write(entry as u64);
+        sp = sp.sub(1);
+        sp.write(0x202u64);
+        sp = sp.sub(1);
+        sp.write(0x08u64);
+        sp = sp.sub(1);
+        sp.write(entry as u64);
         for _ in 0..15 {
-            sp = sp.sub(1); sp.write(0u64);
+            sp = sp.sub(1);
+            sp.write(0u64);
         }
         let initial_rsp = sp as u64;
 
@@ -749,14 +797,20 @@ pub fn create_task_named(entry: fn(), stack_size: usize, name: &str) -> u64 {
 }
 
 unsafe fn dealloc_stack(base: u64, size: usize) {
-    if base == 0 || size == 0 { return; }
-    let Ok(layout) = core::alloc::Layout::from_size_align(size, 16) else { return; };
+    if base == 0 || size == 0 {
+        return;
+    }
+    let Ok(layout) = core::alloc::Layout::from_size_align(size, 16) else {
+        return;
+    };
     alloc::alloc::dealloc(base as *mut u8, layout);
 }
 
 unsafe fn alloc_stack(size: usize) -> (u64, core::alloc::Layout) {
     use core::alloc::Layout;
-    let Ok(layout) = Layout::from_size_align(size, 16) else { return (0, Layout::new::<u8>()); };
+    let Ok(layout) = Layout::from_size_align(size, 16) else {
+        return (0, Layout::new::<u8>());
+    };
     let ptr = {
         use core::alloc::GlobalAlloc;
         ALLOCATOR.alloc(layout)
@@ -770,19 +824,23 @@ unsafe fn alloc_stack(size: usize) -> (u64, core::alloc::Layout) {
 pub fn yield_now() {
     let cpu = current_cpu();
     if (cpu as usize) >= MAX_CPUS {
-        zenus_console::serial::flush_output();
         x86_64::instructions::hlt();
         return;
     }
     let count = TASK_COUNT.load(Ordering::Acquire);
     if count <= 1 {
-        zenus_console::serial::flush_output();
         x86_64::instructions::hlt();
         return;
     }
 
     let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let mut tasks = TASKS.lock();
+    // BUG FIX: Use lock_no_irq() instead of lock() to prevent the spinlock
+    // from re-enabling interrupts on drop(). The regular lock() saves the
+    // IF flag and restores it on unlock. This creates a race window between
+    // unlock (which STIs) and the manual interrupts::disable() that follows.
+    // During that window, the timer ISR can acquire TASKS via try_lock()
+    // and corrupt the scheduler state while yield_now uses stale data.
+    let mut tasks = TASKS.lock_no_irq();
 
     if tasks.tasks[current as usize].is_none() {
         drop(tasks);
@@ -792,7 +850,6 @@ pub fn yield_now() {
     let next = find_next_ready(&tasks, current, cpu);
     if next == current {
         drop(tasks);
-        zenus_console::serial::flush_output();
         x86_64::instructions::hlt();
         return;
     }
@@ -850,10 +907,14 @@ pub fn yield_now() {
 
     CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
 
-    let next_kernel_rsp = tasks.tasks[next as usize].as_ref()
-        .map(|t| t.kernel_rsp_top).unwrap_or(0);
-    let next_user_rsp = tasks.tasks[next as usize].as_ref()
-        .map(|t| t.user_rsp).unwrap_or(0);
+    let next_kernel_rsp = tasks.tasks[next as usize]
+        .as_ref()
+        .map(|t| t.kernel_rsp_top)
+        .unwrap_or(0);
+    let next_user_rsp = tasks.tasks[next as usize]
+        .as_ref()
+        .map(|t| t.user_rsp)
+        .unwrap_or(0);
     let save_rsp = match tasks.tasks[current as usize].as_mut() {
         Some(t) => &raw mut t.rsp as *mut u64,
         None => {
@@ -894,7 +955,9 @@ pub fn yield_now() {
         zenus_arch::cpu::write_msr(0xC0000102, percpu_addr);
     }
 
-    unsafe { context_switch_yield(save_rsp, next_rsp); }
+    unsafe {
+        context_switch_yield(save_rsp, next_rsp);
+    }
 }
 
 pub fn check_yield() {
@@ -904,26 +967,37 @@ pub fn check_yield() {
 fn find_next_ready(tasks: &TaskArray, current: u32, cpu: u32) -> u32 {
     // Round-robin: find next ready task after current, wrap around
     for idx in (current + 1)..MAX_TASKS as u32 {
-        if idx == 0 { continue; } // skip idle — only pick as last resort
+        if idx == 0 {
+            continue;
+        } // skip idle — only pick as last resort
         if let Some(ref task) = tasks.tasks[idx as usize] {
-            if task.is_active() && task.cpu == cpu { return idx; }
+            if task.is_active() && task.cpu == cpu {
+                return idx;
+            }
         }
     }
     // Wrap around: scan from 1 to current (skip idle at 0)
     let start = if 1u32 < current { 1u32 } else { u32::MAX }; // start=MAX → loop skipped
     for idx in start..current {
         if let Some(ref task) = tasks.tasks[idx as usize] {
-            if task.is_active() && task.cpu == cpu { return idx; }
+            if task.is_active() && task.cpu == cpu {
+                return idx;
+            }
         }
     }
-    // Only now check idle (index 0) — last resort on this CPU
-    if let Some(ref task) = tasks.tasks[0] {
-        if task.is_active() && task.cpu == cpu { return 0; }
-    }
-    // Steal from other CPUs (skip idle — it can't migrate)
+    // Steal from other CPUs BEFORE checking idle (prevents scheduler deadlock
+    // when tasks are assigned to other CPUs but BSP idles forever)
     for idx in 1..MAX_TASKS as u32 {
         if let Some(ref task) = tasks.tasks[idx as usize] {
-            if task.is_active() { return idx; }
+            if task.is_active() {
+                return idx;
+            }
+        }
+    }
+    // Last resort: idle task on this CPU
+    if let Some(ref task) = tasks.tasks[0] {
+        if task.is_active() && task.cpu == cpu {
+            return 0;
         }
     }
     current
@@ -950,7 +1024,10 @@ pub fn current_task_id() -> u64 {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.id).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.id)
+        .unwrap_or(0)
 }
 
 pub fn list_tasks() -> [Option<TaskInfo>; MAX_TASKS] {
@@ -981,7 +1058,10 @@ pub fn current_pid_ns() -> NsId {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.pid_ns).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.pid_ns)
+        .unwrap_or(0)
 }
 
 /// Get the mount namespace of the current task.
@@ -989,7 +1069,10 @@ pub fn current_mnt_ns() -> NsId {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.mnt_ns).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.mnt_ns)
+        .unwrap_or(0)
 }
 
 /// Get the UTS namespace of the current task.
@@ -997,7 +1080,10 @@ pub fn current_uts_ns() -> NsId {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.uts_ns).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.uts_ns)
+        .unwrap_or(0)
 }
 
 /// Get the NET namespace of the current task.
@@ -1005,7 +1091,10 @@ pub fn current_net_ns() -> NsId {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.net_ns).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.net_ns)
+        .unwrap_or(0)
 }
 
 /// Get the USER namespace of the current task.
@@ -1013,7 +1102,10 @@ pub fn current_user_ns() -> NsId {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.user_ns).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.user_ns)
+        .unwrap_or(0)
 }
 
 /// Get the IPC namespace of the current task.
@@ -1021,7 +1113,10 @@ pub fn current_ipc_ns() -> NsId {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.ipc_ns).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.ipc_ns)
+        .unwrap_or(0)
 }
 
 /// Get the local PID for the current task within its PID namespace.
@@ -1044,28 +1139,40 @@ pub fn current_uid() -> u32 {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.uid).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.uid)
+        .unwrap_or(0)
 }
 
 pub fn current_gid() -> u32 {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.gid).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.gid)
+        .unwrap_or(0)
 }
 
 pub fn current_euid() -> u32 {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.euid).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.euid)
+        .unwrap_or(0)
 }
 
 pub fn current_egid() -> u32 {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
-    tasks.tasks[idx as usize].as_ref().map(|t| t.egid).unwrap_or(0)
+    tasks.tasks[idx as usize]
+        .as_ref()
+        .map(|t| t.egid)
+        .unwrap_or(0)
 }
 
 pub fn set_current_uid(uid: u32) -> bool {
@@ -1164,18 +1271,20 @@ pub fn get_task(id: u64) -> Option<super::task::Task> {
     None
 }
 
-
-
 #[no_mangle]
 pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     SYS_TICKS.fetch_add(1, Ordering::Relaxed);
     zenus_arch::interrupts::pit::tick();
 
     let cpu = current_cpu();
-    if (cpu as usize) >= MAX_CPUS { return 0; }
+    if (cpu as usize) >= MAX_CPUS {
+        return 0;
+    }
     let count = TASK_COUNT.load(Ordering::Acquire);
     // Hanya satu task (idle) — tidak perlu schedul.
-    if count <= 1 { return 0; }
+    if count <= 1 {
+        return 0;
+    }
 
     let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     // Gunakan try_lock() untuk menghindari deadlock: jika scheduler::init()
@@ -1188,13 +1297,23 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         None => return 0,
     };
 
-    if current as usize >= MAX_TASKS { return 0; }
-    if tasks.tasks[current as usize].is_none() { return 0; }
+    if current as usize >= MAX_TASKS {
+        return 0;
+    }
+    if tasks.tasks[current as usize].is_none() {
+        return 0;
+    }
 
     let next = find_next_ready(&tasks, current, cpu);
-    if next == current { return 0; }
-    if next as usize >= MAX_TASKS { return 0; }
-    if tasks.tasks[next as usize].is_none() { return 0; }
+    if next == current {
+        return 0;
+    }
+    if next as usize >= MAX_TASKS {
+        return 0;
+    }
+    if tasks.tasks[next as usize].is_none() {
+        return 0;
+    }
 
     // Migrate to this CPU if stolen from another
     migrate_task_to_cpu(&mut tasks, next, cpu);
@@ -1243,10 +1362,14 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 
     CURRENT_TASK[cpu as usize].store(next, Ordering::Release);
 
-    let next_kernel_rsp = tasks.tasks[next as usize].as_ref()
-        .map(|t| t.kernel_rsp_top).unwrap_or(0);
-    let next_user_rsp = tasks.tasks[next as usize].as_ref()
-        .map(|t| t.user_rsp).unwrap_or(0);
+    let next_kernel_rsp = tasks.tasks[next as usize]
+        .as_ref()
+        .map(|t| t.kernel_rsp_top)
+        .unwrap_or(0);
+    let next_user_rsp = tasks.tasks[next as usize]
+        .as_ref()
+        .map(|t| t.user_rsp)
+        .unwrap_or(0);
 
     // Close IRQ window before releasing lock
     x86_64::instructions::interrupts::disable();
@@ -1278,32 +1401,20 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 }
 
 pub fn idle() -> ! {
-    // Marker: write 'I' directly to UART to confirm idle() is reached
-    unsafe { core::arch::asm!("out 0xe9, al", in("al") b'I'); }
-    zenus_console::serial::flush_output();
-    let cpu = current_cpu() as usize;
-
-    // Yield once before entering idle loop, so the shell (or any other
-    // ready task) can start executing without waiting for a timer interrupt.
-    // This is critical for piped/serial input where the kernel boots and
-    // the timer ISR must preempt idle to schedule the first task — if the
-    // timer doesn't fire immediately, the system would hang in idle forever.
-    yield_now();  // Switch to shell (or next ready task)
-
-    // After yield returns: we're back on the idle task's stack.
-    // Enter the idle hlt loop with CURRENT_TASK pointing to idle (index 0).
-    // The timer ISR will save idle's context (hlt loop frame) and
-    // schedule_tick will find the next ready task via round-robin.
+    // Switch to the idle task's dedicated stack FIRST, then yield to the shell task.
+    // This ensures the idle task's context is saved on its own stack.
     unsafe {
         core::arch::asm!(
             "cli",
-            "mov rax, qword ptr [rip + {idle}]",
-            "mov rsp, rax",
-            "2:",
+            "mov rsp, {idle_rsp}",
             "sti",
+            "call {yield_now}",
+            // After yield_now returns (when shell task yields back), enter HLT loop
+            "2:",
             "hlt",
             "jmp 2b",
-            idle = sym IDLE_RSP,
+            idle_rsp = sym IDLE_RSP,
+            yield_now = sym yield_now,
             options(noreturn)
         );
     }
@@ -1311,7 +1422,9 @@ pub fn idle() -> ! {
 
 pub fn ap_idle() -> ! {
     loop {
-        unsafe { core::arch::asm!("sti", "hlt", options(nostack)); }
+        unsafe {
+            core::arch::asm!("sti", "hlt", options(nostack));
+        }
     }
 }
 
@@ -1342,7 +1455,9 @@ pub fn reap_terminated_stacks() {
     for i in 0..list.count {
         if let Some(ts) = list.stacks[i].take() {
             if let Ok(layout) = core::alloc::Layout::from_size_align(ts.size, 16) {
-                unsafe { alloc::alloc::dealloc(ts.base as *mut u8, layout); }
+                unsafe {
+                    alloc::alloc::dealloc(ts.base as *mut u8, layout);
+                }
             }
         }
     }
@@ -1364,7 +1479,9 @@ pub fn exit_current_task(code: u64) -> ! {
         None => {
             drop(tasks);
             yield_now();
-            loop { x86_64::instructions::hlt(); }
+            loop {
+                x86_64::instructions::hlt();
+            }
         }
     };
 
@@ -1388,20 +1505,24 @@ pub fn exit_current_task(code: u64) -> ! {
         // Zombie is stored; parent will call reap_task() to free resources
     }
     drop(tasks);
-    
+
     // Deliver SIGCHLD to parent process
     signal_deliver(parent_pid, super::signal::SIGCHLD);
 
     // Write debug marker before yield (visible in serial/log)
-    unsafe { core::arch::asm!("out 0xe9, al", in("al") b'X', options(nostack, preserves_flags)); }
-    
+    unsafe {
+        core::arch::asm!("out 0xe9, al", in("al") b'X', options(nostack, preserves_flags));
+    }
+
     // Switch to the next ready task via yield_now().
     // Since this task is Terminated, is_active() returns false and
     // find_next_ready will skip it.
     yield_now();
-    
+
     // Never reached (should be scheduled over), but safe fallback:
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 pub fn wait_for_child(parent_pid: u64, child_pid: u64, options: u64) -> Option<(u64, u64)> {
@@ -1463,7 +1584,9 @@ pub fn reap_task(task_id: u64) {
             // Free the task's kernel stack directly (NOT via TERMINATED_STACKS to avoid double-free)
             if stack_alloc != 0 && stack_size > 0 {
                 if let Ok(layout) = core::alloc::Layout::from_size_align(stack_size as usize, 16) {
-                    unsafe { alloc::alloc::dealloc(stack_alloc as *mut u8, layout); }
+                    unsafe {
+                        alloc::alloc::dealloc(stack_alloc as *mut u8, layout);
+                    }
                 }
             }
             return;
@@ -1535,11 +1658,15 @@ pub fn task_exit() {
             zenus_mem::paging::destroy_address_space(cr3);
         }
     }
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 pub fn kill_task(id: u64) -> bool {
-    if id == 0 { return false; }
+    if id == 0 {
+        return false;
+    }
     let cpu = current_cpu();
     let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let mut tasks = TASKS.lock();
@@ -1556,7 +1683,15 @@ pub fn kill_task(id: u64) -> bool {
         let task_info = {
             let t = &tasks.tasks[i];
             match t {
-                Some(tc) if tc.id == id && tc.is_active() => Some((tc.cpu, tc.stack_alloc, tc.stack_size, tc.cr3, tc.state, tc.pid_ns, tc.id)),
+                Some(tc) if tc.id == id && tc.is_active() => Some((
+                    tc.cpu,
+                    tc.stack_alloc,
+                    tc.stack_size,
+                    tc.cr3,
+                    tc.state,
+                    tc.pid_ns,
+                    tc.id,
+                )),
                 _ => None,
             }
         };
@@ -1570,9 +1705,9 @@ pub fn kill_task(id: u64) -> bool {
                 CPU_TASK_COUNT[task_cpu as usize].fetch_sub(1, Ordering::SeqCst);
                 if stack_alloc != 0 && stack_size > 0 {
                     unsafe {
-                        if let Ok(layout) = core::alloc::Layout::from_size_align(
-                            stack_size as usize, 16,
-                        ) {
+                        if let Ok(layout) =
+                            core::alloc::Layout::from_size_align(stack_size as usize, 16)
+                        {
                             alloc::alloc::dealloc(stack_alloc as *mut u8, layout);
                         }
                     }
@@ -1587,9 +1722,9 @@ pub fn kill_task(id: u64) -> bool {
             CPU_TASK_COUNT[task_cpu as usize].fetch_sub(1, Ordering::SeqCst);
             if stack_alloc != 0 && stack_size > 0 {
                 unsafe {
-                    if let Ok(layout) = core::alloc::Layout::from_size_align(
-                        stack_size as usize, 16,
-                    ) {
+                    if let Ok(layout) =
+                        core::alloc::Layout::from_size_align(stack_size as usize, 16)
+                    {
                         alloc::alloc::dealloc(stack_alloc as *mut u8, layout);
                     }
                 }
@@ -1719,7 +1854,11 @@ pub fn set_signal_mask(task_id: u64, mask: u64) {
     }
 }
 
-pub fn check_and_deliver_signal(user_rsp: u64, user_rip: u64, user_rflags: u64) -> Option<(u64, u64, u64)> {
+pub fn check_and_deliver_signal(
+    user_rsp: u64,
+    user_rip: u64,
+    user_rflags: u64,
+) -> Option<(u64, u64, u64)> {
     let task_id = current_task_id();
     let mut tasks = TASKS.lock();
     for i in 0..MAX_TASKS {
@@ -1727,7 +1866,11 @@ pub fn check_and_deliver_signal(user_rsp: u64, user_rip: u64, user_rflags: u64) 
             if task.id == task_id {
                 if let Some((sig, _disposition)) = super::signal::check_pending(task) {
                     let new_rsp = super::signal::setup_signal_frame(
-                        task, sig, user_rsp, user_rip, user_rflags,
+                        task,
+                        sig,
+                        user_rsp,
+                        user_rip,
+                        user_rflags,
                     )?;
                     let handler = task.signal_actions[sig].handler_fn;
                     let new_rflags = user_rflags & !0x100; // clear TF
@@ -1756,7 +1899,11 @@ pub fn check_signal_for_sysret(kernel_rsp: u64) -> bool {
                     let user_rsp = zenus_arch::cpu::get_percpu_user_rsp(cpu);
 
                     let new_rsp = match super::signal::setup_signal_frame(
-                        task, sig, user_rsp, saved_rip, saved_rflags,
+                        task,
+                        sig,
+                        user_rsp,
+                        saved_rip,
+                        saved_rflags,
                     ) {
                         Some(r) => r,
                         None => return false,

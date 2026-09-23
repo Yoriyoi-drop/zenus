@@ -32,7 +32,11 @@ struct IrqBuf {
 
 impl IrqBuf {
     const fn new() -> Self {
-        IrqBuf { data: [0; 256], head: 0, tail: 0 }
+        IrqBuf {
+            data: [0; 256],
+            head: 0,
+            tail: 0,
+        }
     }
 
     fn push(&mut self, b: u8) {
@@ -161,7 +165,10 @@ struct OutBuf {
 
 impl OutBuf {
     const fn new() -> Self {
-        OutBuf { data: [0; 4096], len: 0 }
+        OutBuf {
+            data: [0; 4096],
+            len: 0,
+        }
     }
 
     fn push(&mut self, bytes: &[u8]) {
@@ -201,7 +208,9 @@ pub fn flush_output() {
         Some(b) => b,
         None => return,
     };
-    if ob.len == 0 { return; }
+    if ob.len == 0 {
+        return;
+    }
     for &b in &ob.data[..ob.len] {
         uart_write_byte(b);
     }
@@ -215,7 +224,9 @@ pub fn flush_output() {
 /// spurious). JANGAN panggil dari timer ISR (risiko deadlock).
 pub fn flush_output_blocking() {
     let mut ob = OUTPUT_BUF.lock();
-    if ob.len == 0 { return; }
+    if ob.len == 0 {
+        return;
+    }
     for &b in &ob.data[..ob.len] {
         uart_write_byte(b);
     }
@@ -395,5 +406,3 @@ macro_rules! serial_println {
         $crate::serial_print!("{}\n", format_args!($($arg)*))
     };
 }
-
-

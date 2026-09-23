@@ -15,7 +15,11 @@ struct ArpState {
 
 static ARP_STATE: SpinLock<ArpState> = SpinLock::new(ArpState {
     gateway: [10, 0, 2, 2],
-    cache: [ArpEntry { ip: [0; 4], mac: [0; 6], valid: false }; ARP_CACHE_SIZE],
+    cache: [ArpEntry {
+        ip: [0; 4],
+        mac: [0; 6],
+        valid: false,
+    }; ARP_CACHE_SIZE],
 });
 
 #[derive(Clone, Copy)]
@@ -50,7 +54,11 @@ fn arp_insert(ip: [u8; 4], mac: [u8; 6]) {
     }
     for i in 0..ARP_CACHE_SIZE {
         if !state.cache[i].valid {
-            state.cache[i] = ArpEntry { ip, mac, valid: true };
+            state.cache[i] = ArpEntry {
+                ip,
+                mac,
+                valid: true,
+            };
             return;
         }
         if state.cache[i].ip == ip {
@@ -62,26 +70,44 @@ fn arp_insert(ip: [u8; 4], mac: [u8; 6]) {
     }
     for i in 1..ARP_CACHE_SIZE {
         if state.cache[i].ip != state.gateway {
-            state.cache[i] = ArpEntry { ip, mac, valid: true };
+            state.cache[i] = ArpEntry {
+                ip,
+                mac,
+                valid: true,
+            };
             return;
         }
     }
 }
 
-fn arp_packet(src_mac: &[u8; 6], src_ip: &[u8; 4], dst_mac: &[u8; 6], dst_ip: &[u8; 4], opcode: u16) -> [u8; 42] {
+fn arp_packet(
+    src_mac: &[u8; 6],
+    src_ip: &[u8; 4],
+    dst_mac: &[u8; 6],
+    dst_ip: &[u8; 4],
+    opcode: u16,
+) -> [u8; 42] {
     let mut buf = [0u8; 42];
     buf[0..6].copy_from_slice(dst_mac);
     buf[6..12].copy_from_slice(src_mac);
     buf[12..14].copy_from_slice(&crate::ethernet::ETH_ARP.to_be_bytes());
     let mut off = 14;
-    buf[off..off + 2].copy_from_slice(&HARDWARE_TYPE_ETH.to_be_bytes()); off += 2;
-    buf[off..off + 2].copy_from_slice(&PROTOCOL_TYPE_IPV4.to_be_bytes()); off += 2;
-    buf[off] = 6; off += 1;
-    buf[off] = 4; off += 1;
-    buf[off..off + 2].copy_from_slice(&opcode.to_be_bytes()); off += 2;
-    buf[off..off + 6].copy_from_slice(src_mac); off += 6;
-    buf[off..off + 4].copy_from_slice(src_ip); off += 4;
-    buf[off..off + 6].copy_from_slice(dst_mac); off += 6;
+    buf[off..off + 2].copy_from_slice(&HARDWARE_TYPE_ETH.to_be_bytes());
+    off += 2;
+    buf[off..off + 2].copy_from_slice(&PROTOCOL_TYPE_IPV4.to_be_bytes());
+    off += 2;
+    buf[off] = 6;
+    off += 1;
+    buf[off] = 4;
+    off += 1;
+    buf[off..off + 2].copy_from_slice(&opcode.to_be_bytes());
+    off += 2;
+    buf[off..off + 6].copy_from_slice(src_mac);
+    off += 6;
+    buf[off..off + 4].copy_from_slice(src_ip);
+    off += 4;
+    buf[off..off + 6].copy_from_slice(dst_mac);
+    off += 6;
     buf[off..off + 4].copy_from_slice(dst_ip);
     buf
 }
@@ -100,11 +126,7 @@ pub fn send_request(iface_idx: usize, target_ip: [u8; 4]) -> bool {
         None => return false,
     };
     let broadcast = [0xFF; 6];
-    let pkt = arp_packet(
-        &iface.mac, &iface.ip,
-        &broadcast, &target_ip,
-        ARP_REQUEST,
-    );
+    let pkt = arp_packet(&iface.mac, &iface.ip, &broadcast, &target_ip, ARP_REQUEST);
     crate::nic::send_frame(iface_idx, &pkt)
 }
 
@@ -124,9 +146,15 @@ pub fn handle(
     let proto_addr_len = unsafe { *ptr.add(5) };
     let opcode = u16::from_be(unsafe { core::ptr::read_unaligned(ptr.add(6) as *const u16) });
 
-    if hw_type != HARDWARE_TYPE_ETH { return None; }
-    if proto_type != PROTOCOL_TYPE_IPV4 { return None; }
-    if hw_addr_len != 6 || proto_addr_len != 4 { return None; }
+    if hw_type != HARDWARE_TYPE_ETH {
+        return None;
+    }
+    if proto_type != PROTOCOL_TYPE_IPV4 {
+        return None;
+    }
+    if hw_addr_len != 6 || proto_addr_len != 4 {
+        return None;
+    }
 
     let sender_mac = unsafe { core::ptr::read_unaligned(ptr.add(8) as *const [u8; 6]) };
     let sender_ip = unsafe { core::ptr::read_unaligned(ptr.add(14) as *const [u8; 4]) };
@@ -138,7 +166,13 @@ pub fn handle(
         if target_ip != *our_ip {
             return None;
         }
-        Some(arp_packet(our_mac, our_ip, &sender_mac, &sender_ip, ARP_REPLY))
+        Some(arp_packet(
+            our_mac,
+            our_ip,
+            &sender_mac,
+            &sender_ip,
+            ARP_REPLY,
+        ))
     } else {
         None
     }

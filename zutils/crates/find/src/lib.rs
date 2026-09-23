@@ -2,8 +2,8 @@
 
 extern crate alloc;
 
-use zutils_common::{Args, Writer};
 use zenus_fs::vfs::{self, FileSystem as _, FileType};
+use zutils_common::{Args, Writer};
 
 fn find_recursive<W: Writer + ?Sized>(path: &str, name: &str, w: &mut W) {
     if let Some(name_part) = path.rsplit('/').next() {

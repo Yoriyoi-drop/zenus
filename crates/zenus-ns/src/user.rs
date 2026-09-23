@@ -1,5 +1,5 @@
+use crate::{alloc_ns_id, NsId, NS_ROOT};
 use zenus_sync::spinlock::SpinLock;
-use crate::{NsId, alloc_ns_id, NS_ROOT};
 
 const MAX_USER_NAMESPACES: usize = 16;
 const MAX_UID_MAP: usize = 16;

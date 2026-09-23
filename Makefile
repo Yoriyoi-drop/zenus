@@ -32,7 +32,7 @@ $(KERNEL): target/$(TARGET)/$(PROFILE_DIR)/libzenus.a apps/src/linker.ld
 		--no-whole-archive
 
 # Build userspace programs
-USERSPACE_PROGS := hello echo cat exitonly args exitonly
+USERSPACE_PROGS := hello echo cat exitonly args minimal
 USERSPACE_BUILD := userspace/build
 $(USERSPACE_BUILD)/%: userspace/%/src/lib.rs userspace/userspace.ld
 	$(MAKE) -C userspace $(notdir $@)
@@ -116,10 +116,6 @@ run-gdb: $(ISO)
 		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
 
 run-qemu: run-gui
-
-run-gdb: $(ISO)
-	qemu-system-x86_64 -m 2G -smp $(SMP) -cdrom $(ISO) -s -S -no-reboot \
-		-netdev user,id=net0 -device rtl8139,netdev=net0
 
 # TCP serial: connect with: nc localhost 45678
 # Piped stdin (-nographic) does not work reliably with KVM in-kernel PIT

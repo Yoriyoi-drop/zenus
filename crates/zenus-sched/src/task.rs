@@ -30,7 +30,15 @@ pub struct VmaRegion {
 
 impl VmaRegion {
     pub const fn new() -> Self {
-        VmaRegion { start: 0, end: 0, prot: 0, flags: 0, file_offset: 0, inode: 0, valid: false }
+        VmaRegion {
+            start: 0,
+            end: 0,
+            prot: 0,
+            flags: 0,
+            file_offset: 0,
+            inode: 0,
+            valid: false,
+        }
     }
     pub fn contains(&self, addr: u64) -> bool {
         self.valid && addr >= self.start && addr < self.end
@@ -46,28 +54,48 @@ pub struct VmaTable {
 
 impl VmaTable {
     pub const fn new() -> Self {
-        VmaTable { regions: [VmaRegion::new(); MAX_VMAS], count: 0, mmap_base: 0x2000_0000_0000 }
+        VmaTable {
+            regions: [VmaRegion::new(); MAX_VMAS],
+            count: 0,
+            mmap_base: 0x2000_0000_0000,
+        }
     }
     pub fn insert(&mut self, start: u64, end: u64, prot: u64, flags: u64) -> Option<usize> {
-        if self.count >= MAX_VMAS { return None; }
+        if self.count >= MAX_VMAS {
+            return None;
+        }
         let idx = self.count;
-        self.regions[idx] = VmaRegion { start, end, prot, flags, file_offset: 0, inode: 0, valid: true };
+        self.regions[idx] = VmaRegion {
+            start,
+            end,
+            prot,
+            flags,
+            file_offset: 0,
+            inode: 0,
+            valid: true,
+        };
         self.count += 1;
         Some(idx)
     }
     pub fn find(&self, addr: u64) -> Option<usize> {
         for i in 0..self.count {
-            if self.regions[i].contains(addr) { return Some(i); }
+            if self.regions[i].contains(addr) {
+                return Some(i);
+            }
         }
         None
     }
     pub fn remove(&mut self, idx: usize) -> bool {
-        if idx >= self.count { return false; }
+        if idx >= self.count {
+            return false;
+        }
         self.regions[idx].valid = false;
         let mut write = 0;
         for read in 0..self.count {
             if self.regions[read].valid {
-                if write != read { self.regions[write] = self.regions[read]; }
+                if write != read {
+                    self.regions[write] = self.regions[read];
+                }
                 write += 1;
             }
         }
@@ -77,12 +105,20 @@ impl VmaTable {
     pub fn find_free(&self, size: u64, hint: u64) -> Option<u64> {
         let start = hint & !0xFFF;
         let end = start + size;
-        if end > 0x7F00_0000_0000 { return None; }
+        if end > 0x7F00_0000_0000 {
+            return None;
+        }
         for i in 0..self.count {
             let r = &self.regions[i];
-            if !r.valid { continue; }
-            if start >= r.start && start < r.end { return self.find_free(size, r.end); }
-            if end > r.start && end <= r.end { return self.find_free(size, r.end); }
+            if !r.valid {
+                continue;
+            }
+            if start >= r.start && start < r.end {
+                return self.find_free(size, r.end);
+            }
+            if end > r.start && end <= r.end {
+                return self.find_free(size, r.end);
+            }
         }
         Some(start)
     }
@@ -135,29 +171,61 @@ pub struct SignalAction {
 
 impl SignalAction {
     pub const fn new() -> Self {
-        SignalAction { handler_fn: 0, flags: 0, restorer: 0, mask: [0; 2] }
+        SignalAction {
+            handler_fn: 0,
+            flags: 0,
+            restorer: 0,
+            mask: [0; 2],
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct SavedUserContext {
-    pub rax: u64, pub rbx: u64, pub rcx: u64, pub rdx: u64,
-    pub rsi: u64, pub rdi: u64, pub rbp: u64, pub rsp: u64,
-    pub r8: u64,  pub r9: u64,  pub r10: u64, pub r11: u64,
-    pub r12: u64, pub r13: u64, pub r14: u64, pub r15: u64,
-    pub rflags: u64, pub rip: u64,
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub rsp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rflags: u64,
+    pub rip: u64,
     pub valid: bool,
 }
 
 impl SavedUserContext {
     pub const fn new() -> Self {
         SavedUserContext {
-            rax: 0, rbx: 0, rcx: 0, rdx: 0,
-            rsi: 0, rdi: 0, rbp: 0, rsp: 0,
-            r8: 0, r9: 0, r10: 0, r11: 0,
-            r12: 0, r13: 0, r14: 0, r15: 0,
-            rflags: 0, rip: 0, valid: false,
+            rax: 0,
+            rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            rbp: 0,
+            rsp: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rflags: 0,
+            rip: 0,
+            valid: false,
         }
     }
 }
@@ -252,7 +320,9 @@ impl Task {
 
     pub fn next_signal(&self) -> Option<usize> {
         let pending = self.pending_signals & !self.signal_mask;
-        if pending == 0 { return None; }
+        if pending == 0 {
+            return None;
+        }
         Some(pending.trailing_zeros() as usize)
     }
 

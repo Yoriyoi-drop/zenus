@@ -1,9 +1,9 @@
+use crate::serial;
 use core::ptr;
-use x86_64::VirtAddr;
 use x86_64::PhysAddr;
+use x86_64::VirtAddr;
 use zenus_arch::pci::PciDevice;
 use zenus_mem::paging;
-use crate::serial;
 
 pub const PCI_CAP_ID_VNDR: u8 = 0x09;
 
@@ -42,8 +42,12 @@ unsafe fn map_bar(bar_val: u32) -> u64 {
 
 unsafe fn read_bar_phys(dev: &PciDevice, bar_idx: u8) -> u64 {
     let raw = match bar_idx {
-        0 => dev.bar0, 1 => dev.bar1, 2 => dev.bar2,
-        3 => dev.bar3, 4 => dev.bar4, 5 => dev.bar5,
+        0 => dev.bar0,
+        1 => dev.bar1,
+        2 => dev.bar2,
+        3 => dev.bar3,
+        4 => dev.bar4,
+        5 => dev.bar5,
         _ => return 0,
     };
     if raw & 1 == 1 {
@@ -53,8 +57,12 @@ unsafe fn read_bar_phys(dev: &PciDevice, bar_idx: u8) -> u64 {
     let low = (raw & 0xFFFFFFF0) as u64;
     if is_64bit && bar_idx < 5 {
         let high_raw = match bar_idx + 1 {
-            0 => dev.bar0, 1 => dev.bar1, 2 => dev.bar2,
-            3 => dev.bar3, 4 => dev.bar4, 5 => dev.bar5,
+            0 => dev.bar0,
+            1 => dev.bar1,
+            2 => dev.bar2,
+            3 => dev.bar3,
+            4 => dev.bar4,
+            5 => dev.bar5,
             _ => return low,
         };
         low | ((high_raw as u64) << 32)
@@ -97,7 +105,9 @@ fn find_virtio_caps(dev: &PciDevice) -> [Option<VirtioPciCap>; 6] {
             let dword = pci_read_config(dev.bus, dev.device, dev.function, cap_off);
             let cap_id = (dword & 0xFF) as u8;
             let next = ((dword >> 8) & 0xFF) as u8;
-            if cap_id == 0 { break; }
+            if cap_id == 0 {
+                break;
+            }
             if cap_id == PCI_CAP_ID_VNDR {
                 let mut hdr = [0u8; 20];
                 pci_read_cap_bytes(dev, cap_off, &mut hdr);
@@ -113,7 +123,9 @@ fn find_virtio_caps(dev: &PciDevice) -> [Option<VirtioPciCap>; 6] {
                     caps[idx] = Some(cap);
                 }
             }
-            if next == 0 || next < 0x40 { break; }
+            if next == 0 || next < 0x40 {
+                break;
+            }
             cap_off = next;
         }
     }
@@ -142,8 +154,10 @@ pub unsafe fn init_device(dev: &PciDevice) -> Option<VirtioPciTransport> {
     // Map BAR pages (HHDM may not cover PCI MMIO regions)
     {
         use x86_64::structures::paging::PageTableFlags;
-        let mmio_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE
-            | PageTableFlags::NO_CACHE | PageTableFlags::NO_EXECUTE;
+        let mmio_flags = PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_CACHE
+            | PageTableFlags::NO_EXECUTE;
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         for page_off in (0..0x4000u64).step_by(0x1000) {
             let virt = VirtAddr::new(bar_phys + page_off + hhdm);
@@ -209,27 +223,37 @@ impl VirtioPciTransport {
     }
 
     pub unsafe fn device_read8(&self, offset: u16) -> u8 {
-        if self.device_base == 0 { return 0; }
+        if self.device_base == 0 {
+            return 0;
+        }
         ptr::read_volatile((self.device_base + offset as u64) as *const u8)
     }
 
     pub(crate) unsafe fn device_read16(&self, offset: u16) -> u16 {
-        if self.device_base == 0 { return 0; }
+        if self.device_base == 0 {
+            return 0;
+        }
         ptr::read_volatile((self.device_base + offset as u64) as *const u16)
     }
 
     pub(crate) unsafe fn device_read32(&self, offset: u16) -> u32 {
-        if self.device_base == 0 { return 0; }
+        if self.device_base == 0 {
+            return 0;
+        }
         ptr::read_volatile((self.device_base + offset as u64) as *const u32)
     }
 
     pub(crate) unsafe fn device_write16(&self, offset: u16, val: u16) {
-        if self.device_base == 0 { return; }
+        if self.device_base == 0 {
+            return;
+        }
         ptr::write_volatile((self.device_base + offset as u64) as *mut u16, val);
     }
 
     pub(crate) unsafe fn device_write32(&self, offset: u16, val: u32) {
-        if self.device_base == 0 { return; }
+        if self.device_base == 0 {
+            return;
+        }
         ptr::write_volatile((self.device_base + offset as u64) as *mut u32, val);
     }
 
@@ -266,7 +290,13 @@ impl VirtioPciTransport {
         (hi as u64) << 32 | lo as u64
     }
 
-    pub unsafe fn setup_queue(&self, queue_idx: u16, desc_phys: u64, avail_phys: u64, used_phys: u64) -> u16 {
+    pub unsafe fn setup_queue(
+        &self,
+        queue_idx: u16,
+        desc_phys: u64,
+        avail_phys: u64,
+        used_phys: u64,
+    ) -> u16 {
         self.common_write16(0x16, queue_idx);
         let size = self.common_read16(0x18);
         if size == 0 {

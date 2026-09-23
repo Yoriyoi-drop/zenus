@@ -1,4 +1,4 @@
-use super::task::{Task, SIG_MAX, SavedUserContext};
+use super::task::{SavedUserContext, Task, SIG_MAX};
 
 // Linux signal numbers
 pub const SIGHUP: usize = 1;
@@ -58,10 +58,14 @@ pub enum SignalDisposition {
 /// Returns (signal_number, disposition) if signal should be delivered.
 pub fn check_pending(task: &Task) -> Option<(usize, SignalDisposition)> {
     let pending = task.pending_signals & !task.signal_mask;
-    if pending == 0 { return None; }
+    if pending == 0 {
+        return None;
+    }
 
     let sig_num = pending.trailing_zeros() as usize;
-    if sig_num >= SIG_MAX { return None; }
+    if sig_num >= SIG_MAX {
+        return None;
+    }
 
     let action = &task.signal_actions[sig_num];
     let disposition = if action.handler_fn != 0 {
@@ -113,7 +117,9 @@ pub fn setup_signal_frame(
     let handler = action.handler_fn;
     let restorer = action.restorer;
 
-    if handler == 0 { return None; }
+    if handler == 0 {
+        return None;
+    }
 
     let frame_size = core::mem::size_of::<SignalFrame>() as u64;
     let new_rsp = (user_rsp - frame_size) & !0xF; // 16-byte align
@@ -145,11 +151,7 @@ pub fn setup_signal_frame(
     // Write frame to user stack
     let frame_ptr = new_rsp as *mut SignalFrame;
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            &frame as *const SignalFrame,
-            frame_ptr,
-            1,
-        );
+        core::ptr::copy_nonoverlapping(&frame as *const SignalFrame, frame_ptr, 1);
     }
 
     // Clear pending signal
@@ -163,9 +165,7 @@ pub fn setup_signal_frame(
 pub fn restore_signal_frame(user_rsp: u64) -> Option<(u64, SavedUserContext)> {
     // Read signal frame from user stack
     let frame_ptr = user_rsp as *const SignalFrame;
-    let frame = unsafe {
-        core::ptr::read_volatile(frame_ptr)
-    };
+    let frame = unsafe { core::ptr::read_volatile(frame_ptr) };
 
     // Restore user context
     let saved_context = SavedUserContext {

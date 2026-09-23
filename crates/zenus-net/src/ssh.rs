@@ -2,7 +2,7 @@ use crate::nic;
 use crate::socket;
 
 use zenus_sync::spinlock::SpinLock;
-use zutils_common::{Args, Writer, OutputBuf};
+use zutils_common::{Args, OutputBuf, Writer};
 
 const MAX_SSH_CLIENTS: usize = 4;
 const MAX_LINE: usize = 256;
@@ -158,10 +158,22 @@ impl SshServer {
                     let r0 = zenus_arch::random::get_random_u64();
                     let r1 = zenus_arch::random::get_random_u64();
                     conn.nonce = [
-                        r0 as u8, (r0 >> 8) as u8, (r0 >> 16) as u8, (r0 >> 24) as u8,
-                        (r0 >> 32) as u8, (r0 >> 40) as u8, (r0 >> 48) as u8, (r0 >> 56) as u8,
-                        r1 as u8, (r1 >> 8) as u8, (r1 >> 16) as u8, (r1 >> 24) as u8,
-                        (r1 >> 32) as u8, (r1 >> 40) as u8, (r1 >> 48) as u8, (r1 >> 56) as u8,
+                        r0 as u8,
+                        (r0 >> 8) as u8,
+                        (r0 >> 16) as u8,
+                        (r0 >> 24) as u8,
+                        (r0 >> 32) as u8,
+                        (r0 >> 40) as u8,
+                        (r0 >> 48) as u8,
+                        (r0 >> 56) as u8,
+                        r1 as u8,
+                        (r1 >> 8) as u8,
+                        (r1 >> 16) as u8,
+                        (r1 >> 24) as u8,
+                        (r1 >> 32) as u8,
+                        (r1 >> 40) as u8,
+                        (r1 >> 48) as u8,
+                        (r1 >> 56) as u8,
                     ];
                     conn.seed = 0;
                     conn.cipher_pos = 0;
@@ -218,7 +230,9 @@ impl SshServer {
                         conn.rx_buf[conn.rx_len..conn.rx_len + copy].copy_from_slice(&buf[..copy]);
                         conn.rx_len += copy;
 
-                        if let Some(nl) = conn.rx_buf[..conn.rx_len].iter().position(|&b| b == b'\n') {
+                        if let Some(nl) =
+                            conn.rx_buf[..conn.rx_len].iter().position(|&b| b == b'\n')
+                        {
                             let line = &conn.rx_buf[..nl];
                             if line.starts_with(b"AUTH ") {
                                 let auth_data = &line[5..];
@@ -231,7 +245,9 @@ impl SshServer {
                                     conn.auth_failures += 1;
                                     conn.state = ConnState::AuthDenied;
                                     for _ in 0..50000 {
-                                        unsafe { core::arch::asm!("pause"); }
+                                        unsafe {
+                                            core::arch::asm!("pause");
+                                        }
                                     }
                                 }
                             } else {
@@ -368,7 +384,9 @@ fn execute_command(line: &str, output: &mut [u8; MAX_OUTPUT], out_len: &mut usiz
                     out.write_str(":\r\n");
                     out.write_str("  MAC: ");
                     for (j, b) in iface.mac.iter().enumerate() {
-                        if j > 0 { out.write_byte(b':'); }
+                        if j > 0 {
+                            out.write_byte(b':');
+                        }
                         out.write_hex(*b as u64);
                     }
                     out.write_str("\r\n  IP: ");

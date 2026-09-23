@@ -1,4 +1,3 @@
-
 use crate::rtl8139::Rtl8139;
 use zenus_virtio::net::VirtioNet;
 
@@ -84,14 +83,8 @@ pub fn init() {
     }
 
     if found_nic {
-        crate::arp::add_static(
-            [10, 0, 2, 2],
-            [0x52, 0x55, 0x0a, 0x00, 0x02, 0x02],
-        );
-        crate::arp::add_static(
-            [10, 0, 2, 3],
-            [0x52, 0x55, 0x0a, 0x00, 0x02, 0x02],
-        );
+        crate::arp::add_static([10, 0, 2, 2], [0x52, 0x55, 0x0a, 0x00, 0x02, 0x02]);
+        crate::arp::add_static([10, 0, 2, 3], [0x52, 0x55, 0x0a, 0x00, 0x02, 0x02]);
         crate::route::add_direct([10, 0, 2, 0], [255, 255, 255, 0], 1);
         crate::route::add_default([10, 0, 2, 2], 1);
         zenus_console::kinfo!("Routes configured (10.0.2.0/24 + default via 10.0.2.2)");
@@ -148,7 +141,8 @@ fn poll_packet(data: &[u8]) {
                     dst_port,
                     proto: pkt_proto,
                 };
-                if crate::firewall::firewall_check(&pkt) == crate::firewall::FirewallAction::Accept {
+                if crate::firewall::firewall_check(&pkt) == crate::firewall::FirewallAction::Accept
+                {
                     let ticks = zenus_arch::interrupts::pit::get_ticks();
                     let conn_state = crate::firewall::ConnState::Established;
                     let ct = crate::firewall::ConnTrack {
@@ -278,7 +272,9 @@ pub fn send_broadcast_packet(iface_idx: usize, data: &[u8]) -> bool {
     }
 
     let mut buf = [0u8; 1514];
-    for i in 0..6 { buf[i] = 0xFF; }
+    for i in 0..6 {
+        buf[i] = 0xFF;
+    }
     buf[6..12].copy_from_slice(&iface.mac);
     buf[12..14].copy_from_slice(&crate::ethernet::ETH_IPV4.to_be_bytes());
     buf[14..total_len].copy_from_slice(data);

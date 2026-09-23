@@ -1,9 +1,9 @@
 use x86_64::instructions::port::Port;
 
-use zenus_sync::spinlock::SpinLock;
-use crate::ethernet;
 use crate::arp;
+use crate::ethernet;
 use crate::icmp;
+use zenus_sync::spinlock::SpinLock;
 
 const RTL_VENDOR: u16 = 0x10EC;
 const RTL_DEVICE: u16 = 0x8139;
@@ -117,7 +117,10 @@ impl Rtl8139 {
         let phys = Self::virt_to_phys(virt);
         // RTL8139 is a 32-bit PCI device — can only DMA to <4GB
         if phys == 0 || phys > 0xFFFF_FFFF {
-            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "RTL8139: RX buffer phys addr >4GB");
+            zenus_console::kerror_code!(
+                zenus_console::error::codes::DRV_INIT_FAILED,
+                "RTL8139: RX buffer phys addr >4GB"
+            );
             return None;
         }
 
@@ -157,7 +160,9 @@ impl Rtl8139 {
                     let io_base = (dev.bar0 & 0xFFFFFFF0) as u16;
                     let irq_line = dev.interrupt_line;
 
-                    unsafe { zenus_arch::pci::enable_bus_master(dev.bus, dev.device, dev.function); }
+                    unsafe {
+                        zenus_arch::pci::enable_bus_master(dev.bus, dev.device, dev.function);
+                    }
 
                     let mac = Self::read_mac_from_nic(io_base);
                     found = Some((io_base, mac, irq_line));
@@ -182,7 +187,9 @@ impl Rtl8139 {
 
                 let nic = match Self::new(io_base, mac, irq_line) {
                     Some(n) => n,
-                    None => { return None; }
+                    None => {
+                        return None;
+                    }
                 };
                 NIC_IO_BASE.store(io_base, core::sync::atomic::Ordering::Relaxed);
                 zenus_arch::interrupts::handler::set_nic_irq_handler(Self::handle_irq);
@@ -252,32 +259,56 @@ impl Rtl8139 {
         self.write8(RTL_CR, CR_RST);
 
         for _ in 0..5000 {
-            unsafe { Port::<u8>::new(0x80).read(); }
+            unsafe {
+                Port::<u8>::new(0x80).read();
+            }
         }
 
         zenus_console::kinfo!("RTL8139: Reset done");
     }
 
     pub fn init_hw(&self) {
-        zenus_console::kdebug!("RTL8139: rx_buf_phys={:#x} virt={:#x}", self.rx_buf_phys, unsafe { RX_BUF.0.as_ptr() as u64 });
+        zenus_console::kdebug!(
+            "RTL8139: rx_buf_phys={:#x} virt={:#x}",
+            self.rx_buf_phys,
+            unsafe { RX_BUF.0.as_ptr() as u64 }
+        );
         self.write32(RTL_RBSTART, self.rx_buf_phys);
         self.write16(RTL_IMR, ISR_ROK | ISR_TOK | ISR_RER | ISR_TER);
         let rcr = 0x8BD;
         self.write32(RTL_RCR, rcr);
         self.write8(RTL_CR, CR_TE | CR_RE);
 
-        zenus_console::kdebug!("RTL8139: rx_buf_phys={:#x} RB={:#x} RCR={:#x} CR={:#x} ISR={:#x} CBR={:#x}",
-            self.rx_buf_phys, self.read32(RTL_RBSTART), self.read32(RTL_RCR), self.read8(RTL_CR),
-            self.read16(RTL_ISR), self.read_cbr());
+        zenus_console::kdebug!(
+            "RTL8139: rx_buf_phys={:#x} RB={:#x} RCR={:#x} CR={:#x} ISR={:#x} CBR={:#x}",
+            self.rx_buf_phys,
+            self.read32(RTL_RBSTART),
+            self.read32(RTL_RCR),
+            self.read8(RTL_CR),
+            self.read16(RTL_ISR),
+            self.read_cbr()
+        );
     }
 
-    pub fn mac(&self) -> &[u8; 6] { &self.mac }
-    pub fn ip(&self) -> &[u8; 4] { &self.ip }
-    pub fn is_link_up(&self) -> bool { self.link_up }
+    pub fn mac(&self) -> &[u8; 6] {
+        &self.mac
+    }
+    pub fn ip(&self) -> &[u8; 4] {
+        &self.ip
+    }
+    pub fn is_link_up(&self) -> bool {
+        self.link_up
+    }
 
-    pub fn set_ip(&mut self, ip: [u8; 4]) { self.ip = ip; }
-    pub fn set_subnet(&mut self, subnet: [u8; 4]) { self.subnet = subnet; }
-    pub fn set_gateway(&mut self, gateway: [u8; 4]) { self.gateway = gateway; }
+    pub fn set_ip(&mut self, ip: [u8; 4]) {
+        self.ip = ip;
+    }
+    pub fn set_subnet(&mut self, subnet: [u8; 4]) {
+        self.subnet = subnet;
+    }
+    pub fn set_gateway(&mut self, gateway: [u8; 4]) {
+        self.gateway = gateway;
+    }
 
     pub fn send_raw(&mut self, data: &[u8]) -> bool {
         if data.len() > 1792 {
@@ -303,7 +334,9 @@ impl Rtl8139 {
             if (tsd & TSD_TOK) != 0 {
                 break;
             }
-            unsafe { Port::<u8>::new(0x80).read(); }
+            unsafe {
+                Port::<u8>::new(0x80).read();
+            }
         }
 
         self.tx_cur = (self.tx_cur + 1) % TX_DESC_COUNT;
@@ -336,7 +369,12 @@ impl Rtl8139 {
     pub fn receive_copy(&mut self, buf: &mut [u8]) -> Option<usize> {
         let isr = self.read16(RTL_ISR);
         let cbr = self.read_cbr();
-        zenus_console::kdebug!("RTL8139 RX: ISR={:#x} CAPR={:#x} cur={:#x}", isr, cbr, self.rx_cur);
+        zenus_console::kdebug!(
+            "RTL8139 RX: ISR={:#x} CAPR={:#x} cur={:#x}",
+            isr,
+            cbr,
+            self.rx_cur
+        );
         if isr == 0 || (isr & ISR_ROK) == 0 {
             return None;
         }
@@ -355,8 +393,10 @@ impl Rtl8139 {
         }
 
         let rx_status = u32::from_le_bytes([
-            rx_buf[offset], rx_buf[offset + 1],
-            rx_buf[offset + 2], rx_buf[offset + 3],
+            rx_buf[offset],
+            rx_buf[offset + 1],
+            rx_buf[offset + 2],
+            rx_buf[offset + 3],
         ]);
         let pkt_len = ((rx_status >> 16) as usize) & 0x3FFF;
 
@@ -394,26 +434,28 @@ impl Rtl8139 {
     }
 
     pub fn handle_irq() {
-    let guard = match RTL_LOCK.try_lock_no_irq() {
-        Some(g) => g,
-        None => return,
-    };
-    let io_base = NIC_IO_BASE.load(core::sync::atomic::Ordering::Relaxed);
-    if io_base == 0 { return; }
-    unsafe {
-        let mut isr_port = x86_64::instructions::port::Port::<u16>::new(io_base + RTL_ISR);
-        let isr = isr_port.read();
-        if isr != 0 {
-            isr_port.write(isr);
-            if (isr & ISR_ROK) != 0 {
-                if let Some(ref mut nic) = RTL_IFACE {
-                    nic.process_rx();
+        let guard = match RTL_LOCK.try_lock_no_irq() {
+            Some(g) => g,
+            None => return,
+        };
+        let io_base = NIC_IO_BASE.load(core::sync::atomic::Ordering::Relaxed);
+        if io_base == 0 {
+            return;
+        }
+        unsafe {
+            let mut isr_port = x86_64::instructions::port::Port::<u16>::new(io_base + RTL_ISR);
+            let isr = isr_port.read();
+            if isr != 0 {
+                isr_port.write(isr);
+                if (isr & ISR_ROK) != 0 {
+                    if let Some(ref mut nic) = RTL_IFACE {
+                        nic.process_rx();
+                    }
                 }
             }
         }
+        drop(guard);
     }
-    drop(guard);
-}
 
     pub fn poll(&mut self) {
         let _rtl_guard = RTL_LOCK.lock_no_irq();
@@ -436,8 +478,10 @@ impl Rtl8139 {
             }
 
             let hdr = u32::from_le_bytes([
-                rx_buf[offset], rx_buf[offset + 1],
-                rx_buf[offset + 2], rx_buf[offset + 3],
+                rx_buf[offset],
+                rx_buf[offset + 1],
+                rx_buf[offset + 2],
+                rx_buf[offset + 3],
             ]);
             let pkt_len = ((hdr >> 16) as usize) & 0x3FFF;
 
@@ -457,7 +501,8 @@ impl Rtl8139 {
                 packet[first..copy_len].copy_from_slice(&rx_buf[..copy_len - first]);
             }
 
-            self.rx_cur = ((self.rx_cur as u16) + 4 + ((pkt_len as u16 + 3) & !3)) % RX_BUF_SIZE as u16;
+            self.rx_cur =
+                ((self.rx_cur as u16) + 4 + ((pkt_len as u16 + 3) & !3)) % RX_BUF_SIZE as u16;
             let capr_val = self.rx_cur.saturating_sub(0x10);
             self.write16(RTL_CAPR, capr_val);
 
@@ -488,7 +533,11 @@ impl Rtl8139 {
                     match ip_hdr.protocol {
                         crate::ipv4::PROTO_ICMP => {
                             if let Some(reply) = icmp::handle_echo(
-                                &ip_hdr, ip_payload, &self.mac, &eth_hdr.src_mac, &self.ip
+                                &ip_hdr,
+                                ip_payload,
+                                &self.mac,
+                                &eth_hdr.src_mac,
+                                &self.ip,
                             ) {
                                 self.send_raw(&reply);
                             }

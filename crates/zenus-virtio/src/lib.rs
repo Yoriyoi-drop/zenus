@@ -2,14 +2,12 @@
 #![allow(static_mut_refs)]
 extern crate alloc;
 
-pub mod pci;
-pub mod queue;
-pub mod net;
+pub mod balloon;
 pub mod blk;
 pub mod console;
-pub mod balloon;
-
-
+pub mod net;
+pub mod pci;
+pub mod queue;
 
 pub const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 
@@ -66,14 +64,23 @@ pub unsafe fn init() {
             None => continue,
         };
 
-        zenus_console::kinfo!("Virtio found {} at {}:{}:{}", dev_name, dev.bus, dev.device, dev.function);
+        zenus_console::kinfo!(
+            "Virtio found {} at {}:{}:{}",
+            dev_name,
+            dev.bus,
+            dev.device,
+            dev.function
+        );
 
         zenus_arch::pci::enable_bus_master(dev.bus, dev.device, dev.function);
 
         let trans = match pci::init_device(&dev) {
             Some(t) => t,
             None => {
-                zenus_console::kwarn!("Virtio: failed to initialize PCI transport for {}", dev_name);
+                zenus_console::kwarn!(
+                    "Virtio: failed to initialize PCI transport for {}",
+                    dev_name
+                );
                 continue;
             }
         };

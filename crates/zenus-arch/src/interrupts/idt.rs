@@ -1,5 +1,5 @@
-use x86_64::structures::idt::{InterruptDescriptorTable, PageFaultErrorCode, InterruptStackFrame};
 use core::mem::MaybeUninit;
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use zenus_console::serial::SerialPort;
 
 use crate::gdt;
@@ -58,11 +58,22 @@ pub fn init() {
     idt.divide_error.set_handler_fn(divide_error_handler);
     idt.debug.set_handler_fn(debug_handler);
     idt.non_maskable_interrupt.set_handler_fn(nmi_handler);
-    idt.breakpoint.set_handler_fn(breakpoint_handler);
+    // BUG FIX: breakpoint DPL must be 3 for int3 to work at Ring 3.
+    // Default DPL is 0, which causes #GP when user-mode code executes int3.
+    // Zenus linker adds int3 padding after function bodies, so any code
+    // that falls through past a syscall (or other instruction) will hit
+    // int3 padding. Without DPL=3, this becomes a silent #GP instead of
+    // a debuggable breakpoint trap.
+    unsafe {
+        idt.breakpoint
+            .set_handler_fn(breakpoint_handler)
+            .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
+    }
     idt.overflow.set_handler_fn(overflow_handler);
     idt.bound_range_exceeded.set_handler_fn(bound_range_handler);
     idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
-    idt.device_not_available.set_handler_fn(device_not_available_handler);
+    idt.device_not_available
+        .set_handler_fn(device_not_available_handler);
 
     unsafe {
         idt.double_fault
@@ -71,8 +82,10 @@ pub fn init() {
     }
 
     idt.invalid_tss.set_handler_fn(invalid_tss_handler);
-    idt.segment_not_present.set_handler_fn(segment_not_present_handler);
-    idt.stack_segment_fault.set_handler_fn(stack_segment_handler);
+    idt.segment_not_present
+        .set_handler_fn(segment_not_present_handler);
+    idt.stack_segment_fault
+        .set_handler_fn(stack_segment_handler);
     idt.general_protection_fault.set_handler_fn(gpf_handler);
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.x87_floating_point.set_handler_fn(x87_fp_handler);
@@ -90,9 +103,12 @@ pub fn init() {
     // red-zone protection approach (sub rsp, 128 in the ISR stub) and
     // each task must have its own kernel stack for proper IST semantics.
     unsafe {
-        extern "C" { static apic_timer_isr_stub: u8; }
+        extern "C" {
+            static apic_timer_isr_stub: u8;
+        }
         let addr = &apic_timer_isr_stub as *const u8 as u64;
-        idt[32].set_handler_addr(x86_64::VirtAddr::new(addr))
+        idt[32]
+            .set_handler_addr(x86_64::VirtAddr::new(addr))
             .disable_interrupts(true)
             .set_privilege_level(x86_64::PrivilegeLevel::Ring0);
     }
@@ -121,7 +137,9 @@ extern "x86-interrupt" fn nmi_handler(_frame: InterruptStackFrame) {
     s.write_str("!!! NMI !!!\n");
     zenus_console::display::write_str("\n!!! NMI !!!\n");
     zenus_console::serial::flush_output_blocking();
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 extern "x86-interrupt" fn breakpoint_handler(_frame: InterruptStackFrame) {
@@ -159,7 +177,9 @@ extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code
     write_hex_display(frame.instruction_pointer.as_u64());
     zenus_console::display::write_str("\n");
     zenus_console::serial::flush_output_blocking();
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 extern "x86-interrupt" fn invalid_tss_handler(frame: InterruptStackFrame, _code: u64) {
@@ -189,13 +209,13 @@ extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
             match try_read_u64(addr) {
                 Some(val) => {
                     s.write_str(" [");
-                    s.write_hex(i*8);
+                    s.write_hex(i * 8);
                     s.write_str("]=");
                     s.write_hex(val);
                 }
                 None => {
                     s.write_str(" [");
-                    s.write_hex(i*8);
+                    s.write_hex(i * 8);
                     s.write_str("]=INVALID");
                     break;
                 }
@@ -203,10 +223,21 @@ extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
         }
     }
     // Actual CPU registers at fault time
-    let rax: u64; let rbx: u64; let rcx: u64; let rdx: u64;
-    let rsi: u64; let rdi: u64; let rbp: u64;
-    let r8: u64; let r9: u64; let r10: u64; let r11: u64;
-    let r12: u64; let r13: u64; let r14: u64; let r15: u64;
+    let rax: u64;
+    let rbx: u64;
+    let rcx: u64;
+    let rdx: u64;
+    let rsi: u64;
+    let rdi: u64;
+    let rbp: u64;
+    let r8: u64;
+    let r9: u64;
+    let r10: u64;
+    let r11: u64;
+    let r12: u64;
+    let r13: u64;
+    let r14: u64;
+    let r15: u64;
     unsafe {
         core::arch::asm!(
             "mov {}, rax", "mov {}, rbx", "mov {}, rcx", "mov {}, rdx",
@@ -220,21 +251,36 @@ extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
             options(nostack, preserves_flags),
         );
     }
-    s.write_str(" RAX="); s.write_hex(rax);
-    s.write_str(" RCX="); s.write_hex(rcx);
-    s.write_str(" RSI="); s.write_hex(rsi);
-    s.write_str(" RDI="); s.write_hex(rdi);
-    s.write_str(" RBX="); s.write_hex(rbx);
-    s.write_str(" RDX="); s.write_hex(rdx);
-    s.write_str(" RBP="); s.write_hex(rbp);
-    s.write_str(" R8="); s.write_hex(r8);
-    s.write_str(" R9="); s.write_hex(r9);
-    s.write_str(" R10="); s.write_hex(r10);
-    s.write_str(" R11="); s.write_hex(r11);
-    s.write_str(" R12="); s.write_hex(r12);
-    s.write_str(" R13="); s.write_hex(r13);
-    s.write_str(" R14="); s.write_hex(r14);
-    s.write_str(" R15="); s.write_hex(r15);
+    s.write_str(" RAX=");
+    s.write_hex(rax);
+    s.write_str(" RCX=");
+    s.write_hex(rcx);
+    s.write_str(" RSI=");
+    s.write_hex(rsi);
+    s.write_str(" RDI=");
+    s.write_hex(rdi);
+    s.write_str(" RBX=");
+    s.write_hex(rbx);
+    s.write_str(" RDX=");
+    s.write_hex(rdx);
+    s.write_str(" RBP=");
+    s.write_hex(rbp);
+    s.write_str(" R8=");
+    s.write_hex(r8);
+    s.write_str(" R9=");
+    s.write_hex(r9);
+    s.write_str(" R10=");
+    s.write_hex(r10);
+    s.write_str(" R11=");
+    s.write_hex(r11);
+    s.write_str(" R12=");
+    s.write_hex(r12);
+    s.write_str(" R13=");
+    s.write_hex(r13);
+    s.write_str(" R14=");
+    s.write_hex(r14);
+    s.write_str(" R15=");
+    s.write_hex(r15);
     s.write_str("\n");
     // Show on display
     zenus_console::display::write_str("\n!!! GPF !!! RIP=");
@@ -243,7 +289,9 @@ extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
     write_hex_display(_code);
     zenus_console::display::write_str("\n");
     zenus_console::serial::flush_output_blocking();
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 fn try_handle_user_page_fault(addr: u64, code: PageFaultErrorCode) -> bool {
@@ -273,18 +321,21 @@ fn try_handle_user_page_fault(addr: u64, code: PageFaultErrorCode) -> bool {
         let executable = (code.bits() & 0x10) != 0;
         let page_virt = addr & !0xFFF;
         let cr3: u64;
-        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags)); }
+        unsafe {
+            core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
+        }
         return zenus_mem::paging::map_user_page_raw(
-            cr3, page_virt, frame.as_u64(), writable, executable,
+            cr3,
+            page_virt,
+            frame.as_u64(),
+            writable,
+            executable,
         );
     }
     false
 }
 
-extern "x86-interrupt" fn page_fault_handler(
-    frame: InterruptStackFrame,
-    code: PageFaultErrorCode,
-) {
+extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: PageFaultErrorCode) {
     // Capture CPU registers BEFORE any Rust code can modify them.
     // The x86-interrupt ABI saves them on entry, but as soon as
     // this function body starts, the compiler may reuse GP regs.
@@ -343,16 +394,62 @@ extern "x86-interrupt" fn page_fault_handler(
     };
 
     s.write_str("\n!!! PAGE FAULT !!!\n");
-    s.write_str("TYPE: "); s.write_str(pf_type);
-    if (code.bits() & 0x10) != 0 { s.write_str(" [IF]"); }
+    s.write_str("TYPE: ");
+    s.write_str(pf_type);
+    if (code.bits() & 0x10) != 0 {
+        s.write_str(" [IF]");
+    }
 
-    s.write_str("\nADDR="); s.write_hex(addr);
-    s.write_str(" RIP="); s.write_hex(frame.instruction_pointer.as_u64());
-    s.write_str(" CS="); s.write_hex(frame.code_segment.index() as u64);
-    s.write_str(" RFLAGS="); s.write_hex(frame.cpu_flags.bits());
-    s.write_str(" RSP="); s.write_hex(frame.stack_pointer.as_u64());
-    s.write_str(" CAUSE="); s.write_str(cause);
-    s.write_str(" CODE="); s.write_hex(code.bits() as u64);
+    s.write_str("\nADDR=");
+    s.write_hex(addr);
+    s.write_str(" RIP=");
+    s.write_hex(frame.instruction_pointer.as_u64());
+    s.write_str(" CS=");
+    s.write_hex(frame.code_segment.index() as u64);
+    s.write_str(" RFLAGS=");
+    s.write_hex(frame.cpu_flags.bits());
+    s.write_str(" RSP=");
+    s.write_hex(frame.stack_pointer.as_u64());
+    s.write_str(" CAUSE=");
+    s.write_str(cause);
+    s.write_str(" CODE=");
+    s.write_hex(code.bits() as u64);
+    // Dump code bytes near faulting instruction to help find the culprit.
+    if is_kernel_addr(frame.instruction_pointer.as_u64()) {
+        let rip = frame.instruction_pointer.as_u64();
+        let page_off = rip & 0xFFF;
+        let count = 256usize.min((4096 - page_off) as usize);
+        s.write_str("\n[CODE @ RIP+8]\n");
+        for i in 8..count {
+            match try_read_u8(rip + i as u64) {
+                Some(byte) => {
+                    s.write_hex(byte as u64);
+                    s.write_str(" ");
+                    if i % 16 == 15 {
+                        s.write_str("\n");
+                    }
+                }
+                None => {
+                    s.write_str("?? ");
+                    break;
+                }
+            }
+        }
+        s.write_str("\n[CODE @ RIP]\n");
+        for i in 0..8 {
+            match try_read_u8(rip + i as u64) {
+                Some(byte) => {
+                    s.write_hex(byte as u64);
+                    s.write_str(" ");
+                }
+                None => {
+                    s.write_str("?? ");
+                    break;
+                }
+            }
+        }
+        s.write_str("\n");
+    }
 
     if addr < 0x1000 {
         s.write_str("\n*** NEAR-NULL ADDRESS ***");
@@ -371,21 +468,36 @@ extern "x86-interrupt" fn page_fault_handler(
     }
     zenus_console::display::write_str("\n");
 
-    s.write_str(" RAX="); s.write_hex(r_rax);
-    s.write_str(" RBX="); s.write_hex(r_rbx);
-    s.write_str(" RCX="); s.write_hex(r_rcx);
-    s.write_str(" RDX="); s.write_hex(r_rdx);
-    s.write_str("\n RSI="); s.write_hex(r_rsi);
-    s.write_str(" RDI="); s.write_hex(r_rdi);
-    s.write_str(" RBP="); s.write_hex(r_rbp);
-    s.write_str(" R8=");  s.write_hex(r_r8);
-    s.write_str(" R9=");  s.write_hex(r_r9);
-    s.write_str("\n R10="); s.write_hex(r_r10);
-    s.write_str(" R11="); s.write_hex(r_r11);
-    s.write_str(" R12="); s.write_hex(r_r12);
-    s.write_str(" R13="); s.write_hex(r_r13);
-    s.write_str(" R14="); s.write_hex(r_r14);
-    s.write_str(" R15="); s.write_hex(r_r15);
+    s.write_str(" RAX=");
+    s.write_hex(r_rax);
+    s.write_str(" RBX=");
+    s.write_hex(r_rbx);
+    s.write_str(" RCX=");
+    s.write_hex(r_rcx);
+    s.write_str(" RDX=");
+    s.write_hex(r_rdx);
+    s.write_str("\n RSI=");
+    s.write_hex(r_rsi);
+    s.write_str(" RDI=");
+    s.write_hex(r_rdi);
+    s.write_str(" RBP=");
+    s.write_hex(r_rbp);
+    s.write_str(" R8=");
+    s.write_hex(r_r8);
+    s.write_str(" R9=");
+    s.write_hex(r_r9);
+    s.write_str("\n R10=");
+    s.write_hex(r_r10);
+    s.write_str(" R11=");
+    s.write_hex(r_r11);
+    s.write_str(" R12=");
+    s.write_hex(r_r12);
+    s.write_str(" R13=");
+    s.write_hex(r_r13);
+    s.write_str(" R14=");
+    s.write_hex(r_r14);
+    s.write_str(" R15=");
+    s.write_hex(r_r15);
 
     let stack = frame.stack_pointer.as_u64();
     s.write_str("\n[STACK ABOVE]\n");
@@ -418,7 +530,9 @@ extern "x86-interrupt" fn page_fault_handler(
     if stack_valid {
         for i in 0..16u64 {
             let p = stack.wrapping_sub(i * 8);
-            if p < 0x1000 { continue; }
+            if p < 0x1000 {
+                continue;
+            }
             match try_read_u64(p) {
                 Some(val) => {
                     s.write_hex(p);
@@ -444,7 +558,9 @@ extern "x86-interrupt" fn page_fault_handler(
         s.write_str("(invalid stack pointer)\n");
     }
     zenus_console::serial::flush_output_blocking();
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 extern "x86-interrupt" fn x87_fp_handler(frame: InterruptStackFrame) {
@@ -460,7 +576,9 @@ extern "x86-interrupt" fn machine_check_handler(_frame: InterruptStackFrame) -> 
     s.write_str("!!! MACHINE CHECK !!!\n");
     zenus_console::display::write_str("\n!!! MACHINE CHECK !!!\n");
     zenus_console::serial::flush_output_blocking();
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 extern "x86-interrupt" fn simd_fp_handler(frame: InterruptStackFrame) {
@@ -477,10 +595,21 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     let cs_idx = frame.code_segment.index() as u64;
     let rflags = frame.cpu_flags.bits();
 
-    let rax: u64; let rbx: u64; let rcx: u64; let rdx: u64;
-    let rsi: u64; let rdi: u64; let rbp: u64; let r8: u64;
-    let r9: u64; let r10: u64; let r11: u64; let r12: u64;
-    let r13: u64; let r14: u64; let r15: u64;
+    let rax: u64;
+    let rbx: u64;
+    let rcx: u64;
+    let rdx: u64;
+    let rsi: u64;
+    let rdi: u64;
+    let rbp: u64;
+    let r8: u64;
+    let r9: u64;
+    let r10: u64;
+    let r11: u64;
+    let r12: u64;
+    let r13: u64;
+    let r14: u64;
+    let r15: u64;
     unsafe {
         core::arch::asm!(
             "mov {}, rax", "mov {}, rbx", "mov {}, rcx", "mov {}, rdx",
@@ -517,9 +646,9 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     s.write_str("[CODE]\n");
     if is_kernel_addr(rip) {
         let page_off = rip & 0xFFF;
-        let count = 16.min(4096 - page_off);
+        let count = 16.min((4096 - page_off) as usize);
         for i in 0..count {
-            match try_read_u8(rip + i) {
+            match try_read_u8(rip + i as u64) {
                 Some(byte) => {
                     s.write_hex(byte as u64);
                     s.write_str(" ");
@@ -535,21 +664,36 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     }
     s.write_str("\n");
 
-    s.write_str(" RAX="); s.write_hex(rax);
-    s.write_str(" RBX="); s.write_hex(rbx);
-    s.write_str(" RCX="); s.write_hex(rcx);
-    s.write_str(" RDX="); s.write_hex(rdx);
-    s.write_str("\n RSI="); s.write_hex(rsi);
-    s.write_str(" RDI="); s.write_hex(rdi);
-    s.write_str(" RBP="); s.write_hex(rbp);
-    s.write_str(" R8=");  s.write_hex(r8);
-    s.write_str(" R9=");  s.write_hex(r9);
-    s.write_str("\n R10="); s.write_hex(r10);
-    s.write_str(" R11="); s.write_hex(r11);
-    s.write_str(" R12="); s.write_hex(r12);
-    s.write_str(" R13="); s.write_hex(r13);
-    s.write_str(" R14="); s.write_hex(r14);
-    s.write_str(" R15="); s.write_hex(r15);
+    s.write_str(" RAX=");
+    s.write_hex(rax);
+    s.write_str(" RBX=");
+    s.write_hex(rbx);
+    s.write_str(" RCX=");
+    s.write_hex(rcx);
+    s.write_str(" RDX=");
+    s.write_hex(rdx);
+    s.write_str("\n RSI=");
+    s.write_hex(rsi);
+    s.write_str(" RDI=");
+    s.write_hex(rdi);
+    s.write_str(" RBP=");
+    s.write_hex(rbp);
+    s.write_str(" R8=");
+    s.write_hex(r8);
+    s.write_str(" R9=");
+    s.write_hex(r9);
+    s.write_str("\n R10=");
+    s.write_hex(r10);
+    s.write_str(" R11=");
+    s.write_hex(r11);
+    s.write_str(" R12=");
+    s.write_hex(r12);
+    s.write_str(" R13=");
+    s.write_hex(r13);
+    s.write_str(" R14=");
+    s.write_hex(r14);
+    s.write_str(" R15=");
+    s.write_hex(r15);
     s.write_str("\n");
 
     s.write_str("[STACK]\n");
@@ -557,7 +701,9 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     if stack_valid {
         for i in 0..20u64 {
             let p = rsp.wrapping_add(i * 8);
-            if p < 0x1000 { continue; }
+            if p < 0x1000 {
+                continue;
+            }
             match try_read_u64(p) {
                 Some(val) => {
                     s.write_hex(p);
@@ -580,5 +726,7 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     }
 
     zenus_console::serial::flush_output_blocking();
-    loop { x86_64::instructions::hlt(); }
+    loop {
+        x86_64::instructions::hlt();
+    }
 }

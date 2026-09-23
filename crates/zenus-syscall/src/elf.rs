@@ -1,6 +1,6 @@
-use zenus_mem::paging;
-use zenus_fs::vfs;
 use x86_64::PhysAddr;
+use zenus_fs::vfs;
+use zenus_mem::paging;
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const MAX_ELF_PAGES: usize = 65536;
@@ -60,32 +60,45 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         fa.clear_free_stack();
     }
 
-    if data.len() < core::mem::size_of::<Elf64Header>() { return None; }
+    if data.len() < core::mem::size_of::<Elf64Header>() {
+        return None;
+    }
 
     let header: &Elf64Header = unsafe { &*(data.as_ptr() as *const Elf64Header) };
 
-    if header.e_ident[..4] != ELF_MAGIC { return None; }
-    if header.e_ident[4] != 2 { return None; }
-    if header.e_machine != 0x3E { return None; }
+    if header.e_ident[..4] != ELF_MAGIC {
+        return None;
+    }
+    if header.e_ident[4] != 2 {
+        return None;
+    }
+    if header.e_machine != 0x3E {
+        return None;
+    }
     let e_ehsize = header.e_ehsize as usize;
-    if e_ehsize != 0 && e_ehsize < core::mem::size_of::<Elf64Header>() { return None; }
+    if e_ehsize != 0 && e_ehsize < core::mem::size_of::<Elf64Header>() {
+        return None;
+    }
 
     let phoff = header.e_phoff as usize;
     let phentsize = header.e_phentsize as usize;
     let phnum = header.e_phnum as usize;
 
-    if phentsize != core::mem::size_of::<Elf64Phdr>() { return None; }
+    if phentsize != core::mem::size_of::<Elf64Phdr>() {
+        return None;
+    }
     let phdr_end = phoff.checked_add(phnum.checked_mul(phentsize)?)?;
-    if phdr_end > data.len() { return None; }
+    if phdr_end > data.len() {
+        return None;
+    }
 
     // Validate entry is a canonical user-space virtual address
     if header.e_entry < 0x1000 || header.e_entry >= 0x0000_8000_0000_0000 {
         return None;
     }
 
-    let phdrs = unsafe {
-        core::slice::from_raw_parts(data.as_ptr().add(phoff) as *const Elf64Phdr, phnum)
-    };
+    let phdrs =
+        unsafe { core::slice::from_raw_parts(data.as_ptr().add(phoff) as *const Elf64Phdr, phnum) };
 
     let hhdm = paging::hhdm_offset();
     if hhdm == 0 {
@@ -97,7 +110,9 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
     let mut max_addr: u64 = 0;
 
     for phdr in phdrs {
-        if phdr.p_type != PT_LOAD { continue; }
+        if phdr.p_type != PT_LOAD {
+            continue;
+        }
         let vaddr = phdr.p_vaddr & !0xFFF;
         let end = phdr.p_vaddr.checked_add(phdr.p_memsz)?;
         let end = (end + 0xFFF) & !0xFFF;
@@ -105,7 +120,9 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
             free_frames_raw(&frames);
             return None;
         }
-        if end > max_addr { max_addr = end; }
+        if end > max_addr {
+            max_addr = end;
+        }
 
         let file_off = phdr.p_offset as usize;
         let file_sz = phdr.p_filesz as usize;
@@ -130,10 +147,20 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
             frames.push(frame_phys.as_u64());
 
             unsafe {
-                core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
+                core::ptr::write_bytes(
+                    (hhdm + frame_phys.as_u64()) as *mut u8,
+                    0,
+                    paging::PAGE_SIZE,
+                );
             }
 
-            if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), (phdr.p_flags & PF_W) != 0, (phdr.p_flags & PF_X) != 0) {
+            if !paging::map_user_page_raw(
+                cr3,
+                page_virt,
+                frame_phys.as_u64(),
+                (phdr.p_flags & PF_W) != 0,
+                (phdr.p_flags & PF_X) != 0,
+            ) {
                 free_frames_raw(&frames);
                 return None;
             }
@@ -156,14 +183,22 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
                 let dst = (hhdm + frame_phys.as_u64() + page_off as u64) as *mut u8;
                 if src_offset + copy_size <= data.len() {
                     unsafe {
-                        core::ptr::copy_nonoverlapping(data.as_ptr().add(src_offset), dst, copy_size);
+                        core::ptr::copy_nonoverlapping(
+                            data.as_ptr().add(src_offset),
+                            dst,
+                            copy_size,
+                        );
                     }
                 }
             }
         }
     }
 
-    let heap_base = if max_addr < 0x6000_0000_0000 { 0x6000_0000_0000 } else { max_addr.saturating_add(0x10000) };
+    let heap_base = if max_addr < 0x6000_0000_0000 {
+        0x6000_0000_0000
+    } else {
+        max_addr.saturating_add(0x10000)
+    };
 
     let heap_slide = zenus_arch::random::get_random_page_aligned(0, 32 * 1024 * 1024);
     let heap_base = heap_base.saturating_add(heap_slide);
@@ -190,7 +225,11 @@ pub fn load_elf_raw(data: &[u8], cr3: u64) -> Option<LoadedElf> {
         last_stack_phys = frame_phys.as_u64();
 
         unsafe {
-            core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
+            core::ptr::write_bytes(
+                (hhdm + frame_phys.as_u64()) as *mut u8,
+                0,
+                paging::PAGE_SIZE,
+            );
         }
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
@@ -256,38 +295,75 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
     wr_str("[FLAT] start\n");
 
     let rsp: u64;
-    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags));
+    }
     wr_str("[FLAT] RSP=");
     wr_hex(rsp);
     wr_str("\n");
 
-    wout!(b'D'); wout!(b'1'); wout!(b'\r'); wout!(b'\n');
+    wout!(b'D');
+    wout!(b'1');
+    wout!(b'\r');
+    wout!(b'\n');
     let page_size = paging::PAGE_SIZE as u64;
-    wout!(b'D'); wout!(b'2'); wout!(b'\r'); wout!(b'\n');
+    wout!(b'D');
+    wout!(b'2');
+    wout!(b'\r');
+    wout!(b'\n');
     let vaddr = entry & !0xFFF;
-    wout!(b'D'); wout!(b'3'); wout!(b'\r'); wout!(b'\n');
+    wout!(b'D');
+    wout!(b'3');
+    wout!(b'\r');
+    wout!(b'\n');
     let pages_needed = ((data.len() + page_size as usize - 1) / page_size as usize).max(1);
-    wout!(b'D'); wout!(b'4'); wout!(b'\r'); wout!(b'\n');
+    wout!(b'D');
+    wout!(b'4');
+    wout!(b'\r');
+    wout!(b'\n');
 
     let hhdm = paging::hhdm_offset();
-    wout!(b'D'); wout!(b'5'); wout!(b'\r'); wout!(b'\n');
+    wout!(b'D');
+    wout!(b'5');
+    wout!(b'\r');
+    wout!(b'\n');
     if hhdm == 0 {
         wr_str("[FLAT] FATAL: HHDM offset is 0\n");
         return None;
     }
-    wout!(b'D'); wout!(b'6'); wout!(b'\r'); wout!(b'\n');
+    wout!(b'D');
+    wout!(b'6');
+    wout!(b'\r');
+    wout!(b'\n');
 
     let mut frame_buf = alloc::boxed::Box::new([0u64; 64]);
-    wout!(b'D'); wout!(b'7'); wout!(b'\r'); wout!(b'\n');
+    wout!(b'D');
+    wout!(b'7');
+    wout!(b'\r');
+    wout!(b'\n');
     let mut frame_count: usize = 0;
-    wout!(b'D'); wout!(b'8'); wout!(b'\r'); wout!(b'\n');
+    wout!(b'D');
+    wout!(b'8');
+    wout!(b'\r');
+    wout!(b'\n');
 
     for i in 0..pages_needed {
-        wout!(b'L'); wr_hex(i as u64); wout!(b'\r'); wout!(b'\n');
-        wout!(b'i'); wr_hex(i as u64); wout!(b'\r'); wout!(b'\n');
-        wout!(b'p'); wr_hex(page_size); wout!(b'\r'); wout!(b'\n');
+        wout!(b'L');
+        wr_hex(i as u64);
+        wout!(b'\r');
+        wout!(b'\n');
+        wout!(b'i');
+        wr_hex(i as u64);
+        wout!(b'\r');
+        wout!(b'\n');
+        wout!(b'p');
+        wr_hex(page_size);
+        wout!(b'\r');
+        wout!(b'\n');
         let page_virt = vaddr + (i as u64) * page_size;
-        wout!(b'A'); wout!(b'\r'); wout!(b'\n');
+        wout!(b'A');
+        wout!(b'\r');
+        wout!(b'\n');
         let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
         let frame_phys = match allocator.alloc_frame() {
             Some(p) => p,
@@ -307,11 +383,16 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         wr_str("\n");
 
         unsafe {
-            core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, page_size as usize);
+            core::ptr::write_bytes(
+                (hhdm + frame_phys.as_u64()) as *mut u8,
+                0,
+                page_size as usize,
+            );
         }
 
         let writable = true;
-        let map_result = paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), writable, true);
+        let map_result =
+            paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), writable, true);
         wr_str("[FLAT] map_result=");
         if map_result {
             wr_str("true");
@@ -368,7 +449,11 @@ pub fn load_flat_binary(data: &[u8], entry: u64, cr3: u64) -> Option<LoadedElf> 
         frame_count += 1;
 
         unsafe {
-            core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, page_size as usize);
+            core::ptr::write_bytes(
+                (hhdm + frame_phys.as_u64()) as *mut u8,
+                0,
+                page_size as usize,
+            );
         }
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {
@@ -409,19 +494,31 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
 
     let node = vfs::open(path)?;
     let stat = node.fs.stat(node.inode);
-    if stat.size < 64 { return None; }
+    if stat.size < 64 {
+        return None;
+    }
 
     let mut header_buf = [0u8; 64];
     node.fs.read(node.inode, 0, &mut header_buf)?;
 
-    if stat.size < core::mem::size_of::<Elf64Header>() as u64 { return None; }
+    if stat.size < core::mem::size_of::<Elf64Header>() as u64 {
+        return None;
+    }
     let header: &Elf64Header = unsafe { &*(header_buf.as_ptr() as *const Elf64Header) };
 
-    if header.e_ident[..4] != ELF_MAGIC { return None; }
-    if header.e_ident[4] != 2 { return None; }
-    if header.e_machine != 0x3E { return None; }
+    if header.e_ident[..4] != ELF_MAGIC {
+        return None;
+    }
+    if header.e_ident[4] != 2 {
+        return None;
+    }
+    if header.e_machine != 0x3E {
+        return None;
+    }
     let e_ehsize = header.e_ehsize as usize;
-    if e_ehsize != 0 && e_ehsize < core::mem::size_of::<Elf64Header>() { return None; }
+    if e_ehsize != 0 && e_ehsize < core::mem::size_of::<Elf64Header>() {
+        return None;
+    }
 
     // Validate entry is a canonical user-space virtual address
     if header.e_entry < 0x1000 || header.e_entry >= 0x0000_8000_0000_0000 {
@@ -432,26 +529,31 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
     let phentsize = header.e_phentsize as usize;
     let phnum = header.e_phnum as usize;
 
-    if phentsize != core::mem::size_of::<Elf64Phdr>() { return None; }
+    if phentsize != core::mem::size_of::<Elf64Phdr>() {
+        return None;
+    }
 
     let phdr_size = phnum.checked_mul(phentsize)?;
     let mut phdr_buf: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(phdr_size);
     phdr_buf.resize(phdr_size, 0);
     node.fs.read(node.inode, phoff, &mut phdr_buf)?;
 
-    let phdrs = unsafe {
-        core::slice::from_raw_parts(phdr_buf.as_ptr() as *const Elf64Phdr, phnum)
-    };
+    let phdrs =
+        unsafe { core::slice::from_raw_parts(phdr_buf.as_ptr() as *const Elf64Phdr, phnum) };
 
     let hhdm = paging::hhdm_offset();
-    if hhdm == 0 { return None; }
+    if hhdm == 0 {
+        return None;
+    }
 
     let mut frames: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
 
     let mut max_addr: u64 = 0;
 
     for phdr in phdrs {
-        if phdr.p_type != PT_LOAD { continue; }
+        if phdr.p_type != PT_LOAD {
+            continue;
+        }
         let vaddr = phdr.p_vaddr & !0xFFF;
         let end = phdr.p_vaddr.checked_add(phdr.p_memsz)?;
         let end = (end + 0xFFF) & !0xFFF;
@@ -459,7 +561,9 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
             free_frames_raw(&frames);
             return None;
         }
-        if end > max_addr { max_addr = end; }
+        if end > max_addr {
+            max_addr = end;
+        }
 
         let file_off = phdr.p_offset;
         let file_sz = phdr.p_filesz;
@@ -484,10 +588,20 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
             frames.push(frame_phys.as_u64());
 
             unsafe {
-                core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
+                core::ptr::write_bytes(
+                    (hhdm + frame_phys.as_u64()) as *mut u8,
+                    0,
+                    paging::PAGE_SIZE,
+                );
             }
 
-            if !paging::map_user_page_raw(cr3, page_virt, frame_phys.as_u64(), (phdr.p_flags & PF_W) != 0, (phdr.p_flags & PF_X) != 0) {
+            if !paging::map_user_page_raw(
+                cr3,
+                page_virt,
+                frame_phys.as_u64(),
+                (phdr.p_flags & PF_W) != 0,
+                (phdr.p_flags & PF_X) != 0,
+            ) {
                 free_frames_raw(&frames);
                 return None;
             }
@@ -521,7 +635,11 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         }
     }
 
-    let heap_base = if max_addr < 0x6000_0000_0000 { 0x6000_0000_0000 } else { max_addr + 0x10000 };
+    let heap_base = if max_addr < 0x6000_0000_0000 {
+        0x6000_0000_0000
+    } else {
+        max_addr + 0x10000
+    };
 
     let heap_slide = zenus_arch::random::get_random_page_aligned(0, 32 * 1024 * 1024);
     let heap_base = heap_base.saturating_add(heap_slide);
@@ -548,7 +666,11 @@ pub fn load_elf(path: &str, cr3: u64) -> Option<LoadedElf> {
         last_stack_phys = frame_phys.as_u64();
 
         unsafe {
-            core::ptr::write_bytes((hhdm + frame_phys.as_u64()) as *mut u8, 0, paging::PAGE_SIZE);
+            core::ptr::write_bytes(
+                (hhdm + frame_phys.as_u64()) as *mut u8,
+                0,
+                paging::PAGE_SIZE,
+            );
         }
 
         if !paging::map_user_page_raw(cr3, stack_virt, frame_phys.as_u64(), true, false) {

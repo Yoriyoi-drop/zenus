@@ -42,8 +42,7 @@ pub struct AtaDevice {
 pub const MAX_ATA_DEVICES: usize = 4;
 static ATA_DEVICES: SpinLock<[Option<AtaDevice>; MAX_ATA_DEVICES]> =
     SpinLock::new([None; MAX_ATA_DEVICES]);
-static ATA_COUNT: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+static ATA_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Tunggu BSY clear. Tidak menggunakan hlt() — aman dipanggil di dalam
 /// spinlock atau handler interrupt.
@@ -147,7 +146,14 @@ fn identify_drive(io_base: u16, ctrl_base: u16, drive: u8) -> Option<AtaDevice> 
     let model = extract_model(&data);
     let drive_sel = if drive == 0 { 0xE0 } else { 0xF0 };
 
-    Some(AtaDevice { io_base, ctrl_base, drive: drive_sel, lba_sectors, model, lba48 })
+    Some(AtaDevice {
+        io_base,
+        ctrl_base,
+        drive: drive_sel,
+        lba_sectors,
+        model,
+        lba48,
+    })
 }
 
 /// ATA string byte-swap: setiap word dari IDENTIFY disimpan sebagai
@@ -157,7 +163,7 @@ fn extract_model(data: &[u16; 256]) -> [u8; 40] {
     for i in 0..20 {
         let w = data[27 + i];
         // ATA: byte tinggi adalah karakter pertama pasangan
-        model[i * 2]     = (w >> 8) as u8;
+        model[i * 2] = (w >> 8) as u8;
         model[i * 2 + 1] = (w & 0xFF) as u8;
     }
     model
@@ -165,7 +171,9 @@ fn extract_model(data: &[u16; 256]) -> [u8; 40] {
 
 #[allow(dead_code)]
 fn model_str(model: &[u8; 40]) -> &str {
-    let end = model.iter().rposition(|&b| b != 0 && b != b' ')
+    let end = model
+        .iter()
+        .rposition(|&b| b != 0 && b != b' ')
         .map(|i| i + 1)
         .unwrap_or(0);
     core::str::from_utf8(&model[..end]).unwrap_or("<non-utf8>")

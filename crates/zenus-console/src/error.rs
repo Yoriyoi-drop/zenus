@@ -4,49 +4,49 @@ use core::fmt::Write;
 
 // ── ANSI Color Support ──
 pub mod color {
-    pub const RESET:     &str = "\x1b[0m";
-    pub const BOLD:      &str = "\x1b[1m";
-    pub const DIM:       &str = "\x1b[2m";
-    pub const BLACK:     &str = "\x1b[30m";
-    pub const RED:       &str = "\x1b[31m";
-    pub const GREEN:     &str = "\x1b[32m";
-    pub const YELLOW:    &str = "\x1b[33m";
-    pub const BLUE:      &str = "\x1b[34m";
-    pub const MAGENTA:   &str = "\x1b[35m";
-    pub const CYAN:      &str = "\x1b[36m";
-    pub const GRAY:      &str = "\x1b[37m";
-    pub const WHITE:     &str = "\x1b[97m";
-    pub const BG_RED:    &str = "\x1b[41m";
-    pub const BG_BLUE:   &str = "\x1b[44m";
-    pub const BG_GREEN:  &str = "\x1b[42m";
+    pub const RESET: &str = "\x1b[0m";
+    pub const BOLD: &str = "\x1b[1m";
+    pub const DIM: &str = "\x1b[2m";
+    pub const BLACK: &str = "\x1b[30m";
+    pub const RED: &str = "\x1b[31m";
+    pub const GREEN: &str = "\x1b[32m";
+    pub const YELLOW: &str = "\x1b[33m";
+    pub const BLUE: &str = "\x1b[34m";
+    pub const MAGENTA: &str = "\x1b[35m";
+    pub const CYAN: &str = "\x1b[36m";
+    pub const GRAY: &str = "\x1b[37m";
+    pub const WHITE: &str = "\x1b[97m";
+    pub const BG_RED: &str = "\x1b[41m";
+    pub const BG_BLUE: &str = "\x1b[44m";
+    pub const BG_GREEN: &str = "\x1b[42m";
     pub const BG_YELLOW: &str = "\x1b[43m";
 }
 
 pub fn level_color(level: LogLevel) -> &'static str {
     match level {
-        LogLevel::Trace    => color::GRAY,
-        LogLevel::Debug    => color::CYAN,
-        LogLevel::Info     => color::GREEN,
-        LogLevel::Notice   => color::BLUE,
-        LogLevel::Warn     => color::YELLOW,
-        LogLevel::Error    => color::RED,
+        LogLevel::Trace => color::GRAY,
+        LogLevel::Debug => color::CYAN,
+        LogLevel::Info => color::GREEN,
+        LogLevel::Notice => color::BLUE,
+        LogLevel::Warn => color::YELLOW,
+        LogLevel::Error => color::RED,
         LogLevel::Critical => color::MAGENTA,
-        LogLevel::Fatal    => "\x1b[1;31m",
-        LogLevel::Panic    => "\x1b[1;37;41m",
+        LogLevel::Fatal => "\x1b[1;31m",
+        LogLevel::Panic => "\x1b[1;37;41m",
     }
 }
 
 pub fn level_name(level: LogLevel) -> &'static str {
     match level {
-        LogLevel::Trace    => "TRACE",
-        LogLevel::Debug    => "DEBUG",
-        LogLevel::Info     => "INFO",
-        LogLevel::Notice   => "NOTICE",
-        LogLevel::Warn     => "WARNING",
-        LogLevel::Error    => "ERROR",
+        LogLevel::Trace => "TRACE",
+        LogLevel::Debug => "DEBUG",
+        LogLevel::Info => "INFO",
+        LogLevel::Notice => "NOTICE",
+        LogLevel::Warn => "WARNING",
+        LogLevel::Error => "ERROR",
         LogLevel::Critical => "CRITICAL",
-        LogLevel::Fatal    => "FATAL",
-        LogLevel::Panic    => "PANIC",
+        LogLevel::Fatal => "FATAL",
+        LogLevel::Panic => "PANIC",
     }
 }
 
@@ -54,37 +54,37 @@ pub fn level_name(level: LogLevel) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ErrorModule {
-    Kernel     = 0,
-    Memory     = 1,
+    Kernel = 0,
+    Memory = 1,
     FileSystem = 2,
-    Process    = 3,
-    Driver     = 4,
-    Network    = 5,
-    Security   = 6,
+    Process = 3,
+    Driver = 4,
+    Network = 5,
+    Security = 6,
 }
 
 impl ErrorModule {
     pub fn prefix(self) -> &'static str {
         match self {
-            Self::Kernel     => "KRN",
-            Self::Memory     => "MEM",
+            Self::Kernel => "KRN",
+            Self::Memory => "MEM",
             Self::FileSystem => "FS",
-            Self::Process    => "PRC",
-            Self::Driver     => "DRV",
-            Self::Network    => "NET",
-            Self::Security   => "SEC",
+            Self::Process => "PRC",
+            Self::Driver => "DRV",
+            Self::Network => "NET",
+            Self::Security => "SEC",
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Kernel     => "Kernel",
-            Self::Memory     => "MemoryManager",
+            Self::Kernel => "Kernel",
+            Self::Memory => "MemoryManager",
             Self::FileSystem => "FileSystem",
-            Self::Process    => "ProcessManager",
-            Self::Driver     => "Driver",
-            Self::Network    => "Network",
-            Self::Security   => "Security",
+            Self::Process => "ProcessManager",
+            Self::Driver => "Driver",
+            Self::Network => "Network",
+            Self::Security => "Security",
         }
     }
 }
@@ -112,7 +112,12 @@ pub mod codes {
         severity: LogLevel::Panic,
         desc: "Kernel panic: Invalid memory mapping",
         reason: "Virtual page table entry points to an unmapped physical address.",
-        actions: &["Halt current CPU", "Save crash dump", "Notify debugger", "Enter recovery mode"],
+        actions: &[
+            "Halt current CPU",
+            "Save crash dump",
+            "Notify debugger",
+            "Enter recovery mode",
+        ],
         suggestion: "Check page table initialization in paging.rs",
     };
     pub const KRN_NULL_PTR: ErrorDef = ErrorDef {
@@ -131,7 +136,8 @@ pub mod codes {
         desc: "Stack overflow in kernel thread",
         reason: "Kernel stack pointer moved into guard page region, indicating stack exhaustion.",
         actions: &["Halt current CPU", "Save crash dump", "Dump backtrace"],
-        suggestion: "Increase kernel stack size. Check for deep recursion or large stack allocations.",
+        suggestion:
+            "Increase kernel stack size. Check for deep recursion or large stack allocations.",
     };
     pub const KRN_UNHANDLED_EXCEPTION: ErrorDef = ErrorDef {
         code: "ZN-KRN-0004",
@@ -139,7 +145,11 @@ pub mod codes {
         severity: LogLevel::Panic,
         desc: "CPU exception was not handled",
         reason: "An unexpected CPU exception occurred with no registered handler.",
-        actions: &["Halt current CPU", "Save crash dump", "Dump exception frame"],
+        actions: &[
+            "Halt current CPU",
+            "Save crash dump",
+            "Dump exception frame",
+        ],
         suggestion: "Check IDT entry registration. Verify interrupt handler chain.",
     };
 
@@ -150,8 +160,13 @@ pub mod codes {
         severity: LogLevel::Critical,
         desc: "Physical page allocation failed",
         reason: "The frame allocator found no free physical pages.",
-        actions: &["Retry allocation", "Trigger OOM handler", "Try reclaiming pages"],
-        suggestion: "Check memory map parsing. Increase available RAM in VM config. Verify no memory leaks.",
+        actions: &[
+            "Retry allocation",
+            "Trigger OOM handler",
+            "Try reclaiming pages",
+        ],
+        suggestion:
+            "Check memory map parsing. Increase available RAM in VM config. Verify no memory leaks.",
     };
     pub const MEM_OUT_OF_RANGE: ErrorDef = ErrorDef {
         code: "ZN-MEM-0002",
@@ -216,7 +231,8 @@ pub mod codes {
         module: ErrorModule::Process,
         severity: LogLevel::Critical,
         desc: "Scheduler queue corrupted",
-        reason: "Task linked list or priority queue contains invalid pointers or circular references.",
+        reason:
+            "Task linked list or priority queue contains invalid pointers or circular references.",
         actions: &["Halt scheduler", "Dump task table", "Emergency task kill"],
         suggestion: "Check task state transitions. Verify queue insertion/removal logic.",
     };
@@ -225,7 +241,8 @@ pub mod codes {
         module: ErrorModule::Process,
         severity: LogLevel::Warn,
         desc: "Thread synchronization timeout",
-        reason: "A wait operation (mutex, semaphore, condvar) timed out without acquiring the resource.",
+        reason:
+            "A wait operation (mutex, semaphore, condvar) timed out without acquiring the resource.",
         actions: &["Return -ETIMEDOUT", "Log waiter and owner TIDs"],
         suggestion: "Check for deadlock. Verify timeout calculation.",
     };
@@ -245,7 +262,8 @@ pub mod codes {
         module: ErrorModule::Driver,
         severity: LogLevel::Error,
         desc: "Driver signature verification failed",
-        reason: "The loaded driver module's cryptographic signature did not match the expected value.",
+        reason:
+            "The loaded driver module's cryptographic signature did not match the expected value.",
         actions: &["Reject driver load", "Log signature details"],
         suggestion: "Re-sign the driver module. Check for tampering. Verify signing key.",
     };
@@ -276,7 +294,8 @@ pub mod codes {
         desc: "DHCP lease acquisition failed",
         reason: "No DHCP server responded to discovery requests within the timeout period.",
         actions: &["Fall back to link-local", "Retry on next interval"],
-        suggestion: "Check network connectivity. Verify DHCP server is running. Check for packet filters.",
+        suggestion:
+            "Check network connectivity. Verify DHCP server is running. Check for packet filters.",
     };
     pub const NET_CHECKSUM_FAILED: ErrorDef = ErrorDef {
         code: "ZN-NET-0003",
@@ -303,7 +322,8 @@ pub mod codes {
         module: ErrorModule::Security,
         severity: LogLevel::Error,
         desc: "Security policy violation detected",
-        reason: "An operation was denied by the system security policy (capabilities, seccomp, LSM).",
+        reason:
+            "An operation was denied by the system security policy (capabilities, seccomp, LSM).",
         actions: &["Deny operation", "Log process credentials", "Audit event"],
         suggestion: "Check process capabilities. Verify security policy configuration.",
     };
@@ -335,9 +355,16 @@ pub struct ErrorEntry {
 impl ErrorEntry {
     const fn new() -> Self {
         ErrorEntry {
-            timestamp: 0, cpu: 0, level: LogLevel::Info,
-            code: [0; 16], module: [0; 24], msg: [0; 128], msg_len: 0,
-            file: [0; 48], line: 0, count: 0,
+            timestamp: 0,
+            cpu: 0,
+            level: LogLevel::Info,
+            code: [0; 16],
+            module: [0; 24],
+            msg: [0; 128],
+            msg_len: 0,
+            file: [0; 48],
+            line: 0,
+            count: 0,
         }
     }
 }
@@ -345,10 +372,23 @@ impl ErrorEntry {
 impl ErrorBuf {
     const fn new() -> Self {
         const EMPTY: ErrorEntry = ErrorEntry::new();
-        ErrorBuf { entries: [EMPTY; ERROR_BUF_SIZE], idx: 0, count: 0 }
+        ErrorBuf {
+            entries: [EMPTY; ERROR_BUF_SIZE],
+            idx: 0,
+            count: 0,
+        }
     }
 
-    fn push(&mut self, cpu: u32, level: LogLevel, code: Option<&str>, module: &str, msg: &str, file: &str, line: u32) {
+    fn push(
+        &mut self,
+        cpu: u32,
+        level: LogLevel,
+        code: Option<&str>,
+        module: &str,
+        msg: &str,
+        file: &str,
+        line: u32,
+    ) {
         let slot = &mut self.entries[self.idx % ERROR_BUF_SIZE];
         slot.timestamp = rdtsc();
         slot.cpu = cpu;
@@ -403,7 +443,7 @@ fn error_code_index(code: &str) -> usize {
     // Map "ZN-XXX-NNNN" to a numeric index
     // Extract the last 4 digits
     if code.len() >= 11 {
-        if let Ok(n) = code[code.len()-4..].parse::<usize>() {
+        if let Ok(n) = code[code.len() - 4..].parse::<usize>() {
             return n % 32;
         }
     }
@@ -412,7 +452,9 @@ fn error_code_index(code: &str) -> usize {
 
 fn bump_error_count(code: &str) {
     let idx = error_code_index(code);
-    unsafe { ERROR_COUNTS[idx] = ERROR_COUNTS[idx].wrapping_add(1); }
+    unsafe {
+        ERROR_COUNTS[idx] = ERROR_COUNTS[idx].wrapping_add(1);
+    }
 }
 
 pub fn get_error_count(code: &str) -> u64 {
@@ -431,7 +473,14 @@ pub fn error_buf_init() {
     ERR_BUF_INIT.store(true, Ordering::Release);
 }
 
-pub fn record_error(level: LogLevel, code: Option<&'static str>, module: &str, msg: &str, file: &str, line: u32) {
+pub fn record_error(
+    level: LogLevel,
+    code: Option<&'static str>,
+    module: &str,
+    msg: &str,
+    file: &str,
+    line: u32,
+) {
     if let Some(c) = code {
         bump_error_count(c);
     }
@@ -461,36 +510,58 @@ fn write_timestamp(s: &mut SerialPort) {
     }
     // Fallback: RDTSC-based relative time
     let tsc = rdtsc();
-    s.write_str("[");
+    let _ = s.write_str(" [");
     let frac = (tsc as u32) / 1000;
     let us = frac % 1000;
     let ms = (frac / 1000) % 1000;
     let sec = frac / 1_000_000;
-    if sec < 10 { s.write_str("0"); }
+    if sec < 10 {
+        s.write_str("0");
+    }
     s.write_u64(sec as u64);
-    s.write_str(".");
-    if ms < 100 { s.write_str("0"); }
-    if ms < 10 { s.write_str("0"); }
+    let _ = s.write_str(".");
+    if ms < 100 {
+        let _ = s.write_str("0");
+    }
+    if ms < 10 {
+        let _ = s.write_str("0");
+    }
     s.write_u64(ms as u64);
-    if us < 100 { s.write_str("0"); }
-    if us < 10 { s.write_str("0"); }
+    if us < 100 {
+        let _ = s.write_str("0");
+    }
+    if us < 10 {
+        let _ = s.write_str("0");
+    }
     s.write_u64(us as u64);
-    s.write_str("]");
+    let _ = s.write_str("]");
 }
 
 /// Compact single-line log output with color support
-pub fn write_compact(s: &mut SerialPort, level: LogLevel, module: &str, code: Option<&str>, msg: &str) {
+pub fn write_compact(
+    s: &mut SerialPort,
+    level: LogLevel,
+    module: &str,
+    code: Option<&str>,
+    msg: &str,
+) {
     write_timestamp(s);
-    let _ = write!(s, " {}{}{}", level_color(level), level_name(level), color::RESET);
+    let _ = write!(
+        s,
+        " {}{}{}",
+        level_color(level),
+        level_name(level),
+        color::RESET
+    );
     s.write_str(" [");
-    s.write_str(module);
-    s.write_str("]");
+    let _ = s.write_str(module);
+    let _ = s.write_str("]");
     if let Some(c) = code {
         s.write_str(" ");
         let _ = write!(s, "{}{}{}", color::BOLD, c, color::RESET);
     }
     s.write_str(" ");
-    s.write_str(msg);
+    let _ = s.write_str(msg);
     s.write_str("\n");
 }
 
@@ -505,7 +576,13 @@ pub fn write_detailed(s: &mut SerialPort, def: &ErrorDef, extra: &str, file: &st
     write_timestamp(s);
     s.write_str("\n");
     write_field(s, "Level", "");
-    let _ = write!(s, "{}{}{}", level_color(def.severity), level_name(def.severity), color::RESET);
+    let _ = write!(
+        s,
+        "{}{}{}",
+        level_color(def.severity),
+        level_name(def.severity),
+        color::RESET
+    );
     s.write_str("\n");
     write_field(s, "Module", def.module.name());
     s.write_str("\n");
@@ -541,7 +618,9 @@ pub fn write_detailed(s: &mut SerialPort, def: &ErrorDef, extra: &str, file: &st
 }
 
 fn write_code_banner(s: &mut SerialPort, def: &ErrorDef) {
-    let _ = write!(s, "  ║ {}{}{} {}",
+    let _ = write!(
+        s,
+        "  ║ {}{}{} {}",
         level_color(def.severity),
         level_name(def.severity),
         color::RESET,
@@ -594,18 +673,26 @@ pub fn dump_error_catalog(s: &mut SerialPort) {
     let mut cur_module: Option<ErrorModule> = None;
     for def in all {
         if cur_module.map(|m| m != def.module).unwrap_or(true) {
-            s.write_str(" ");
+            let _ = s.write_str(" ");
             s.write_str(color::BOLD);
             s.write_str(def.module.name());
             let _ = write!(s, "{}", color::RESET);
             s.write_str("\n");
             s.write_str("  ");
-            for _ in 0..def.module.name().len() { s.write_str("─"); }
+            for _ in 0..def.module.name().len() {
+                s.write_str("─");
+            }
             s.write_str("\n");
             cur_module = Some(def.module);
         }
-        let _ = write!(s, "  {}{:<16}{}  {}",
-            color::BOLD, def.code, color::RESET, def.desc);
+        let _ = write!(
+            s,
+            "  {}{:<16}{}  {}",
+            color::BOLD,
+            def.code,
+            color::RESET,
+            def.desc
+        );
         s.write_str("\n");
         let count = get_error_count(def.code);
         if count > 0 {

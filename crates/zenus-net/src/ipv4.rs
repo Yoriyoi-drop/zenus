@@ -28,7 +28,8 @@ pub fn parse(packet: &[u8]) -> Option<(Ipv4Header, &[u8])> {
         return None;
     }
 
-    let total_length = u16::from_be(unsafe { core::ptr::read_unaligned(ptr.add(2) as *const u16) }) as usize;
+    let total_length =
+        u16::from_be(unsafe { core::ptr::read_unaligned(ptr.add(2) as *const u16) }) as usize;
 
     if total_length < ihl || total_length > packet.len() {
         return None;
@@ -50,8 +51,12 @@ pub fn parse(packet: &[u8]) -> Option<(Ipv4Header, &[u8])> {
         version_ihl,
         dscp_ecn: unsafe { *ptr.add(1) },
         total_length: total_length as u16,
-        identification: u16::from_be(unsafe { core::ptr::read_unaligned(ptr.add(4) as *const u16) }),
-        flags_fragment: u16::from_be(unsafe { core::ptr::read_unaligned(ptr.add(6) as *const u16) }),
+        identification: u16::from_be(unsafe {
+            core::ptr::read_unaligned(ptr.add(4) as *const u16)
+        }),
+        flags_fragment: u16::from_be(unsafe {
+            core::ptr::read_unaligned(ptr.add(6) as *const u16)
+        }),
         ttl: unsafe { *ptr.add(8) },
         protocol: unsafe { *ptr.add(9) },
         checksum: u16::from_be(unsafe { core::ptr::read_unaligned(ptr.add(10) as *const u16) }),
@@ -79,7 +84,13 @@ pub fn internet_checksum(data: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-pub fn send_raw(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
+pub fn send_raw(
+    iface_idx: usize,
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    protocol: u8,
+    payload: &[u8],
+) -> bool {
     let iface = match crate::nic::get_iface(iface_idx) {
         Some(iface) => iface,
         None => return false,

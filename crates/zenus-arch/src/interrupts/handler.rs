@@ -1,5 +1,5 @@
-use x86_64::structures::idt::InterruptStackFrame;
 use core::sync::atomic::AtomicUsize;
+use x86_64::structures::idt::InterruptStackFrame;
 
 static NIC_IRQ_HANDLER: AtomicUsize = AtomicUsize::new(0);
 
@@ -22,7 +22,9 @@ pub fn set_nic_irq_handler(handler: fn()) {
 #[no_mangle]
 pub extern "x86-interrupt" fn interrupt_timer(_frame: InterruptStackFrame) {
     // PIC EOI (master)
-    unsafe { core::arch::asm!("out 0x20, al", in("al") 0x20u8); }
+    unsafe {
+        core::arch::asm!("out 0x20, al", in("al") 0x20u8);
+    }
     // APIC EOI (for ExtINT via LINT0)
     crate::interrupts::apic::eoi();
     crate::interrupts::pit::tick();
@@ -34,7 +36,9 @@ pub extern "x86-interrupt" fn interrupt_timer(_frame: InterruptStackFrame) {
 pub extern "x86-interrupt" fn interrupt_keyboard(_frame: InterruptStackFrame) {
     crate::keyboard::handle_irq1();
     // PIC EOI (master) — required if IRQ1 ever touches the PIC path
-    unsafe { core::arch::asm!("out 0x20, al", in("al") 0x20u8); }
+    unsafe {
+        core::arch::asm!("out 0x20, al", in("al") 0x20u8);
+    }
     crate::interrupts::apic::eoi();
 }
 
@@ -54,8 +58,12 @@ pub extern "x86-interrupt" fn interrupt_serial(_frame: InterruptStackFrame) {
     // because reading the data port (0x3F8) clears the LSR's DR bit.
     loop {
         let lsr: u8;
-        unsafe { core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16, options(nostack, preserves_flags)); }
-        if lsr & 0x01 == 0 { break; }
+        unsafe {
+            core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16, options(nostack, preserves_flags));
+        }
+        if lsr & 0x01 == 0 {
+            break;
+        }
         zenus_console::serial::irq_handler_serial();
     }
     crate::interrupts::apic::eoi();

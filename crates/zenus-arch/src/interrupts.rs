@@ -1,8 +1,8 @@
 pub mod apic;
-pub mod pit;
-pub mod idt;
 pub mod handler;
+pub mod idt;
 pub mod ioapic;
+pub mod pit;
 
 pub fn init() {
     idt::init();

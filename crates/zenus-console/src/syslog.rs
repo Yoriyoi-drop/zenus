@@ -1,5 +1,5 @@
+use crate::log::{dmesg_push, LogLevel};
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::log::{LogLevel, dmesg_push};
 use zenus_sync::spinlock::SpinLock;
 
 pub const SYSLOG_MAX_ENTRIES: usize = 1024;

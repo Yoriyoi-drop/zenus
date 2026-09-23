@@ -1,6 +1,5 @@
+use crate::vfs::{self, DirEntry, FileStat, FileSystem, FileType};
 use core::mem::MaybeUninit;
-use crate::vfs::{self, FileSystem, FileType, FileStat, DirEntry};
-
 
 const MAX_NODES: usize = 128;
 const MAX_NAME: usize = 64;
@@ -177,11 +176,11 @@ impl FileSystem for TmpFs {
                 let len = node.name_len as usize;
                 core::str::from_utf8(&node.name[..len]).unwrap_or("/")
             };
-                entries.push(DirEntry {
-                    name: alloc::string::String::from(name),
-                    file_type: node.file_type,
-                    inode: child as u64,
-                });
+            entries.push(DirEntry {
+                name: alloc::string::String::from(name),
+                file_type: node.file_type,
+                inode: child as u64,
+            });
             child = node.next_sibling as usize;
         }
         entries
@@ -191,7 +190,15 @@ impl FileSystem for TmpFs {
         let nodes = nodes();
         let idx = inode as usize;
         if idx >= *node_count() {
-            return FileStat { size: 0, file_type: FileType::None, inode, blocks: 0, uid: 0, gid: 0, mode: 0 };
+            return FileStat {
+                size: 0,
+                file_type: FileType::None,
+                inode,
+                blocks: 0,
+                uid: 0,
+                gid: 0,
+                mode: 0,
+            };
         }
         let node = &nodes[idx];
         FileStat {
@@ -257,7 +264,9 @@ impl FileSystem for TmpFs {
     fn chmod(&self, inode: u64, mode: u16) -> bool {
         let nodes = nodes();
         let idx = inode as usize;
-        if idx >= *node_count() { return false; }
+        if idx >= *node_count() {
+            return false;
+        }
         nodes[idx].mode = (nodes[idx].mode & 0xF000) | (mode & 0x0FFF);
         true
     }
@@ -265,11 +274,11 @@ impl FileSystem for TmpFs {
     fn chown(&self, inode: u64, uid: u32, gid: u32) -> bool {
         let nodes = nodes();
         let idx = inode as usize;
-        if idx >= *node_count() { return false; }
+        if idx >= *node_count() {
+            return false;
+        }
         nodes[idx].uid = uid;
         nodes[idx].gid = gid;
         true
     }
 }
-
-

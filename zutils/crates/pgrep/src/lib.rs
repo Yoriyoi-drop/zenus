@@ -1,7 +1,7 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
 use zenus_sched::scheduler;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
     let pid_filter = args.get(1).and_then(|a| a.parse::<u64>().ok());
@@ -10,13 +10,17 @@ pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
     w.write_str("PID\tState\t\tCPU\tUID\tGID\r\n");
     for info in tasks.iter().flatten() {
         if let Some(pid) = pid_filter {
-            if info.id != pid { continue; }
+            if info.id != pid {
+                continue;
+            }
         }
         found = true;
         w.write_u64(info.id);
         w.write_str("\t");
         w.write_str(info.state.to_str());
-        for _ in info.state.to_str().len()..16 { w.write_byte(b' '); }
+        for _ in info.state.to_str().len()..16 {
+            w.write_byte(b' ');
+        }
         w.write_u64(info.cpu as u64);
         w.write_str("\t");
         w.write_u64(info.uid as u64);

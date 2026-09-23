@@ -1,8 +1,8 @@
-use zenus_sync::spinlock::SpinLock;
-use zenus_mem::paging;
 use crate::pci::VirtioPciTransport;
-use crate::queue::{VirtioQueue, VirtioQueueMem, VirtioAvail, VirtioDesc, VRING_DESC_F_WRITE};
+use crate::queue::{VirtioAvail, VirtioDesc, VirtioQueue, VirtioQueueMem, VRING_DESC_F_WRITE};
 use crate::QUEUE_SIZE;
+use zenus_mem::paging;
+use zenus_sync::spinlock::SpinLock;
 
 const VIRTIO_NET_F_MAC: u64 = 5;
 const VIRTIO_NET_F_STATUS: u64 = 16;
@@ -24,8 +24,10 @@ struct QueuePair {
 }
 
 static mut QUEUE_MEMS: [VirtioQueueMem; MAX_QUEUE_PAIRS * 2] = [
-    VirtioQueueMem::new(), VirtioQueueMem::new(),
-    VirtioQueueMem::new(), VirtioQueueMem::new(),
+    VirtioQueueMem::new(),
+    VirtioQueueMem::new(),
+    VirtioQueueMem::new(),
+    VirtioQueueMem::new(),
 ];
 
 pub struct VirtioNet {
@@ -69,7 +71,9 @@ impl VirtioNet {
         zenus_console::kinfo!("VIRTIO-NET: Initializing...");
 
         transport.set_device_status(0);
-        while transport.device_status() != 0 { core::hint::spin_loop(); }
+        while transport.device_status() != 0 {
+            core::hint::spin_loop();
+        }
         transport.set_device_status(transport.device_status() | 1);
         transport.set_device_status(transport.device_status() | 2);
 
@@ -88,7 +92,10 @@ impl VirtioNet {
 
         transport.set_device_status(transport.device_status() | 8);
         if transport.device_status() & 8 == 0 {
-            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-NET: FEATURES_OK rejected");
+            zenus_console::kerror_code!(
+                zenus_console::error::codes::DRV_INIT_FAILED,
+                "VIRTIO-NET: FEATURES_OK rejected"
+            );
             return None;
         }
 
@@ -117,22 +124,30 @@ impl VirtioNet {
             let tx_idx = (i * 2 + 1) as u16;
 
             let rx_mem: &'static mut VirtioQueueMem = &mut QUEUE_MEMS[i * 2];
-            let rx_dp = paging::virt_to_phys_raw(cr3, rx_mem as *mut VirtioQueueMem as u64).unwrap_or(0);
+            let rx_dp =
+                paging::virt_to_phys_raw(cr3, rx_mem as *mut VirtioQueueMem as u64).unwrap_or(0);
             let rx_ap = rx_dp + core::mem::size_of::<[VirtioDesc; QUEUE_SIZE]>() as u64;
             let rx_up = rx_ap + core::mem::size_of::<VirtioAvail>() as u64;
             let rx_qsize = transport.setup_queue(rx_idx, rx_dp, rx_ap, rx_up);
             if rx_qsize == 0 {
-                zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-NET: RX queue setup failed");
+                zenus_console::kerror_code!(
+                    zenus_console::error::codes::DRV_INIT_FAILED,
+                    "VIRTIO-NET: RX queue setup failed"
+                );
                 continue;
             }
 
             let tx_mem: &'static mut VirtioQueueMem = &mut QUEUE_MEMS[i * 2 + 1];
-            let tx_dp = paging::virt_to_phys_raw(cr3, tx_mem as *mut VirtioQueueMem as u64).unwrap_or(0);
+            let tx_dp =
+                paging::virt_to_phys_raw(cr3, tx_mem as *mut VirtioQueueMem as u64).unwrap_or(0);
             let tx_ap = tx_dp + core::mem::size_of::<[VirtioDesc; QUEUE_SIZE]>() as u64;
             let tx_up = tx_ap + core::mem::size_of::<VirtioAvail>() as u64;
             let tx_qsize = transport.setup_queue(tx_idx, tx_dp, tx_ap, tx_up);
             if tx_qsize == 0 {
-                zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-NET: TX queue setup failed");
+                zenus_console::kerror_code!(
+                    zenus_console::error::codes::DRV_INIT_FAILED,
+                    "VIRTIO-NET: TX queue setup failed"
+                );
                 continue;
             }
 
@@ -158,7 +173,15 @@ impl VirtioNet {
 
         net.setup_rx_bufs();
 
-        zenus_console::kinfo!("VIRTIO-NET: Ready (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        zenus_console::kinfo!(
+            "VIRTIO-NET: Ready (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+            mac[0],
+            mac[1],
+            mac[2],
+            mac[3],
+            mac[4],
+            mac[5]
+        );
 
         Some(net)
     }
@@ -186,7 +209,9 @@ impl VirtioNet {
     }
 
     fn select_tx_queue(&self) -> usize {
-        self.tx_pair_idx.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % self.num_pairs
+        self.tx_pair_idx
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            % self.num_pairs
     }
 
     pub fn send_raw(&mut self, data: &[u8]) -> bool {

@@ -2,8 +2,8 @@
 
 extern crate alloc;
 
-use zutils_common::{Args, Writer};
 use zenus_fs::vfs::{self, FileSystem as _, FileType};
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
     if args.args().len() < 2 {

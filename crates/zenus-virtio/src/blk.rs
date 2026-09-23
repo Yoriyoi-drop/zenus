@@ -1,12 +1,14 @@
-use core::ptr;
-use alloc::format;
-use alloc::boxed::Box;
-use zenus_sync::spinlock::SpinLock;
-use zenus_mem::paging;
-use zenus_fs::devfs::{self, BlockDeviceOps};
 use crate::pci::VirtioPciTransport;
-use crate::queue::{VirtioQueue, VirtioQueueMem, VirtioAvail, VirtioDesc, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+use crate::queue::{
+    VirtioAvail, VirtioDesc, VirtioQueue, VirtioQueueMem, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE,
+};
 use crate::QUEUE_SIZE;
+use alloc::boxed::Box;
+use alloc::format;
+use core::ptr;
+use zenus_fs::devfs::{self, BlockDeviceOps};
+use zenus_mem::paging;
+use zenus_sync::spinlock::SpinLock;
 
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
@@ -60,7 +62,9 @@ impl VirtioBlk {
         zenus_console::kinfo!("VIRTIO-BLK: Initializing...");
 
         transport.set_device_status(0);
-        while transport.device_status() != 0 { core::hint::spin_loop(); }
+        while transport.device_status() != 0 {
+            core::hint::spin_loop();
+        }
         transport.set_device_status(transport.device_status() | 1);
         transport.set_device_status(transport.device_status() | 2);
 
@@ -69,22 +73,27 @@ impl VirtioBlk {
 
         transport.set_device_status(transport.device_status() | 8);
         if transport.device_status() & 8 == 0 {
-            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-BLK: FEATURES_OK rejected");
+            zenus_console::kerror_code!(
+                zenus_console::error::codes::DRV_INIT_FAILED,
+                "VIRTIO-BLK: FEATURES_OK rejected"
+            );
             return None;
         }
-
-
 
         let cr3 = paging::kernel_cr3();
         let queue_mem: &'static mut VirtioQueueMem = &mut BLK_QUEUE_MEM;
 
-        let dp = paging::virt_to_phys_raw(cr3, queue_mem as *mut VirtioQueueMem as u64).unwrap_or(0);
+        let dp =
+            paging::virt_to_phys_raw(cr3, queue_mem as *mut VirtioQueueMem as u64).unwrap_or(0);
         let ap = dp + core::mem::size_of::<[VirtioDesc; QUEUE_SIZE]>() as u64;
         let up = ap + core::mem::size_of::<VirtioAvail>() as u64;
 
         let size = transport.setup_queue(0, dp, ap, up);
         if size == 0 {
-            zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-BLK: Queue setup failed");
+            zenus_console::kerror_code!(
+                zenus_console::error::codes::DRV_INIT_FAILED,
+                "VIRTIO-BLK: Queue setup failed"
+            );
             return None;
         }
 
@@ -93,7 +102,10 @@ impl VirtioBlk {
         let capacity = {
             let cfg_base = transport.get_device_config_space();
             if cfg_base == 0 {
-                zenus_console::kerror_code!(zenus_console::error::codes::DRV_INIT_FAILED, "VIRTIO-BLK: No device config space");
+                zenus_console::kerror_code!(
+                    zenus_console::error::codes::DRV_INIT_FAILED,
+                    "VIRTIO-BLK: No device config space"
+                );
                 return None;
             }
             let cap = cfg_base as *const u64;
@@ -106,15 +118,28 @@ impl VirtioBlk {
 
         let name = format!("vd{}", dev_idx);
         let name_str = Box::leak(name.into_boxed_str());
-        devfs::register_block_device(name_str, BlockDeviceOps {
-            read: blk_read0,
-            write: blk_write0,
-            size: capacity * 512,
-        });
+        devfs::register_block_device(
+            name_str,
+            BlockDeviceOps {
+                read: blk_read0,
+                write: blk_write0,
+                size: capacity * 512,
+            },
+        );
 
-        zenus_console::kinfo!("VIRTIO-BLK: Capacity: {} sectors ({} MB) registered as /dev/{}", capacity, capacity / 2048, name_str);
+        zenus_console::kinfo!(
+            "VIRTIO-BLK: Capacity: {} sectors ({} MB) registered as /dev/{}",
+            capacity,
+            capacity / 2048,
+            name_str
+        );
 
-        Some(VirtioBlk { capacity, transport, queue, dev_idx })
+        Some(VirtioBlk {
+            capacity,
+            transport,
+            queue,
+            dev_idx,
+        })
     }
 
     pub unsafe fn read_sectors(&mut self, lba: u64, count: u16, buf: &mut [u8]) -> bool {
@@ -134,8 +159,15 @@ impl VirtioBlk {
         let buf_virt = &mut BLK_BUFS[buf_off] as *mut u8 as u64;
         let buf_phys = paging::virt_to_phys_raw(cr3, buf_virt).unwrap_or(0);
 
-        let mut hdr = VirtioBlkReqHdr { type_: VIRTIO_BLK_T_IN, reserved: 0, sector: lba };
-        let mut resp = VirtioBlkResp { status: 0xFF, padding: [0; 15] };
+        let mut hdr = VirtioBlkReqHdr {
+            type_: VIRTIO_BLK_T_IN,
+            reserved: 0,
+            sector: lba,
+        };
+        let mut resp = VirtioBlkResp {
+            status: 0xFF,
+            padding: [0; 15],
+        };
         let hdr_virt = &mut hdr as *mut VirtioBlkReqHdr as u64;
         let hdr_phys = paging::virt_to_phys_raw(cr3, hdr_virt).unwrap_or(0);
         let resp_virt = &mut resp as *mut VirtioBlkResp as u64;
@@ -146,14 +178,22 @@ impl VirtioBlk {
         let d2 = self.queue.alloc_desc().unwrap_or(0);
 
         self.queue.mem.desc[d0 as usize] = VirtioDesc {
-            addr: hdr_phys, len: 16, flags: VRING_DESC_F_NEXT, next: d1,
+            addr: hdr_phys,
+            len: 16,
+            flags: VRING_DESC_F_NEXT,
+            next: d1,
         };
         self.queue.mem.desc[d1 as usize] = VirtioDesc {
-            addr: buf_phys, len: (count as u32) * 512,
-            flags: VRING_DESC_F_WRITE | VRING_DESC_F_NEXT, next: d2,
+            addr: buf_phys,
+            len: (count as u32) * 512,
+            flags: VRING_DESC_F_WRITE | VRING_DESC_F_NEXT,
+            next: d2,
         };
         self.queue.mem.desc[d2 as usize] = VirtioDesc {
-            addr: resp_phys, len: 1, flags: VRING_DESC_F_WRITE, next: 0,
+            addr: resp_phys,
+            len: 1,
+            flags: VRING_DESC_F_WRITE,
+            next: 0,
         };
 
         self.queue.submit(d0);
@@ -195,14 +235,20 @@ impl VirtioBlk {
         let buf_off = (buf_idx as usize) * BLK_BUF_SIZE;
         let cr3 = paging::kernel_cr3();
 
-        BLK_BUFS[buf_off..buf_off + (count as usize) * 512].copy_from_slice(&buf[..(count as usize) * 512]);
+        BLK_BUFS[buf_off..buf_off + (count as usize) * 512]
+            .copy_from_slice(&buf[..(count as usize) * 512]);
         let buf_virt = &mut BLK_BUFS[buf_off] as *mut u8 as u64;
         let buf_phys = paging::virt_to_phys_raw(cr3, buf_virt).unwrap_or(0);
 
         let mut hdr = VirtioBlkReqHdr {
-            type_: VIRTIO_BLK_T_OUT, reserved: 0, sector: lba,
+            type_: VIRTIO_BLK_T_OUT,
+            reserved: 0,
+            sector: lba,
         };
-        let mut resp = VirtioBlkResp { status: 0xFF, padding: [0; 15] };
+        let mut resp = VirtioBlkResp {
+            status: 0xFF,
+            padding: [0; 15],
+        };
         let hdr_virt = &mut hdr as *mut VirtioBlkReqHdr as u64;
         let hdr_phys = paging::virt_to_phys_raw(cr3, hdr_virt).unwrap_or(0);
         let resp_virt = &mut resp as *mut VirtioBlkResp as u64;
@@ -213,14 +259,22 @@ impl VirtioBlk {
         let d2 = self.queue.alloc_desc().unwrap_or(0);
 
         self.queue.mem.desc[d0 as usize] = VirtioDesc {
-            addr: hdr_phys, len: 16, flags: VRING_DESC_F_NEXT, next: d1,
+            addr: hdr_phys,
+            len: 16,
+            flags: VRING_DESC_F_NEXT,
+            next: d1,
         };
         self.queue.mem.desc[d1 as usize] = VirtioDesc {
-            addr: buf_phys, len: (count as u32) * 512,
-            flags: VRING_DESC_F_NEXT, next: d2,
+            addr: buf_phys,
+            len: (count as u32) * 512,
+            flags: VRING_DESC_F_NEXT,
+            next: d2,
         };
         self.queue.mem.desc[d2 as usize] = VirtioDesc {
-            addr: resp_phys, len: 1, flags: VRING_DESC_F_WRITE, next: 0,
+            addr: resp_phys,
+            len: 1,
+            flags: VRING_DESC_F_WRITE,
+            next: 0,
         };
 
         self.queue.submit(d0);

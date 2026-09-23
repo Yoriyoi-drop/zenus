@@ -1,7 +1,7 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
 use zenus_mem::allocator::ALLOCATOR;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     let ticks = zenus_arch::interrupts::pit::get_ticks();
@@ -11,11 +11,21 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     let used = total - free;
 
     w.write_str("=== Zenus Diagnostics ===\r\n");
-    w.write_str("System ticks: "); w.write_u64(ticks); w.write_str("\r\n");
-    w.write_str("HHDM offset:  0x"); w.write_hex(hhdm); w.write_str("\r\n");
-    w.write_str("Heap total:   "); w.write_u64(total as u64); w.write_str(" bytes\r\n");
-    w.write_str("Heap used:    "); w.write_u64(used as u64); w.write_str(" bytes\r\n");
-    w.write_str("Heap free:    "); w.write_u64(free as u64); w.write_str(" bytes\r\n");
+    w.write_str("System ticks: ");
+    w.write_u64(ticks);
+    w.write_str("\r\n");
+    w.write_str("HHDM offset:  0x");
+    w.write_hex(hhdm);
+    w.write_str("\r\n");
+    w.write_str("Heap total:   ");
+    w.write_u64(total as u64);
+    w.write_str(" bytes\r\n");
+    w.write_str("Heap used:    ");
+    w.write_u64(used as u64);
+    w.write_str(" bytes\r\n");
+    w.write_str("Heap free:    ");
+    w.write_u64(free as u64);
+    w.write_str(" bytes\r\n");
 
     if zenus_arch::watchdog::watchdog_is_active() {
         w.write_str("Watchdog:     ACTIVE (");
@@ -26,5 +36,7 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     }
 
     let cpu_count = zenus_arch::smp::cpu_count();
-    w.write_str("CPUs:         "); w.write_u64(cpu_count as u64); w.write_str("\r\n");
+    w.write_str("CPUs:         ");
+    w.write_u64(cpu_count as u64);
+    w.write_str("\r\n");
 }

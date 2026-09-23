@@ -1,5 +1,5 @@
-use core::sync::atomic::AtomicBool;
 use crate::limine;
+use core::sync::atomic::AtomicBool;
 
 const IOAPIC_PHYS_BASE: u64 = 0xFEC00000;
 
@@ -20,7 +20,9 @@ fn ioapic_read(reg: u8) -> u32 {
 fn ioapic_write(reg: u8, val: u32) {
     ioapic_select(reg);
     let data_ptr = (IOAPIC_PHYS_BASE + limine::hhdm_offset() + 0x10) as *mut u32;
-    unsafe { data_ptr.write_volatile(val); }
+    unsafe {
+        data_ptr.write_volatile(val);
+    }
 }
 
 static IOAPIC_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -29,8 +31,17 @@ pub fn init() {
     let ioapic_id = ioapic_read(0x00);
     let ioapic_version = ioapic_read(0x01);
     let max_redir_entries = ((ioapic_version >> 16) & 0xFF) as u8;
-    zenus_console::kinfo!("IOAPIC ID={:#x} version={:#x} max_redir={}", ioapic_id, ioapic_version, max_redir_entries);
-    core::sync::atomic::AtomicBool::store(&IOAPIC_INITIALIZED, true, core::sync::atomic::Ordering::Relaxed);
+    zenus_console::kinfo!(
+        "IOAPIC ID={:#x} version={:#x} max_redir={}",
+        ioapic_id,
+        ioapic_version,
+        max_redir_entries
+    );
+    core::sync::atomic::AtomicBool::store(
+        &IOAPIC_INITIALIZED,
+        true,
+        core::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 pub fn is_initialized() -> bool {

@@ -1,6 +1,6 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
-use core::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use zenus_sync::spinlock::SpinLock;
 
 static HEAP_LOCK: SpinLock<()> = SpinLock::new(());
@@ -45,12 +45,15 @@ impl FreeListAllocator {
 
         let first = heap_start as *mut BlockHeader;
         unsafe {
-            ptr::write(first, BlockHeader {
-                magic: MAGIC_FREE,
-                size: HEAP_SIZE - HEADER_SIZE,
-                next: ptr::null_mut(),
-                canary: CANARY_VALUE,
-            });
+            ptr::write(
+                first,
+                BlockHeader {
+                    magic: MAGIC_FREE,
+                    size: HEAP_SIZE - HEADER_SIZE,
+                    next: ptr::null_mut(),
+                    canary: CANARY_VALUE,
+                },
+            );
         }
         self.free_head.store(heap_start as usize, Ordering::Release);
         self.initialized.store(true, Ordering::Release);
@@ -86,12 +89,15 @@ impl FreeListAllocator {
                     let remaining = block_size - needed;
                     if remaining >= HEADER_SIZE + MIN_BLOCK {
                         let new_block = (data_addr + needed) as *mut BlockHeader;
-                        ptr::write(new_block, BlockHeader {
-                            magic: MAGIC_FREE,
-                            size: remaining - HEADER_SIZE,
-                            next: (*block).next,
-                            canary: CANARY_VALUE,
-                        });
+                        ptr::write(
+                            new_block,
+                            BlockHeader {
+                                magic: MAGIC_FREE,
+                                size: remaining - HEADER_SIZE,
+                                next: (*block).next,
+                                canary: CANARY_VALUE,
+                            },
+                        );
 
                         if prev == 0 {
                             self.free_head.store(new_block as usize, Ordering::Release);
@@ -105,7 +111,8 @@ impl FreeListAllocator {
                         return aligned_data as *mut u8;
                     } else {
                         if prev == 0 {
-                            self.free_head.store((*block).next as usize, Ordering::Release);
+                            self.free_head
+                                .store((*block).next as usize, Ordering::Release);
                         } else {
                             (*(prev as *mut BlockHeader)).next = (*block).next;
                         }
@@ -122,8 +129,12 @@ impl FreeListAllocator {
             }
         }
 
-        zenus_console::kerror_code!(zenus_console::error::codes::MEM_ALLOC_FAILED,
-            "Heap exhausted! free_head={:#x}, size={}", self.free_head.load(Ordering::Relaxed), size);
+        zenus_console::kerror_code!(
+            zenus_console::error::codes::MEM_ALLOC_FAILED,
+            "Heap exhausted! free_head={:#x}, size={}",
+            self.free_head.load(Ordering::Relaxed),
+            size
+        );
         ptr::null_mut()
     }
 
@@ -131,7 +142,9 @@ impl FreeListAllocator {
         let _lock = HEAP_LOCK.lock();
         self.ensure_initialized();
 
-        if ptr.is_null() { return; }
+        if ptr.is_null() {
+            return;
+        }
 
         let raw = unsafe { *((ptr as *const usize).sub(1)) as usize };
         let pad = if raw == CANARY_VALUE as usize { 0 } else { raw };
@@ -142,8 +155,11 @@ impl FreeListAllocator {
                 return;
             }
             if (*block).canary != CANARY_VALUE {
-                zenus_console::kerror_code!(zenus_console::error::codes::MEM_PROTECTION,
-                    "Heap canary corrupted! Block at {:#x}", block as usize);
+                zenus_console::kerror_code!(
+                    zenus_console::error::codes::MEM_PROTECTION,
+                    "Heap canary corrupted! Block at {:#x}",
+                    block as usize
+                );
                 return;
             }
         }
@@ -163,7 +179,9 @@ impl FreeListAllocator {
 
         unsafe {
             while curr != 0 {
-                if curr > block_start { break; }
+                if curr > block_start {
+                    break;
+                }
                 prev = curr;
                 curr = (*(curr as *mut BlockHeader)).next as usize;
             }

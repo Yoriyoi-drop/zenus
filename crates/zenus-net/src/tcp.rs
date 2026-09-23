@@ -128,9 +128,12 @@ fn checksum(src_ip: [u8; 4], dst_ip: [u8; 4], segment: &[u8]) -> u16 {
 }
 
 pub fn build_segment(
-    src_port: u16, dst_port: u16,
-    seq: u32, ack: u32,
-    flags: u8, window: u16,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
     payload: &[u8],
 ) -> [u8; 1500] {
     let mut seg = [0u8; 1500];
@@ -147,16 +150,26 @@ pub fn build_segment(
 }
 
 fn build_syn_segment(
-    src_port: u16, dst_port: u16,
-    seq: u32, ack: u32,
-    flags: u8, window: u16,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
 ) -> [u8; 1500] {
     let mut seg = build_segment(src_port, dst_port, seq, ack, flags, window, &[]);
-    seg[20] = 2; seg[21] = 4;
-    seg[22] = (MSS >> 8) as u8; seg[23] = (MSS & 0xFF) as u8;
-    seg[24] = 3; seg[25] = 3; seg[26] = 7;
-    seg[27] = 4; seg[28] = 2;
-    seg[29] = 1; seg[30] = 1; seg[31] = 1;
+    seg[20] = 2;
+    seg[21] = 4;
+    seg[22] = (MSS >> 8) as u8;
+    seg[23] = (MSS & 0xFF) as u8;
+    seg[24] = 3;
+    seg[25] = 3;
+    seg[26] = 7;
+    seg[27] = 4;
+    seg[28] = 2;
+    seg[29] = 1;
+    seg[30] = 1;
+    seg[31] = 1;
     seg[12] = 0x80;
     seg
 }
@@ -166,7 +179,9 @@ fn add_sack_block(blocks: &mut [(u32, u32); 4], left: u32, right: u32) {
     let mut new_right = right;
     for i in 0..4 {
         let (l, r) = blocks[i];
-        if l == 0 && r == 0 { continue; }
+        if l == 0 && r == 0 {
+            continue;
+        }
         if r >= new_left && l <= new_right {
             new_left = core::cmp::min(new_left, l);
             new_right = core::cmp::max(new_right, r);
@@ -187,9 +202,12 @@ fn add_sack_block(blocks: &mut [(u32, u32); 4], left: u32, right: u32) {
 
 fn send_sack_ack(
     iface_idx: usize,
-    src_ip: [u8; 4], dst_ip: [u8; 4],
-    src_port: u16, dst_port: u16,
-    seq: u32, ack: u32,
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
     window: u16,
     sack_blocks: &[(u32, u32); 4],
 ) {
@@ -242,10 +260,13 @@ fn rand_isn() -> u32 {
     let r = zenus_arch::random::get_random_u64();
     let lo: u32;
     let hi: u32;
-    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack)); }
+    unsafe {
+        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nostack));
+    }
     let rdtsc = (lo as u64) | ((hi as u64) << 32);
     let counter = zenus_arch::interrupts::pit::get_ticks();
-    let mixed = r.wrapping_mul(6364136223846793005)
+    let mixed = r
+        .wrapping_mul(6364136223846793005)
         .wrapping_add(rdtsc)
         .wrapping_add(counter.wrapping_mul(123456789));
     (mixed ^ (mixed >> 16)) as u32
@@ -258,33 +279,33 @@ pub fn listen(port: u16) -> Option<usize> {
     }
     let idx = find_slot(&state)?;
     state.conns[idx] = Some(Tcb {
-            state: TCP_LISTEN,
-            local_ip: [0; 4],
-            local_port: port,
-            remote_ip: [0; 4],
-            remote_port: 0,
-            send_una: 0,
-            send_nxt: 0,
-            recv_nxt: 0,
-            recv_window: 4096,
-            listening: true,
-            rx_data: [0; 4096],
-            rx_data_len: 0,
-            tx_data: [0; 4096],
-            tx_data_len: 0,
-            retry_count: 0,
-            retry_ticks: 0,
-            last_ack: 0,
-            time_wait_ticks: 0,
-            cwnd: INIT_CWND,
-            ssthresh: INIT_SSTHRESH,
-            dupack_count: 0,
-            last_ack_seq: 0,
-            keepalive_probes: 0,
-            keepalive_time: 0,
-            sack_blocks: [(0, 0); 4],
-        });
-        Some(idx)
+        state: TCP_LISTEN,
+        local_ip: [0; 4],
+        local_port: port,
+        remote_ip: [0; 4],
+        remote_port: 0,
+        send_una: 0,
+        send_nxt: 0,
+        recv_nxt: 0,
+        recv_window: 4096,
+        listening: true,
+        rx_data: [0; 4096],
+        rx_data_len: 0,
+        tx_data: [0; 4096],
+        tx_data_len: 0,
+        retry_count: 0,
+        retry_ticks: 0,
+        last_ack: 0,
+        time_wait_ticks: 0,
+        cwnd: INIT_CWND,
+        ssthresh: INIT_SSTHRESH,
+        dupack_count: 0,
+        last_ack_seq: 0,
+        keepalive_probes: 0,
+        keepalive_time: 0,
+        sack_blocks: [(0, 0); 4],
+    });
+    Some(idx)
 }
 
 pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16) -> Option<usize> {
@@ -298,12 +319,7 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
     }
     let isn = rand_isn();
 
-    let mut seg = build_syn_segment(
-        local_port, dst_port,
-        isn, 0,
-        TCP_FLAG_SYN,
-        65535,
-    );
+    let mut seg = build_syn_segment(local_port, dst_port, isn, 0, TCP_FLAG_SYN, 65535);
     let csum = checksum(local_ip, dst_ip, &seg[..32]);
     seg[16] = (csum >> 8) as u8;
     seg[17] = (csum & 0xFF) as u8;
@@ -313,43 +329,44 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
     }
 
     state.conns[idx] = Some(Tcb {
-            state: TCP_SYN_SENT,
-            local_ip,
-            local_port,
-            remote_ip: dst_ip,
-            remote_port: dst_port,
-            send_una: isn,
-            send_nxt: isn + 1,
-            recv_nxt: 0,
-            recv_window: 4096,
-            listening: false,
-            rx_data: [0; 4096],
-            rx_data_len: 0,
-            tx_data: [0; 4096],
-            tx_data_len: 0,
-            retry_count: MAX_RETRIES,
-            retry_ticks: RETRY_INTERVAL,
-            last_ack: 0,
-            time_wait_ticks: 0,
-            cwnd: INIT_CWND,
-            ssthresh: INIT_SSTHRESH,
-            dupack_count: 0,
-            last_ack_seq: 0,
-            keepalive_probes: 0,
-            keepalive_time: 0,
-            sack_blocks: [(0, 0); 4],
-        });
+        state: TCP_SYN_SENT,
+        local_ip,
+        local_port,
+        remote_ip: dst_ip,
+        remote_port: dst_port,
+        send_una: isn,
+        send_nxt: isn + 1,
+        recv_nxt: 0,
+        recv_window: 4096,
+        listening: false,
+        rx_data: [0; 4096],
+        rx_data_len: 0,
+        tx_data: [0; 4096],
+        tx_data_len: 0,
+        retry_count: MAX_RETRIES,
+        retry_ticks: RETRY_INTERVAL,
+        last_ack: 0,
+        time_wait_ticks: 0,
+        cwnd: INIT_CWND,
+        ssthresh: INIT_SSTHRESH,
+        dupack_count: 0,
+        last_ack_seq: 0,
+        keepalive_probes: 0,
+        keepalive_time: 0,
+        sack_blocks: [(0, 0); 4],
+    });
 
-        zenus_console::kdebug!("TCP connect sending SYN from {}->{} isn={}", local_port, dst_port, isn);
+    zenus_console::kdebug!(
+        "TCP connect sending SYN from {}->{} isn={}",
+        local_port,
+        dst_port,
+        isn
+    );
 
-        Some(idx)
+    Some(idx)
 }
 
-pub fn handle_receive(
-    iface_idx: usize,
-    src_ip: [u8; 4], dst_ip: [u8; 4],
-    segment: &[u8],
-) -> bool {
+pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segment: &[u8]) -> bool {
     let mut state = TCP_STATE.lock();
     if segment.len() < 20 {
         return false;
@@ -370,17 +387,34 @@ pub fn handle_receive(
     }
     let payload = &segment[hdr_len..];
 
-    let log = if (flags & TCP_FLAG_SYN) != 0 || (flags & TCP_FLAG_FIN) != 0 || (flags & TCP_FLAG_RST) != 0 || !payload.is_empty() {
+    let log = if (flags & TCP_FLAG_SYN) != 0
+        || (flags & TCP_FLAG_FIN) != 0
+        || (flags & TCP_FLAG_RST) != 0
+        || !payload.is_empty()
+    {
         true
     } else {
         false
     };
 
     if log {
-        zenus_console::kdebug!("TCP-IN {}.{}.{}.{}:{}->{}.{}.{}.{}:{} flg=0x{:x} seq={} ack={} plen={}",
-            src_ip[0], src_ip[1], src_ip[2], src_ip[3], src_port,
-            dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port,
-            flags, seq, ack, payload.len());
+        zenus_console::kdebug!(
+            "TCP-IN {}.{}.{}.{}:{}->{}.{}.{}.{}:{} flg=0x{:x} seq={} ack={} plen={}",
+            src_ip[0],
+            src_ip[1],
+            src_ip[2],
+            src_ip[3],
+            src_port,
+            dst_ip[0],
+            dst_ip[1],
+            dst_ip[2],
+            dst_ip[3],
+            dst_port,
+            flags,
+            seq,
+            ack,
+            payload.len()
+        );
     }
 
     let conn_idx = {
@@ -390,10 +424,11 @@ pub fn handle_receive(
                 Some(tcb) if tcb.listening && tcb.local_port == dst_port => {
                     found = Some(i);
                 }
-                Some(tcb) if !tcb.listening
-                    && tcb.local_port == dst_port
-                    && tcb.remote_port == src_port
-                    && tcb.remote_ip == src_ip =>
+                Some(tcb)
+                    if !tcb.listening
+                        && tcb.local_port == dst_port
+                        && tcb.remote_port == src_port
+                        && tcb.remote_ip == src_ip =>
                 {
                     found = Some(i);
                 }
@@ -408,7 +443,15 @@ pub fn handle_receive(
         None => {
             if (flags & TCP_FLAG_RST) == 0 && (flags & TCP_FLAG_SYN) == 0 {
                 let rst_seq = if (flags & TCP_FLAG_ACK) != 0 { ack } else { 0 };
-                let mut rst = build_segment(dst_port, src_port, rst_seq, seq + payload.len() as u32 + if (flags & TCP_FLAG_FIN) != 0 { 1 } else { 0 }, TCP_FLAG_RST | TCP_FLAG_ACK, 0, &[]);
+                let mut rst = build_segment(
+                    dst_port,
+                    src_port,
+                    rst_seq,
+                    seq + payload.len() as u32 + if (flags & TCP_FLAG_FIN) != 0 { 1 } else { 0 },
+                    TCP_FLAG_RST | TCP_FLAG_ACK,
+                    0,
+                    &[],
+                );
                 let csum = checksum(dst_ip, src_ip, &rst[..20]);
                 rst[16] = (csum >> 8) as u8;
                 rst[17] = (csum & 0xFF) as u8;
@@ -432,64 +475,107 @@ pub fn handle_receive(
         TCP_LISTEN => {
             if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) == 0 {
                 let child = match find_slot(&state) {
-                        Some(idx) => idx,
-                        None => return false,
-                    };
-                    let isn = rand_isn();
+                    Some(idx) => idx,
+                    None => return false,
+                };
+                let isn = rand_isn();
 
-                    let mut syn_ack = build_segment(
-                        dst_port, src_port,
-                        isn, seq + 1,
-                        TCP_FLAG_SYN | TCP_FLAG_ACK,
-                        65535,
-                        &[],
-                    );
-                    let csum = checksum(dst_ip, src_ip, &syn_ack[..20]);
-                    syn_ack[16] = (csum >> 8) as u8;
-                    syn_ack[17] = (csum & 0xFF) as u8;
-                    let sent = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &syn_ack[..20]);
+                let mut syn_ack = build_segment(
+                    dst_port,
+                    src_port,
+                    isn,
+                    seq + 1,
+                    TCP_FLAG_SYN | TCP_FLAG_ACK,
+                    65535,
+                    &[],
+                );
+                let csum = checksum(dst_ip, src_ip, &syn_ack[..20]);
+                syn_ack[16] = (csum >> 8) as u8;
+                syn_ack[17] = (csum & 0xFF) as u8;
+                let sent = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &syn_ack[..20]);
 
-                    if sent {
-                        state.conns[child] = Some(Tcb {
-                            state: TCP_SYN_RECEIVED,
-                            local_ip: dst_ip,
-                            local_port: dst_port,
-                            remote_ip: src_ip,
-                            remote_port: src_port,
-                            send_una: isn,
-                            send_nxt: isn + 1,
-                            recv_nxt: seq + 1,
-                            recv_window: 4096,
-                            listening: false,
-                            rx_data: [0; 4096],
-                            rx_data_len: 0,
-                            tx_data: [0; 4096],
-                            tx_data_len: 0,
-                            retry_count: MAX_RETRIES,
-                            retry_ticks: RETRY_INTERVAL,
-                            last_ack: 0,
-                            time_wait_ticks: 0,
-                            cwnd: INIT_CWND,
-                            ssthresh: INIT_SSTHRESH,
-                            dupack_count: 0,
-                            last_ack_seq: 0,
-                            keepalive_probes: 0,
-                            keepalive_time: 0,
-                            sack_blocks: [(0, 0); 4],
-                        });
-                    }
+                if sent {
+                    state.conns[child] = Some(Tcb {
+                        state: TCP_SYN_RECEIVED,
+                        local_ip: dst_ip,
+                        local_port: dst_port,
+                        remote_ip: src_ip,
+                        remote_port: src_port,
+                        send_una: isn,
+                        send_nxt: isn + 1,
+                        recv_nxt: seq + 1,
+                        recv_window: 4096,
+                        listening: false,
+                        rx_data: [0; 4096],
+                        rx_data_len: 0,
+                        tx_data: [0; 4096],
+                        tx_data_len: 0,
+                        retry_count: MAX_RETRIES,
+                        retry_ticks: RETRY_INTERVAL,
+                        last_ack: 0,
+                        time_wait_ticks: 0,
+                        cwnd: INIT_CWND,
+                        ssthresh: INIT_SSTHRESH,
+                        dupack_count: 0,
+                        last_ack_seq: 0,
+                        keepalive_probes: 0,
+                        keepalive_time: 0,
+                        sack_blocks: [(0, 0); 4],
+                    });
                 }
             }
+        }
 
-            TCP_SYN_SENT => {
-                if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) != 0 {
-                    tcb.recv_nxt = seq + 1;
-                    tcb.send_una = ack;
-                    tcb.recv_window = window;
+        TCP_SYN_SENT => {
+            if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) != 0 {
+                tcb.recv_nxt = seq + 1;
+                tcb.send_una = ack;
+                tcb.recv_window = window;
 
+                let mut ack_seg = build_segment(
+                    dst_port,
+                    src_port,
+                    tcb.send_nxt,
+                    tcb.recv_nxt,
+                    TCP_FLAG_ACK,
+                    tcb.recv_window,
+                    &[],
+                );
+                let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
+                ack_seg[16] = (csum >> 8) as u8;
+                ack_seg[17] = (csum & 0xFF) as u8;
+                ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
+
+                tcb.state = TCP_ESTABLISHED;
+                tcb.retry_count = 0;
+                tcb.retry_ticks = 0;
+
+                zenus_console::kdebug!("TCP connection ESTABLISHED");
+            } else if (flags & TCP_FLAG_SYN) != 0 {
+                let mut syn_ack = build_segment(
+                    dst_port,
+                    src_port,
+                    tcb.send_nxt,
+                    seq + 1,
+                    TCP_FLAG_SYN | TCP_FLAG_ACK,
+                    tcb.recv_window,
+                    &[],
+                );
+                let csum = checksum(dst_ip, src_ip, &syn_ack[..20]);
+                syn_ack[16] = (csum >> 8) as u8;
+                syn_ack[17] = (csum & 0xFF) as u8;
+                ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &syn_ack[..20]);
+            }
+        }
+
+        TCP_SYN_RECEIVED => {
+            if (flags & TCP_FLAG_ACK) != 0 {
+                if seq != tcb.recv_nxt {
                     let mut ack_seg = build_segment(
-                        dst_port, src_port,
-                        tcb.send_nxt, tcb.recv_nxt,
+                        dst_port,
+                        src_port,
+                        tcb.send_nxt,
+                        tcb.recv_nxt,
                         TCP_FLAG_ACK,
                         tcb.recv_window,
                         &[],
@@ -497,134 +583,31 @@ pub fn handle_receive(
                     let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
                     ack_seg[16] = (csum >> 8) as u8;
                     ack_seg[17] = (csum & 0xFF) as u8;
-                    ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
-
+                    let _ = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
+                } else {
                     tcb.state = TCP_ESTABLISHED;
+                    tcb.send_una = ack;
+                    tcb.recv_window = window;
                     tcb.retry_count = 0;
                     tcb.retry_ticks = 0;
 
-                    zenus_console::kdebug!("TCP connection ESTABLISHED");
-                } else if (flags & TCP_FLAG_SYN) != 0 {
-                    let mut syn_ack = build_segment(
-                        dst_port, src_port,
-                        tcb.send_nxt, seq + 1,
-                        TCP_FLAG_SYN | TCP_FLAG_ACK,
-                        tcb.recv_window,
-                        &[],
-                    );
-                    let csum = checksum(dst_ip, src_ip, &syn_ack[..20]);
-                    syn_ack[16] = (csum >> 8) as u8;
-                    syn_ack[17] = (csum & 0xFF) as u8;
-                    ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &syn_ack[..20]);
-                }
-            }
+                    zenus_console::kdebug!("TCP SYN_RCVD->ESTABLISHED");
 
-            TCP_SYN_RECEIVED => {
-                if (flags & TCP_FLAG_ACK) != 0 {
-                    if seq != tcb.recv_nxt {
-                        let mut ack_seg = build_segment(
-                            dst_port, src_port,
-                            tcb.send_nxt, tcb.recv_nxt,
-                            TCP_FLAG_ACK,
-                            tcb.recv_window,
-                            &[],
-                        );
-                        let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
-                        ack_seg[16] = (csum >> 8) as u8;
-                        ack_seg[17] = (csum & 0xFF) as u8;
-                        let _ = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
-                    } else {
-                        tcb.state = TCP_ESTABLISHED;
-                        tcb.send_una = ack;
-                        tcb.recv_window = window;
-                        tcb.retry_count = 0;
-                        tcb.retry_ticks = 0;
-
-                        zenus_console::kdebug!("TCP SYN_RCVD->ESTABLISHED");
-
-                        if !payload.is_empty() {
-                            let copy_len = core::cmp::min(payload.len(), tcb.rx_data.len() - tcb.rx_data_len);
-                            if copy_len > 0 {
-                                tcb.rx_data[tcb.rx_data_len..tcb.rx_data_len + copy_len].copy_from_slice(&payload[..copy_len]);
-                                tcb.rx_data_len += copy_len;
-                            }
-                            tcb.recv_nxt = seq + copy_len as u32;
-
-                            let mut ack_seg = build_segment(
-                                dst_port, src_port,
-                                tcb.send_nxt, tcb.recv_nxt,
-                                TCP_FLAG_ACK,
-                                tcb.recv_window,
-                                &[],
-                            );
-                            let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
-                            ack_seg[16] = (csum >> 8) as u8;
-                            ack_seg[17] = (csum & 0xFF) as u8;
-                            let _ = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
-                        }
-                    }
-                } else if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) == 0 {
-                    let mut syn_ack = build_segment(
-                        dst_port, src_port,
-                        tcb.send_una, tcb.recv_nxt,
-                        TCP_FLAG_SYN | TCP_FLAG_ACK,
-                        tcb.recv_window,
-                        &[],
-                    );
-                    let csum = checksum(dst_ip, src_ip, &syn_ack[..20]);
-                    syn_ack[16] = (csum >> 8) as u8;
-                    syn_ack[17] = (csum & 0xFF) as u8;
-                    ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &syn_ack[..20]);
-                }
-            }
-
-            TCP_ESTABLISHED | TCP_CLOSE_WAIT => {
-                if (flags & TCP_FLAG_ACK) != 0 {
-                    if seq_before(tcb.send_una, ack) && seq_before_eq(ack, tcb.send_nxt) {
-                        let acked_bytes = ack.wrapping_sub(tcb.send_una);
-                        tcb.send_una = ack;
-                        // Remove acknowledged data from tx buffer
-                        if acked_bytes as usize <= tcb.tx_data_len {
-                            let acked = acked_bytes as usize;
-                            if acked < tcb.tx_data_len {
-                                tcb.tx_data.copy_within(acked..tcb.tx_data_len, 0);
-                            }
-                            tcb.tx_data_len -= acked;
-                        }
-                        if !seq_before(tcb.send_una, tcb.send_nxt) {
-                            tcb.retry_count = 0;
-                            tcb.retry_ticks = 0;
-                        }
-                    }
-                    tcb.recv_window = window;
-                }
-
-                if !payload.is_empty() && (flags & TCP_FLAG_ACK) != 0 {
-                    if seq == tcb.recv_nxt {
-                        let copy_len = core::cmp::min(payload.len(), tcb.rx_data.len() - tcb.rx_data_len);
+                    if !payload.is_empty() {
+                        let copy_len =
+                            core::cmp::min(payload.len(), tcb.rx_data.len() - tcb.rx_data_len);
                         if copy_len > 0 {
-                            tcb.rx_data[tcb.rx_data_len..tcb.rx_data_len + copy_len].copy_from_slice(&payload[..copy_len]);
+                            tcb.rx_data[tcb.rx_data_len..tcb.rx_data_len + copy_len]
+                                .copy_from_slice(&payload[..copy_len]);
                             tcb.rx_data_len += copy_len;
                         }
                         tcb.recv_nxt = seq + copy_len as u32;
 
-                        let window = 65535u16.saturating_sub(tcb.rx_data_len as u16);
-
                         let mut ack_seg = build_segment(
-                            dst_port, src_port,
-                            tcb.send_nxt, tcb.recv_nxt,
-                            TCP_FLAG_ACK,
-                            window,
-                            &[],
-                        );
-                        let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
-                        ack_seg[16] = (csum >> 8) as u8;
-                        ack_seg[17] = (csum & 0xFF) as u8;
-                        let _ = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
-                    } else {
-                        let mut ack_seg = build_segment(
-                            dst_port, src_port,
-                            tcb.send_nxt, tcb.recv_nxt,
+                            dst_port,
+                            src_port,
+                            tcb.send_nxt,
+                            tcb.recv_nxt,
                             TCP_FLAG_ACK,
                             tcb.recv_window,
                             &[],
@@ -635,77 +618,76 @@ pub fn handle_receive(
                         let _ = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
                     }
                 }
+            } else if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) == 0 {
+                let mut syn_ack = build_segment(
+                    dst_port,
+                    src_port,
+                    tcb.send_una,
+                    tcb.recv_nxt,
+                    TCP_FLAG_SYN | TCP_FLAG_ACK,
+                    tcb.recv_window,
+                    &[],
+                );
+                let csum = checksum(dst_ip, src_ip, &syn_ack[..20]);
+                syn_ack[16] = (csum >> 8) as u8;
+                syn_ack[17] = (csum & 0xFF) as u8;
+                ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &syn_ack[..20]);
+            }
+        }
 
-                if (flags & TCP_FLAG_FIN) != 0 {
-                    tcb.recv_nxt = tcb.recv_nxt.wrapping_add(1);
-                    if tcb.state == TCP_ESTABLISHED {
-                        tcb.state = TCP_CLOSE_WAIT;
+        TCP_ESTABLISHED | TCP_CLOSE_WAIT => {
+            if (flags & TCP_FLAG_ACK) != 0 {
+                if seq_before(tcb.send_una, ack) && seq_before_eq(ack, tcb.send_nxt) {
+                    let acked_bytes = ack.wrapping_sub(tcb.send_una);
+                    tcb.send_una = ack;
+                    // Remove acknowledged data from tx buffer
+                    if acked_bytes as usize <= tcb.tx_data_len {
+                        let acked = acked_bytes as usize;
+                        if acked < tcb.tx_data_len {
+                            tcb.tx_data.copy_within(acked..tcb.tx_data_len, 0);
+                        }
+                        tcb.tx_data_len -= acked;
                     }
-                    let mut ack_seg = build_segment(
-                        dst_port, src_port,
-                        tcb.send_nxt, tcb.recv_nxt,
-                        TCP_FLAG_ACK,
-                        tcb.recv_window,
-                        &[],
-                    );
-                    let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
-                    ack_seg[16] = (csum >> 8) as u8;
-                    ack_seg[17] = (csum & 0xFF) as u8;
-                    ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
-                }
-            }
-
-            TCP_FIN_WAIT1 => {
-                if (flags & TCP_FLAG_RST) != 0 {
-                    tcb.state = TCP_CLOSED;
-                } else if (flags & TCP_FLAG_ACK) != 0 {
-                    if ack >= tcb.send_nxt {
-                        tcb.state = TCP_FIN_WAIT2;
+                    if !seq_before(tcb.send_una, tcb.send_nxt) {
+                        tcb.retry_count = 0;
+                        tcb.retry_ticks = 0;
                     }
                 }
-                if (flags & TCP_FLAG_FIN) != 0 {
-                    tcb.recv_nxt = seq + payload.len() as u32 + 1;
+                tcb.recv_window = window;
+            }
+
+            if !payload.is_empty() && (flags & TCP_FLAG_ACK) != 0 {
+                if seq == tcb.recv_nxt {
+                    let copy_len =
+                        core::cmp::min(payload.len(), tcb.rx_data.len() - tcb.rx_data_len);
+                    if copy_len > 0 {
+                        tcb.rx_data[tcb.rx_data_len..tcb.rx_data_len + copy_len]
+                            .copy_from_slice(&payload[..copy_len]);
+                        tcb.rx_data_len += copy_len;
+                    }
+                    tcb.recv_nxt = seq + copy_len as u32;
+
+                    let window = 65535u16.saturating_sub(tcb.rx_data_len as u16);
+
                     let mut ack_seg = build_segment(
-                        dst_port, src_port,
-                        tcb.send_nxt, tcb.recv_nxt,
+                        dst_port,
+                        src_port,
+                        tcb.send_nxt,
+                        tcb.recv_nxt,
                         TCP_FLAG_ACK,
-                        tcb.recv_window,
+                        window,
                         &[],
                     );
                     let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
                     ack_seg[16] = (csum >> 8) as u8;
                     ack_seg[17] = (csum & 0xFF) as u8;
-                    ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
-                    tcb.state = TCP_CLOSING;
-                }
-            }
-
-            TCP_FIN_WAIT2 => {
-                if (flags & TCP_FLAG_RST) != 0 {
-                    tcb.state = TCP_CLOSED;
-                } else if (flags & TCP_FLAG_FIN) != 0 {
-                    tcb.recv_nxt = seq + payload.len() as u32 + 1;
+                    let _ = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
+                } else {
                     let mut ack_seg = build_segment(
-                        dst_port, src_port,
-                        tcb.send_nxt, tcb.recv_nxt,
-                        TCP_FLAG_ACK,
-                        tcb.recv_window,
-                        &[],
-                    );
-                    let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
-                    ack_seg[16] = (csum >> 8) as u8;
-                    ack_seg[17] = (csum & 0xFF) as u8;
-                    ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
-                    tcb.state = TCP_TIME_WAIT;
-                    tcb.time_wait_ticks = 20;
-                }
-            }
-
-            TCP_TIME_WAIT => {
-                if (flags & TCP_FLAG_FIN) != 0 {
-                    let mut ack_seg = build_segment(
-                        dst_port, src_port,
-                        tcb.send_nxt, tcb.recv_nxt,
+                        dst_port,
+                        src_port,
+                        tcb.send_nxt,
+                        tcb.recv_nxt,
                         TCP_FLAG_ACK,
                         tcb.recv_window,
                         &[],
@@ -717,27 +699,116 @@ pub fn handle_receive(
                 }
             }
 
-            TCP_CLOSING => {
-                if (flags & TCP_FLAG_ACK) != 0 {
-                    if ack >= tcb.send_nxt {
-                        tcb.state = TCP_TIME_WAIT;
-                        tcb.time_wait_ticks = 20;
-                    }
+            if (flags & TCP_FLAG_FIN) != 0 {
+                tcb.recv_nxt = tcb.recv_nxt.wrapping_add(1);
+                if tcb.state == TCP_ESTABLISHED {
+                    tcb.state = TCP_CLOSE_WAIT;
                 }
+                let mut ack_seg = build_segment(
+                    dst_port,
+                    src_port,
+                    tcb.send_nxt,
+                    tcb.recv_nxt,
+                    TCP_FLAG_ACK,
+                    tcb.recv_window,
+                    &[],
+                );
+                let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
+                ack_seg[16] = (csum >> 8) as u8;
+                ack_seg[17] = (csum & 0xFF) as u8;
+                ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
             }
-
-            TCP_LAST_ACK => {
-                if (flags & TCP_FLAG_RST) != 0 {
-                    tcb.state = TCP_CLOSED;
-                } else if (flags & TCP_FLAG_ACK) != 0 {
-                    if ack >= tcb.send_nxt {
-                        tcb.state = TCP_CLOSED;
-                    }
-                }
-            }
-
-            _ => {}
         }
+
+        TCP_FIN_WAIT1 => {
+            if (flags & TCP_FLAG_RST) != 0 {
+                tcb.state = TCP_CLOSED;
+            } else if (flags & TCP_FLAG_ACK) != 0 {
+                if ack >= tcb.send_nxt {
+                    tcb.state = TCP_FIN_WAIT2;
+                }
+            }
+            if (flags & TCP_FLAG_FIN) != 0 {
+                tcb.recv_nxt = seq + payload.len() as u32 + 1;
+                let mut ack_seg = build_segment(
+                    dst_port,
+                    src_port,
+                    tcb.send_nxt,
+                    tcb.recv_nxt,
+                    TCP_FLAG_ACK,
+                    tcb.recv_window,
+                    &[],
+                );
+                let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
+                ack_seg[16] = (csum >> 8) as u8;
+                ack_seg[17] = (csum & 0xFF) as u8;
+                ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
+                tcb.state = TCP_CLOSING;
+            }
+        }
+
+        TCP_FIN_WAIT2 => {
+            if (flags & TCP_FLAG_RST) != 0 {
+                tcb.state = TCP_CLOSED;
+            } else if (flags & TCP_FLAG_FIN) != 0 {
+                tcb.recv_nxt = seq + payload.len() as u32 + 1;
+                let mut ack_seg = build_segment(
+                    dst_port,
+                    src_port,
+                    tcb.send_nxt,
+                    tcb.recv_nxt,
+                    TCP_FLAG_ACK,
+                    tcb.recv_window,
+                    &[],
+                );
+                let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
+                ack_seg[16] = (csum >> 8) as u8;
+                ack_seg[17] = (csum & 0xFF) as u8;
+                ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
+                tcb.state = TCP_TIME_WAIT;
+                tcb.time_wait_ticks = 20;
+            }
+        }
+
+        TCP_TIME_WAIT => {
+            if (flags & TCP_FLAG_FIN) != 0 {
+                let mut ack_seg = build_segment(
+                    dst_port,
+                    src_port,
+                    tcb.send_nxt,
+                    tcb.recv_nxt,
+                    TCP_FLAG_ACK,
+                    tcb.recv_window,
+                    &[],
+                );
+                let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
+                ack_seg[16] = (csum >> 8) as u8;
+                ack_seg[17] = (csum & 0xFF) as u8;
+                let _ = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
+            }
+        }
+
+        TCP_CLOSING => {
+            if (flags & TCP_FLAG_ACK) != 0 {
+                if ack >= tcb.send_nxt {
+                    tcb.state = TCP_TIME_WAIT;
+                    tcb.time_wait_ticks = 20;
+                }
+            }
+        }
+
+        TCP_LAST_ACK => {
+            if (flags & TCP_FLAG_RST) != 0 {
+                tcb.state = TCP_CLOSED;
+            } else if (flags & TCP_FLAG_ACK) != 0 {
+                if ack >= tcb.send_nxt {
+                    tcb.state = TCP_CLOSED;
+                }
+            }
+        }
+
+        _ => {}
+    }
 
     true
 }
@@ -746,99 +817,114 @@ pub fn poll_retransmit(iface_idx: usize) {
     let mut state = TCP_STATE.lock();
     for i in 0..MAX_CONNS {
         let tcb = match &mut state.conns[i] {
-                Some(t) => t,
-                None => continue,
-            };
-            if tcb.listening {
-                continue;
-            }
-            if tcb.state == TCP_TIME_WAIT {
-                if tcb.time_wait_ticks == 0 {
-                    tcb.time_wait_ticks = 20;
-                } else {
-                    tcb.time_wait_ticks -= 1;
-                    if tcb.time_wait_ticks == 0 {
-                        tcb.state = TCP_CLOSED;
-                    }
-                }
-                continue;
-            }
-            match tcb.state {
-                TCP_SYN_SENT | TCP_SYN_RECEIVED | TCP_ESTABLISHED | TCP_CLOSE_WAIT | TCP_LAST_ACK | TCP_FIN_WAIT1 | TCP_CLOSING => {}
-                _ => continue,
-            }
-            if !seq_before(tcb.send_una, tcb.send_nxt) {
-                tcb.retry_count = 0;
-                tcb.retry_ticks = 0;
-                continue;
-            }
-            if tcb.retry_count == 0 {
-                continue;
-            }
-            if tcb.retry_ticks > 0 {
-                tcb.retry_ticks -= 1;
-                continue;
-            }
-
-            let remote_ip = tcb.remote_ip;
-            let local_ip = tcb.local_ip;
-            let src_port = tcb.local_port;
-            let dst_port = tcb.remote_port;
-            let send_una = tcb.send_una;
-
-            if tcb.state == TCP_SYN_SENT || tcb.state == TCP_SYN_RECEIVED {
-                let mut seg = build_segment(
-                    src_port, dst_port,
-                    send_una, tcb.recv_nxt,
-                    if tcb.state == TCP_SYN_SENT { TCP_FLAG_SYN } else { TCP_FLAG_SYN | TCP_FLAG_ACK },
-                    tcb.recv_window,
-                    &[],
-                );
-                let csum = checksum(local_ip, remote_ip, &seg[..20]);
-                seg[16] = (csum >> 8) as u8;
-                seg[17] = (csum & 0xFF) as u8;
-                ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..20]);
-            } else if tcb.state == TCP_LAST_ACK || tcb.state == TCP_FIN_WAIT1 || tcb.state == TCP_CLOSING {
-                let mut seg = build_segment(
-                    src_port, dst_port,
-                    send_una, tcb.recv_nxt,
-                    TCP_FLAG_FIN | TCP_FLAG_ACK,
-                    tcb.recv_window,
-                    &[],
-                );
-                let csum = checksum(local_ip, remote_ip, &seg[..20]);
-                seg[16] = (csum >> 8) as u8;
-                seg[17] = (csum & 0xFF) as u8;
-                ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..20]);
-            } else {
-                let payload = &tcb.tx_data[..core::cmp::min(tcb.tx_data_len, 1460)];
-                let seg_len = 20 + payload.len();
-                let mut seg = build_segment(
-                    src_port, dst_port,
-                    send_una,
-                    tcb.recv_nxt,
-                    TCP_FLAG_ACK | TCP_FLAG_PSH,
-                    tcb.recv_window,
-                    payload,
-                );
-                let csum = checksum(local_ip, remote_ip, &seg[..seg_len]);
-                seg[16] = (csum >> 8) as u8;
-                seg[17] = (csum & 0xFF) as u8;
-                ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..seg_len]);
-            }
-
-            tcb.retry_count -= 1;
-            tcb.retry_ticks = RETRY_INTERVAL;
-
-            if tcb.retry_count == 0 {
-                zenus_console::kwarn!("TCP retry exhausted, closing conn {}", i);
-                tcb.state = TCP_CLOSED;
-            }
+            Some(t) => t,
+            None => continue,
+        };
+        if tcb.listening {
+            continue;
         }
+        if tcb.state == TCP_TIME_WAIT {
+            if tcb.time_wait_ticks == 0 {
+                tcb.time_wait_ticks = 20;
+            } else {
+                tcb.time_wait_ticks -= 1;
+                if tcb.time_wait_ticks == 0 {
+                    tcb.state = TCP_CLOSED;
+                }
+            }
+            continue;
+        }
+        match tcb.state {
+            TCP_SYN_SENT | TCP_SYN_RECEIVED | TCP_ESTABLISHED | TCP_CLOSE_WAIT | TCP_LAST_ACK
+            | TCP_FIN_WAIT1 | TCP_CLOSING => {}
+            _ => continue,
+        }
+        if !seq_before(tcb.send_una, tcb.send_nxt) {
+            tcb.retry_count = 0;
+            tcb.retry_ticks = 0;
+            continue;
+        }
+        if tcb.retry_count == 0 {
+            continue;
+        }
+        if tcb.retry_ticks > 0 {
+            tcb.retry_ticks -= 1;
+            continue;
+        }
+
+        let remote_ip = tcb.remote_ip;
+        let local_ip = tcb.local_ip;
+        let src_port = tcb.local_port;
+        let dst_port = tcb.remote_port;
+        let send_una = tcb.send_una;
+
+        if tcb.state == TCP_SYN_SENT || tcb.state == TCP_SYN_RECEIVED {
+            let mut seg = build_segment(
+                src_port,
+                dst_port,
+                send_una,
+                tcb.recv_nxt,
+                if tcb.state == TCP_SYN_SENT {
+                    TCP_FLAG_SYN
+                } else {
+                    TCP_FLAG_SYN | TCP_FLAG_ACK
+                },
+                tcb.recv_window,
+                &[],
+            );
+            let csum = checksum(local_ip, remote_ip, &seg[..20]);
+            seg[16] = (csum >> 8) as u8;
+            seg[17] = (csum & 0xFF) as u8;
+            ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..20]);
+        } else if tcb.state == TCP_LAST_ACK
+            || tcb.state == TCP_FIN_WAIT1
+            || tcb.state == TCP_CLOSING
+        {
+            let mut seg = build_segment(
+                src_port,
+                dst_port,
+                send_una,
+                tcb.recv_nxt,
+                TCP_FLAG_FIN | TCP_FLAG_ACK,
+                tcb.recv_window,
+                &[],
+            );
+            let csum = checksum(local_ip, remote_ip, &seg[..20]);
+            seg[16] = (csum >> 8) as u8;
+            seg[17] = (csum & 0xFF) as u8;
+            ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..20]);
+        } else {
+            let payload = &tcb.tx_data[..core::cmp::min(tcb.tx_data_len, 1460)];
+            let seg_len = 20 + payload.len();
+            let mut seg = build_segment(
+                src_port,
+                dst_port,
+                send_una,
+                tcb.recv_nxt,
+                TCP_FLAG_ACK | TCP_FLAG_PSH,
+                tcb.recv_window,
+                payload,
+            );
+            let csum = checksum(local_ip, remote_ip, &seg[..seg_len]);
+            seg[16] = (csum >> 8) as u8;
+            seg[17] = (csum & 0xFF) as u8;
+            ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..seg_len]);
+        }
+
+        tcb.retry_count -= 1;
+        tcb.retry_ticks = RETRY_INTERVAL;
+
+        if tcb.retry_count == 0 {
+            zenus_console::kwarn!("TCP retry exhausted, closing conn {}", i);
+            tcb.state = TCP_CLOSED;
+        }
+    }
 }
 
 pub fn send_data(conn: usize, data: &[u8]) -> bool {
-    if conn >= MAX_CONNS { return false; }
+    if conn >= MAX_CONNS {
+        return false;
+    }
     let mut state = TCP_STATE.lock();
     let tcb = match &mut state.conns[conn] {
         Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
@@ -855,7 +941,9 @@ pub fn send_data(conn: usize, data: &[u8]) -> bool {
 }
 
 pub fn flush_tx(conn: usize, iface_idx: usize) -> bool {
-    if conn >= MAX_CONNS { return false; }
+    if conn >= MAX_CONNS {
+        return false;
+    }
     let mut state = TCP_STATE.lock();
     let tcb = match &mut state.conns[conn] {
         Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
@@ -870,8 +958,10 @@ pub fn flush_tx(conn: usize, iface_idx: usize) -> bool {
     let payload = &tcb.tx_data[..payload_len];
 
     let mut seg = build_segment(
-        tcb.local_port, tcb.remote_port,
-        tcb.send_nxt, tcb.recv_nxt,
+        tcb.local_port,
+        tcb.remote_port,
+        tcb.send_nxt,
+        tcb.recv_nxt,
         TCP_FLAG_ACK | TCP_FLAG_PSH,
         tcb.recv_window,
         payload,
@@ -893,7 +983,9 @@ pub fn flush_tx(conn: usize, iface_idx: usize) -> bool {
 }
 
 pub fn receive_data(conn: usize, buf: &mut [u8]) -> Option<usize> {
-    if conn >= MAX_CONNS { return None; }
+    if conn >= MAX_CONNS {
+        return None;
+    }
     let mut state = TCP_STATE.lock();
     let tcb = match &mut state.conns[conn] {
         Some(t) if t.rx_data_len > 0 => t,
@@ -910,41 +1002,53 @@ pub fn receive_data(conn: usize, buf: &mut [u8]) -> Option<usize> {
 }
 
 pub fn close(conn: usize, iface_idx: usize) -> bool {
-    if conn >= MAX_CONNS { return false; }
+    if conn >= MAX_CONNS {
+        return false;
+    }
     let mut state = TCP_STATE.lock();
     let tcb = match &mut state.conns[conn] {
-            Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
-            _ => return false,
-        };
+        Some(t) if t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT => t,
+        _ => return false,
+    };
 
-        let mut fin = build_segment(
-            tcb.local_port, tcb.remote_port,
-            tcb.send_nxt, tcb.recv_nxt,
-            TCP_FLAG_FIN | TCP_FLAG_ACK,
-            tcb.recv_window,
-            &[],
-        );
-        let csum = checksum(tcb.local_ip, tcb.remote_ip, &fin[..20]);
-        fin[16] = (csum >> 8) as u8;
-        fin[17] = (csum & 0xFF) as u8;
-        let result = ipv4::send(iface_idx, tcb.remote_ip, ipv4::PROTO_TCP, &fin[..20]);
-        if result {
-            tcb.send_nxt += 1;
-            tcb.state = if tcb.state == TCP_CLOSE_WAIT { TCP_LAST_ACK } else { TCP_FIN_WAIT1 };
-            tcb.retry_count = MAX_RETRIES;
-            tcb.retry_ticks = RETRY_INTERVAL;
-        }
-        result
+    let mut fin = build_segment(
+        tcb.local_port,
+        tcb.remote_port,
+        tcb.send_nxt,
+        tcb.recv_nxt,
+        TCP_FLAG_FIN | TCP_FLAG_ACK,
+        tcb.recv_window,
+        &[],
+    );
+    let csum = checksum(tcb.local_ip, tcb.remote_ip, &fin[..20]);
+    fin[16] = (csum >> 8) as u8;
+    fin[17] = (csum & 0xFF) as u8;
+    let result = ipv4::send(iface_idx, tcb.remote_ip, ipv4::PROTO_TCP, &fin[..20]);
+    if result {
+        tcb.send_nxt += 1;
+        tcb.state = if tcb.state == TCP_CLOSE_WAIT {
+            TCP_LAST_ACK
+        } else {
+            TCP_FIN_WAIT1
+        };
+        tcb.retry_count = MAX_RETRIES;
+        tcb.retry_ticks = RETRY_INTERVAL;
+    }
+    result
 }
 
 pub fn close_conn(conn: usize) {
-    if conn >= MAX_CONNS { return; }
+    if conn >= MAX_CONNS {
+        return;
+    }
     let mut state = TCP_STATE.lock();
     state.conns[conn] = None;
 }
 
 pub fn is_connected(conn: usize) -> bool {
-    if conn >= MAX_CONNS { return false; }
+    if conn >= MAX_CONNS {
+        return false;
+    }
     let state = TCP_STATE.lock();
     match &state.conns[conn] {
         Some(t) => t.state == TCP_ESTABLISHED || t.state == TCP_CLOSE_WAIT,
@@ -953,7 +1057,9 @@ pub fn is_connected(conn: usize) -> bool {
 }
 
 pub fn has_data(conn: usize) -> bool {
-    if conn >= MAX_CONNS { return false; }
+    if conn >= MAX_CONNS {
+        return false;
+    }
     let state = TCP_STATE.lock();
     match &state.conns[conn] {
         Some(t) => t.rx_data_len > 0,
@@ -962,16 +1068,26 @@ pub fn has_data(conn: usize) -> bool {
 }
 
 pub fn get_conn_info(conn: usize) -> Option<(u8, [u8; 4], u16, [u8; 4], u16)> {
-    if conn >= MAX_CONNS { return None; }
+    if conn >= MAX_CONNS {
+        return None;
+    }
     let state = TCP_STATE.lock();
     match &state.conns[conn] {
-        Some(t) => Some((t.state, t.remote_ip, t.remote_port, t.local_ip, t.local_port)),
+        Some(t) => Some((
+            t.state,
+            t.remote_ip,
+            t.remote_port,
+            t.local_ip,
+            t.local_port,
+        )),
         None => None,
     }
 }
 
 pub fn state_name(conn: usize) -> &'static str {
-    if conn >= MAX_CONNS { return "NONE"; }
+    if conn >= MAX_CONNS {
+        return "NONE";
+    }
     let state = TCP_STATE.lock();
     match &state.conns[conn] {
         Some(t) => match t.state {

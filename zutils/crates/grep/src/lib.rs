@@ -1,7 +1,7 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
 use zenus_fs::vfs::{self, FileSystem as _, FileType};
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
     let pattern = match args.get(1) {
@@ -39,7 +39,8 @@ pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
                         for i in 0..n as usize {
                             let b = buf[i];
                             if b == b'\n' {
-                                let line = core::str::from_utf8(&line_buf[..line_pos]).unwrap_or("");
+                                let line =
+                                    core::str::from_utf8(&line_buf[..line_pos]).unwrap_or("");
                                 if line.contains(pattern) {
                                     w.write_str(line);
                                     w.write_str("\r\n");

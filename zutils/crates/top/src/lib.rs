@@ -1,8 +1,8 @@
 #![no_std]
 
-use zutils_common::{Args, Writer};
-use zenus_sched::scheduler;
 use zenus_mem::allocator::ALLOCATOR;
+use zenus_sched::scheduler;
+use zutils_common::{Args, Writer};
 
 pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     let tasks = scheduler::list_tasks();
@@ -29,7 +29,9 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
         w.write_u64(info.id);
         w.write_str("\t");
         w.write_str(info.state.to_str());
-        for _ in info.state.to_str().len()..16 { w.write_byte(b' '); }
+        for _ in info.state.to_str().len()..16 {
+            w.write_byte(b' ');
+        }
         w.write_u64(info.cpu as u64);
         w.write_str("\t");
         let name_len = info.name.iter().position(|&b| b == 0).unwrap_or(32);
@@ -38,7 +40,9 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
         } else {
             w.write_str("-");
         }
-        for _ in name_len..16 { w.write_byte(b' '); }
+        for _ in name_len..16 {
+            w.write_byte(b' ');
+        }
         w.write_u64(info.uid as u64);
         w.write_str("\t");
         w.write_u64(info.gid as u64);
