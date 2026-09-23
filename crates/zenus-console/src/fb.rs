@@ -46,7 +46,7 @@ pub fn clear() {
     let row_bytes = pitch;
     for y in 0..height {
         let row = row_bytes * y;
-        for x in 0..(pitch as usize) {
+        for x in 0..pitch {
             unsafe {
                 core::ptr::write_volatile((addr as *mut u8).add(row + x), 0u8);
             }
@@ -163,7 +163,7 @@ pub fn write_str(s: &str) {
                 ansi_buf[ansi_len] = byte;
                 ansi_len += 1;
             }
-            if byte >= 0x40 && byte <= 0x7E {
+            if (0x40..=0x7E).contains(&byte) {
                 in_escape = false;
                 if ansi_len >= 2 && ansi_buf[0] == b'[' {
                     if ansi_len == 2 && ansi_buf[1] == b'H' {
@@ -193,7 +193,7 @@ pub fn write_str(s: &str) {
                 let base_y = CURSOR_Y.load(Ordering::Relaxed) * CHAR_HEIGHT as usize;
                 loop {
                     let cx = CURSOR_X.load(Ordering::Relaxed);
-                    if cx >= cols || CURSOR_X.load(Ordering::Relaxed) % tab == 0 {
+                    if cx >= cols || CURSOR_X.load(Ordering::Relaxed).is_multiple_of(tab) {
                         break;
                     }
                     let base_x = cx * CHAR_WIDTH as usize;

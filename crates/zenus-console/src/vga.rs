@@ -67,11 +67,11 @@ fn scroll() {
     let line_bytes = WIDTH * 2;
     unsafe {
         for row in 1..HEIGHT {
-            let src = base.offset((row * line_bytes) as isize);
-            let dst = base.offset(((row - 1) * line_bytes) as isize);
+            let src = base.add((row * line_bytes));
+            let dst = base.add(((row - 1) * line_bytes));
             core::ptr::copy_nonoverlapping(src, dst, line_bytes);
         }
-        let last_line = base.offset(((HEIGHT - 1) * line_bytes) as isize);
+        let last_line = base.add(((HEIGHT - 1) * line_bytes));
         let attr = ATTR.load(Ordering::Relaxed) as u8;
         for col in 0..WIDTH {
             core::ptr::write_volatile(last_line.add(col * 2), b' ');
@@ -102,7 +102,7 @@ pub fn write_str(s: &str) {
                 ansi_buf[ansi_len] = byte;
                 ansi_len += 1;
             }
-            if byte >= 0x40 && byte <= 0x7E {
+            if (0x40..=0x7E).contains(&byte) {
                 in_escape = false;
                 if ansi_len >= 2 && ansi_buf[0] == b'[' {
                     if ansi_len == 2 && ansi_buf[1] == b'H' {
@@ -129,7 +129,7 @@ pub fn write_str(s: &str) {
             }
             b'\t' => loop {
                 let col = COL.load(Ordering::Relaxed);
-                if col >= WIDTH || col % 4 == 0 {
+                if col >= WIDTH || col.is_multiple_of(4) {
                     break;
                 }
                 put_char(base, b' ');

@@ -12,6 +12,12 @@ pub struct LogBuf {
     truncated: bool,
 }
 
+impl Default for LogBuf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LogBuf {
     pub fn new() -> Self {
         LogBuf {
@@ -239,7 +245,7 @@ pub fn dmesg_count() -> usize {
 
 pub fn log(level: LogLevel, module: &str, msg: &str) {
     let mut serial = SerialPort::new(0x3F8);
-    let _ = write!(serial, "[{}][{}] {}\n", level.prefix(), module, msg);
+    let _ = writeln!(serial, "[{}][{}] {}", level.prefix(), module, msg);
     dmesg_push(level, msg);
     // During early boot (interrupts disabled), flush immediately so output
     // is visible even if a crash/hang occurs before the next scheduled flush.

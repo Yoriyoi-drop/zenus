@@ -410,7 +410,7 @@ impl ErrorBuf {
         slot.module[..mn].copy_from_slice(&mb[..mn]);
         slot.module[mn] = 0;
 
-        let mlen = msg.as_bytes().len().min(127);
+        let mlen = msg.len().min(127);
         slot.msg[..mlen].copy_from_slice(&msg.as_bytes()[..mlen]);
         slot.msg[mlen] = 0;
         slot.msg_len = mlen as u8;
@@ -627,7 +627,7 @@ fn write_code_banner(s: &mut SerialPort, def: &ErrorDef) {
         color::BOLD,
     );
     s.write_str(def.code);
-    let _ = write!(s, "{} ║\n", color::RESET);
+    let _ = writeln!(s, "{} ║", color::RESET);
 }
 
 fn write_field(s: &mut SerialPort, label: &str, value: &str) {
