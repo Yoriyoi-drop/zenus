@@ -42,7 +42,7 @@ RTL8139, virtio-net.
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 151 host unit tests (`make test-host`), 25 in-kernel tests
+**Testing** — 157 host unit tests (`make test-host`), 25 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), CI running both.
 
 ## Partially done
@@ -78,7 +78,8 @@ Do not build on these without reading the code:
    userspace tests pass with them on. Everything else in this list is worth
    less.
 2. **Close the parser holes.** Fuzz every decoder (`make fuzz-coverage`) and
-   treat each crash as a Critical until it is not.
+   treat each crash as a Critical until it is not. `DEVLOG.md` tracks the audit
+   findings that are not fixed yet, ranked by impact.
 3. **Real cgroup enforcement** — at least `memory` and `pids` — so the existing
    namespace work has teeth.
 4. **A driver model** so storage stops being PIO-only: AHCI first.

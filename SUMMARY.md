@@ -41,7 +41,7 @@ It is **pre-alpha**. The core is real; the security model is not finished.
 ## Testing
 
 ```bash
-make test-host   # 151 host unit tests, no VM
+make test-host   # 157 host unit tests, no VM
 make test        # 25 in-kernel tests in QEMU
 make fuzz-smoke  # in-kernel fuzzing campaign
 ```

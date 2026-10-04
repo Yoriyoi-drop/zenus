@@ -67,7 +67,7 @@ make test-host   # == cargo test --workspace --target x86_64-unknown-linux-gnu
 
 Host unit tests are `#[cfg(test)]` modules inside the kernel crates. They cover
 the pure logic — VMA arithmetic, packet parsing, permission bits, syscall
-numbering, journal replay, the fuzzing bookkeeping — and need no VM. 151 tests
+numbering, journal replay, the fuzzing bookkeeping — and need no VM. 157 tests
 across 11 crates.
 
 ```bash
@@ -96,8 +96,9 @@ make fuzz-regression   # replay recorded crashes (see the caveat)
 ```
 
 `fuzz-regression` currently replays nothing: the crash log lives only in kernel
-memory and `zenus_fuzz::init()` clears it, so it is always empty at boot and the
-run reports success. It needs an on-disk crash corpus first.
+memory and `zenus_fuzz::init()` clears it, so the corpus is always empty at
+boot. The run now says so explicitly (`[FUZZ] NO-CORPUS`) and exits `2` rather
+than reporting a clean regression. It needs an on-disk crash corpus first.
 
 The campaign runs *inside* the kernel: it replaces the shell, contains each
 fault through `zenus_arch::fuzz_guard`, and prints a machine-readable report
