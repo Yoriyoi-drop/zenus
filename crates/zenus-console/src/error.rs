@@ -1,6 +1,7 @@
 use crate::log::LogLevel;
 use crate::serial::SerialPort;
 use core::fmt::Write;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ── ANSI Color Support ──
 pub mod color {
@@ -447,7 +448,13 @@ const ERROR_COUNTS_LEN: usize = 7 * COUNTER_SLOTS + 1;
 /// Slot for codes that do not parse as `ZN-XXX-NNNN`.
 const UNKNOWN_SLOT: usize = 7 * COUNTER_SLOTS;
 
-static mut ERROR_COUNTS: [u64; ERROR_COUNTS_LEN] = [0; ERROR_COUNTS_LEN];
+/// Per-code hit counters.
+///
+/// These are `static mut [u64; …]`-with-no-lock territory no more: two CPUs
+/// reporting errors at once used to do a non-atomic read-modify-write on the
+/// same slot, and `get_error_count` raced with it. Atomics cost nothing here
+/// and make the counter honest under SMP.
+static ERROR_COUNTS: [AtomicU64; ERROR_COUNTS_LEN] = [const { AtomicU64::new(0) }; ERROR_COUNTS_LEN];
 
 /// Map the `XXX` of `ZN-XXX-NNNN` to a 0..=6 group index.
 fn module_group(prefix: &str) -> usize {
@@ -484,19 +491,15 @@ fn error_code_index(code: &str) -> usize {
 }
 
 fn bump_error_count(code: &str) {
-    let idx = error_code_index(code);
-    unsafe {
-        ERROR_COUNTS[idx] = ERROR_COUNTS[idx].wrapping_add(1);
-    }
+    ERROR_COUNTS[error_code_index(code)].fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn get_error_count(code: &str) -> u64 {
-    let idx = error_code_index(code);
-    unsafe { ERROR_COUNTS[idx] }
+    ERROR_COUNTS[error_code_index(code)].load(Ordering::Relaxed)
 }
 
 // ── Global Error Buffer ──
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicBool;
 use zenus_sync::spinlock::SpinLock;
 
 static ERR_BUF_INIT: AtomicBool = AtomicBool::new(false);

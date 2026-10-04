@@ -1,5 +1,6 @@
 use crate::vfs::{self, DirEntry, FileStat, FileSystem, FileType};
-use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use zenus_sync::spinlock::{SpinLock, SpinLockGuard};
 
 const MAX_NODES: usize = 128;
 const MAX_NAME: usize = 64;
@@ -21,51 +22,99 @@ struct TmpNode {
     mode: u16,
 }
 
-fn nodes() -> &'static mut [TmpNode; MAX_NODES] {
-    static mut NODES: MaybeUninit<[TmpNode; MAX_NODES]> = MaybeUninit::uninit();
-    static mut INIT: bool = false;
-    unsafe {
-        if !INIT {
-            core::ptr::write_bytes(NODES.as_mut_ptr(), 0, 1);
-            (*NODES.as_mut_ptr())[0] = TmpNode {
-                name: [0; MAX_NAME],
-                name_len: 0,
-                file_type: FileType::Directory,
-                size: 0,
-                data: [0; MAX_FILE_SIZE],
-                parent: 0,
-                next_sibling: 0,
-                first_child: 0,
-                uid: 0,
-                gid: 0,
-                mode: vfs::DEFAULT_DIR_MODE,
-            };
-            INIT = true;
-        }
-        &mut *NODES.as_mut_ptr()
-    }
+/// The node table.
+///
+/// This used to be a `static mut` handed out as `&'static mut`, which is
+/// unsound the moment two callers hold it at once (aliased `&mut`) — and on a
+/// host test run with parallel threads that is not hypothetical. A `SpinLock`
+/// makes the aliasing impossible; the critical sections are a handful of
+/// instructions each.
+static NODES: SpinLock<[TmpNode; MAX_NODES]> = SpinLock::new([EMPTY_NODE; MAX_NODES]);
+
+/// How many slots have ever been handed out. Slot 0 is always the root.
+static NODE_COUNT: AtomicUsize = AtomicUsize::new(1);
+
+const EMPTY_NODE: TmpNode = TmpNode {
+    name: [0; MAX_NAME],
+    name_len: 0,
+    file_type: FileType::None,
+    size: 0,
+    data: [0; MAX_FILE_SIZE],
+    parent: 0,
+    next_sibling: 0,
+    first_child: 0,
+    uid: 0,
+    gid: 0,
+    mode: 0,
+};
+
+/// Locked node table.
+fn nodes() -> SpinLockGuard<'static, [TmpNode; MAX_NODES]> {
+    NODES.lock()
 }
 
-fn node_count() -> &'static mut usize {
-    static mut COUNT: usize = 1;
-    unsafe { &mut COUNT }
+fn node_count() -> usize {
+    NODE_COUNT.load(Ordering::Acquire)
 }
 
 pub struct TmpFs;
 
 impl TmpFs {
     pub fn new() -> &'static Self {
-        let _ = nodes();
+        // Slot 0 is the root directory. Done once via `NODE_COUNT`: the old
+        // lazy `INIT` flag raced with itself and, being a plain `static mut`,
+        // also had to be re-checked by every caller.
+        let mut nodes = nodes();
+        nodes[0] = TmpNode {
+            name: [0; MAX_NAME],
+            name_len: 0,
+            file_type: FileType::Directory,
+            size: 0,
+            data: [0; MAX_FILE_SIZE],
+            parent: 0,
+            next_sibling: 0,
+            first_child: 0,
+            uid: 0,
+            gid: 0,
+            mode: vfs::DEFAULT_DIR_MODE,
+        };
         &TmpFs
     }
 
+    /// Drop every node and start again from an empty root.
+    ///
+    /// Node slots are never recycled, so a long-lived `/tmp` (or a test that
+    /// creates files in several cases) eventually hits `MAX_NODES` and every
+    /// later `create` fails. Resetting is the only way to get the space back;
+    /// the host test suite calls it between cases for exactly that reason.
+    pub fn reset() {
+        NODE_COUNT.store(1, Ordering::Release);
+        let mut nodes = nodes();
+        for node in nodes.iter_mut() {
+            *node = EMPTY_NODE;
+        }
+        nodes[0] = TmpNode {
+            name: [0; MAX_NAME],
+            name_len: 0,
+            file_type: FileType::Directory,
+            size: 0,
+            data: [0; MAX_FILE_SIZE],
+            parent: 0,
+            next_sibling: 0,
+            first_child: 0,
+            uid: 0,
+            gid: 0,
+            mode: vfs::DEFAULT_DIR_MODE,
+        };
+    }
+
     fn alloc_node() -> Option<usize> {
-        let count = node_count();
-        let idx = *count;
+        let idx = NODE_COUNT.fetch_add(1, Ordering::AcqRel);
         if idx >= MAX_NODES {
+            // Do not leak the reservation on failure.
+            NODE_COUNT.fetch_sub(1, Ordering::AcqRel);
             return None;
         }
-        *count = idx + 1;
         Some(idx)
     }
 
@@ -123,7 +172,7 @@ impl FileSystem for TmpFs {
     fn read(&self, inode: u64, offset: u64, buf: &mut [u8]) -> Option<u64> {
         let nodes = nodes();
         let idx = inode as usize;
-        if idx >= *node_count() {
+        if idx >= node_count() {
             return None;
         }
         let node = &nodes[idx];
@@ -139,9 +188,9 @@ impl FileSystem for TmpFs {
     }
 
     fn write(&self, inode: u64, offset: u64, buf: &[u8]) -> Option<u64> {
-        let nodes = nodes();
+        let mut nodes = nodes();
         let idx = inode as usize;
-        if idx >= *node_count() {
+        if idx >= node_count() {
             return None;
         }
         if nodes[idx].file_type != FileType::File {
@@ -163,7 +212,7 @@ impl FileSystem for TmpFs {
 
         let nodes = nodes();
         let idx = inode as usize;
-        if idx >= *node_count() {
+        if idx >= node_count() {
             return entries;
         }
 
@@ -189,7 +238,7 @@ impl FileSystem for TmpFs {
     fn stat(&self, inode: u64) -> FileStat {
         let nodes = nodes();
         let idx = inode as usize;
-        if idx >= *node_count() {
+        if idx >= node_count() {
             return FileStat {
                 size: 0,
                 file_type: FileType::None,
@@ -213,15 +262,15 @@ impl FileSystem for TmpFs {
     }
 
     fn create(&self, parent_inode: u64, name: &str, file_type: FileType) -> Option<u64> {
-        let nodes = nodes();
+        let mut nodes = nodes();
         let pidx = parent_inode as usize;
-        if pidx >= *node_count() {
+        if pidx >= node_count() {
             return None;
         }
         if nodes[pidx].file_type != FileType::Directory {
             return None;
         }
-        if Self::find_child(nodes, pidx, name).is_some() {
+        if Self::find_child(&nodes[..], pidx, name).is_some() {
             return None;
         }
         let child_idx = Self::alloc_node()?;
@@ -233,14 +282,14 @@ impl FileSystem for TmpFs {
             FileType::Directory => vfs::DEFAULT_DIR_MODE,
             _ => vfs::DEFAULT_FILE_MODE,
         };
-        Self::add_child(nodes, pidx, child_idx);
+        Self::add_child(&mut nodes[..], pidx, child_idx);
         Some(child_idx as u64)
     }
 
     fn unlink(&self, parent_inode: u64, name: &str) -> bool {
-        let nodes = nodes();
+        let mut nodes = nodes();
         let pidx = parent_inode as usize;
-        if pidx >= *node_count() {
+        if pidx >= node_count() {
             return false;
         }
         let mut prev: usize = 0;
@@ -271,9 +320,9 @@ impl FileSystem for TmpFs {
     }
 
     fn chmod(&self, inode: u64, mode: u16) -> bool {
-        let nodes = nodes();
+        let mut nodes = nodes();
         let idx = inode as usize;
-        if idx >= *node_count() {
+        if idx >= node_count() {
             return false;
         }
         nodes[idx].mode = (nodes[idx].mode & 0xF000) | (mode & 0x0FFF);
@@ -281,9 +330,9 @@ impl FileSystem for TmpFs {
     }
 
     fn chown(&self, inode: u64, uid: u32, gid: u32) -> bool {
-        let nodes = nodes();
+        let mut nodes = nodes();
         let idx = inode as usize;
-        if idx >= *node_count() {
+        if idx >= node_count() {
             return false;
         }
         nodes[idx].uid = uid;

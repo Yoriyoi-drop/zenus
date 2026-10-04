@@ -175,6 +175,53 @@ struct PlannedEntry {
     is_dir: bool,
 }
 
+/// Copy a fixed-size array field out of a byte slice without assuming the
+/// slice is aligned for it.
+///
+/// The `.zpk` container is byte-packed: `data.as_ptr()` is a `*const u8`
+/// (alignment 1) and every record offset inside it inherits that. Casting those
+/// addresses to `*const ZpkHeader` / `*const ZpkFileEntry` — which have a 4-byte
+/// alignment because of their `u32` fields — was undefined behaviour. A package
+/// whose first payload had a length that was not a multiple of 4 put the next
+/// record at a misaligned address; a two-file image with a 5-byte payload
+/// reproduced it immediately.
+fn read_fixed_array<const N: usize>(data: &[u8], at: usize) -> Option<[u8; N]> {
+    let bytes = data.get(at..at.checked_add(N)?)?;
+    let mut out = [0u8; N];
+    out.copy_from_slice(bytes);
+    Some(out)
+}
+
+fn read_u16_at(data: &[u8], at: usize) -> Option<u16> {
+    let bytes = data.get(at..at.checked_add(2)?)?;
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32_at(data: &[u8], at: usize) -> Option<u32> {
+    let bytes = data.get(at..at.checked_add(4)?)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// Field offsets inside the on-disk records.
+///
+/// Duplicated from the `#[repr(C)]` structs on purpose: the reader must not
+/// depend on the struct's alignment, and `zpk_field_offsets_are_pinned` asserts
+/// that these numbers still match `offset_of!`.
+pub mod layout {
+    pub const HEADER_SIZE: usize = 500;
+    pub const ENTRY_SIZE: usize = 500;
+    pub const MAGIC: usize = 0;
+    pub const NAME: usize = 4;
+    pub const VERSION: usize = 68;
+    pub const FILE_COUNT: usize = 84;
+    pub const TOTAL_SIZE: usize = 88;
+
+    pub const ENTRY_PATH: usize = 0;
+    pub const ENTRY_LEN: usize = 128;
+    pub const ENTRY_MODE: usize = 132;
+    pub const ENTRY_FILE_TYPE: usize = 134;
+}
+
 /// Validate the whole image before touching the filesystem.
 ///
 /// The old code created `/var/db/zpk/<name>` and then validated entries one at
@@ -183,54 +230,53 @@ struct PlannedEntry {
 /// because it had no manifest, and the two disagreed. Validating up front also
 /// means a traversal attempt cannot create anything at all.
 fn plan_install(data: &[u8]) -> Option<(String, String, u32, u32, Vec<PlannedEntry>)> {
-    if data.len() < core::mem::size_of::<ZpkHeader>() {
+    use layout as L;
+
+    if data.len() < L::HEADER_SIZE {
+        return None;
+    }
+    if read_fixed_array::<4>(data, L::MAGIC)? != *b"ZPK1" {
         return None;
     }
 
-    let header = unsafe { &*(data.as_ptr() as *const ZpkHeader) };
-    if &header.magic != b"ZPK1" {
-        return None;
-    }
-
-    let pkg_name = str_from_bytes(&header.name).to_string();
-    let pkg_version = str_from_bytes(&header.version).to_string();
+    let pkg_name = str_from_bytes(&read_fixed_array::<64>(data, L::NAME)?).to_string();
+    let pkg_version = str_from_bytes(&read_fixed_array::<16>(data, L::VERSION)?).to_string();
     if pkg_name.is_empty() || pkg_name.contains('/') || pkg_name.contains("..") {
         return None;
     }
 
-    let mut offset = core::mem::size_of::<ZpkHeader>();
+    let file_count = read_u32_at(data, L::FILE_COUNT)?;
+    let total_size = read_u32_at(data, L::TOTAL_SIZE)?;
+
+    let mut offset = L::HEADER_SIZE;
     let mut planned = Vec::new();
 
-    for _ in 0..header.file_count {
-        if offset.checked_add(core::mem::size_of::<ZpkFileEntry>())? > data.len() {
+    for _ in 0..file_count {
+        if offset.checked_add(L::ENTRY_SIZE)? > data.len() {
             return None;
         }
-        let entry = unsafe { &*(data.as_ptr().add(offset) as *const ZpkFileEntry) };
-        offset += core::mem::size_of::<ZpkFileEntry>();
 
-        let path = install_path_for(str_from_bytes(&entry.path))?;
-        let len = entry.size as usize;
-        let data_end = offset.checked_add(len)?;
+        let raw_path = read_fixed_array::<128>(data, offset + L::ENTRY_PATH)?;
+        let path = install_path_for(str_from_bytes(&raw_path))?;
+        let len = read_u32_at(data, offset + L::ENTRY_LEN)? as usize;
+        let _mode = read_u16_at(data, offset + L::ENTRY_MODE)?;
+        let file_type = *data.get(offset + L::ENTRY_FILE_TYPE)?;
+        let body_at = offset + L::ENTRY_SIZE;
+        let data_end = body_at.checked_add(len)?;
         if data_end > data.len() {
             return None;
         }
 
         planned.push(PlannedEntry {
             path,
-            offset,
+            offset: body_at,
             len,
-            is_dir: entry.file_type == 1,
+            is_dir: file_type == 1,
         });
         offset = data_end;
     }
 
-    Some((
-        pkg_name,
-        pkg_version,
-        header.file_count,
-        header.total_size,
-        planned,
-    ))
+    Some((pkg_name, pkg_version, file_count, total_size, planned))
 }
 
 pub fn pkg_install(data: &[u8], _dev_id: usize) -> bool {

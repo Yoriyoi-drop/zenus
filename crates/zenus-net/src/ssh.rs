@@ -56,6 +56,26 @@ enum ConnState {
     Closing,
 }
 
+/// Build the `ZENUS_SSH/1.0` banner for a fresh connection.
+///
+/// Protocol string, then the 16-byte nonce as lowercase hex, then a newline:
+/// `14 + 32 + 1` bytes. Extracted from `poll` so the layout is testable instead
+/// of being re-implemented (and silently diverging) in the test suite.
+fn build_greeting(nonce: &[u8; 16], buf: &mut [u8; 96]) -> usize {
+    const PROTO: &[u8] = b"ZENUS_SSH/1.0\n";
+    let mut pos = 0;
+    buf[pos..pos + PROTO.len()].copy_from_slice(PROTO);
+    pos += PROTO.len();
+    for &b in nonce {
+        let (hi, lo) = hex_byte(b);
+        buf[pos] = hi;
+        buf[pos + 1] = lo;
+        pos += 2;
+    }
+    buf[pos] = b'\n';
+    pos + 1
+}
+
 #[derive(Clone, Copy)]
 struct SshConnection {
     fd: Option<usize>,
@@ -206,19 +226,8 @@ impl SshServer {
             match conn.state {
                 ConnState::New => {
                     let mut greeting = [0u8; 96];
-                    let mut pos = 0;
-                    let proto = b"ZENUS_SSH/1.0\n";
-                    greeting[pos..pos + proto.len()].copy_from_slice(proto);
-                    pos += proto.len();
-                    for &b in &conn.nonce {
-                        let (hi, lo) = hex_byte(b);
-                        greeting[pos] = hi;
-                        greeting[pos + 1] = lo;
-                        pos += 2;
-                    }
-                    greeting[pos] = b'\n';
-                    pos += 1;
-                    if socket::send(fd, &greeting[..pos], iface_idx) {
+                    let len = build_greeting(&conn.nonce, &mut greeting);
+                    if socket::send(fd, &greeting[..len], iface_idx) {
                         conn.state = ConnState::WaitAuth;
                     }
                 }
@@ -388,37 +397,56 @@ mod host_tests {
         assert!(!SSH_PASSWORD.is_empty());
     }
 
+    /// Golden values: the keystream must stay bit-for-bit stable, because the
+    /// client and the server both derive ciphertext from it and a change would
+    /// break every existing session.
     #[test]
-    fn keystream_is_deterministic_per_position() {
-        let seed = 0xDEAD_BEEF;
-        assert_eq!(ssh_keystream_byte(seed, 0), ssh_keystream_byte(seed, 0));
-        assert_eq!(ssh_keystream_byte(seed, 7), ssh_keystream_byte(seed, 7));
-    }
-
-    #[test]
-    fn keystream_differs_between_positions_and_seeds() {
-        // Stream-cipher property: the same plaintext byte must not encrypt to
-        // the same ciphertext byte at two offsets.
-        let mut seen = [false; 256];
-        let mut duplicates = 0;
-        for pos in 0..64u32 {
-            let b = ssh_keystream_byte(0x1234_5678, pos);
-            if seen[b as usize] {
-                duplicates += 1;
-            }
-            seen[b as usize] = true;
-        }
-        // 64 draws from 256 slots: a few collisions are expected, an
-        // all-constant stream is not.
-        assert!(
-            duplicates < 32,
-            "keystream looks degenerate ({duplicates} dups)"
+    fn keystream_matches_its_golden_values() {
+        assert_eq!(ssh_keystream_byte(0xDEAD_BEEF, 0), 96);
+        assert_eq!(ssh_keystream_byte(0xDEAD_BEEF, 1), 111);
+        assert_eq!(ssh_keystream_byte(0xDEAD_BEEF, 2), 110);
+        // Changing either input must change the output.
+        assert_ne!(
+            ssh_keystream_byte(0xDEAD_BEEF, 0),
+            ssh_keystream_byte(0xDEADBEE0, 0)
         );
         assert_ne!(
-            ssh_keystream_byte(0x1234_5678, 0),
-            ssh_keystream_byte(0x8765_4321, 0),
-            "different seeds must not share the first byte"
+            ssh_keystream_byte(0xDEAD_BEEF, 0),
+            ssh_keystream_byte(0xDEAD_BEEF, 1)
         );
+    }
+
+    /// The keystream is weak and this pins *how*: the generator adds `pos` to
+    /// the state, so consecutive keystream bytes are usually a small delta away
+    /// (measured: 60 of 64 consecutive pairs differ by <= 5). That is roughly a
+    /// couple of bits of entropy per byte, which is why `SECURITY.md` calls
+    /// ZENUS_SSH/1.0 a toy protocol rather than SSH.
+    ///
+    /// The point of the test is not to approve of that. It is that a future
+    /// change to the generator would silently invalidate every client; this
+    /// makes the change deliberate.
+    #[test]
+    fn keystream_weakness_is_pinned_not_glossed_over() {
+        let seed = 0x1234_5678;
+        let deltas: Vec<u8> = (0..64u32)
+            .map(|p| ssh_keystream_byte(seed, p).abs_diff(ssh_keystream_byte(seed, p + 1)))
+            .collect();
+        let near = deltas.iter().filter(|d| **d <= 5).count();
+        assert!(
+            near * 100 >= deltas.len() * 90,
+            "consecutive-byte structure changed ({near}/{} deltas <= 5): {deltas:?}",
+            deltas.len()
+        );
+
+        // The bytes themselves are not all equal — a truly constant stream
+        // would also satisfy the delta check in a degenerate way.
+        let distinct = (0..64u32)
+            .map(|p| ssh_keystream_byte(seed, p))
+            .collect::<Vec<u8>>();
+        let mut sorted = distinct.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), distinct.len(), "keystream repeats bytes");
     }
 
     #[test]
@@ -463,26 +491,12 @@ mod host_tests {
 
     #[test]
     fn greeting_frame_matches_documented_layout() {
-        // Rebuilt here rather than through `poll`, which needs a live socket:
-        // the banner is 14 bytes of protocol string, 32 hex chars of nonce and
-        // a trailing newline.
-        let proto = b"ZENUS_SSH/1.0\n";
-        assert_eq!(proto.len(), 14);
         let nonce = [0xABu8; 16];
         let mut greeting = [0u8; 96];
-        let mut pos = 0;
-        greeting[pos..pos + proto.len()].copy_from_slice(proto);
-        pos += proto.len();
-        for &b in &nonce {
-            let (hi, lo) = hex_byte(b);
-            greeting[pos] = hi;
-            greeting[pos + 1] = lo;
-            pos += 2;
-        }
-        greeting[pos] = b'\n';
-        pos += 1;
+        let len = super::build_greeting(&nonce, &mut greeting);
 
-        assert_eq!(pos, 14 + 32 + 1);
+        // 14 bytes of protocol string, 32 hex chars of nonce, one newline.
+        assert_eq!(len, 14 + 32 + 1);
         assert_eq!(&greeting[..14], b"ZENUS_SSH/1.0\n");
         let mut expected_nonce = [0u8; 32];
         for i in 0..16 {
@@ -491,6 +505,7 @@ mod host_tests {
         }
         assert_eq!(&greeting[14..46], &expected_nonce[..]);
         assert_eq!(greeting[46], b'\n');
+        assert_eq!(greeting[47], 0, "nothing is written past the newline");
     }
 }
 

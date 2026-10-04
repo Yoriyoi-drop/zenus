@@ -14,11 +14,15 @@ ISO := $(BUILD_DIR)/zenus.iso
 IMG := $(BUILD_DIR)/zenus.hdd
 LD := ld.lld
 
-.PHONY: all clean run run-serial run-gui run-bios run-uefi run-gdb iso img test test-quiet bochs
+.PHONY: all build clean run run-serial run-gui run-bios run-uefi run-gdb iso img test test-quiet bochs
 .PHONY: test-host test-host-quiet
 .PHONY: build-fuzz fuzz-smoke fuzz-coverage fuzz-regression fuzz-clean
 
 all: $(KERNEL)
+
+# `make build` is what the README tells people to run; it was never a real
+# target, so `make build` silently did nothing.
+build: $(KERNEL)
 
 # Build kernel staticlib
 target/$(TARGET)/$(PROFILE_DIR)/libzenus.a: apps/src/lib.rs $(shell find crates -name '*.rs')

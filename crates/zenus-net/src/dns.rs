@@ -60,7 +60,17 @@ fn encode_name(name: &str, buf: &mut [u8]) -> Option<usize> {
             }
         };
         let label_len = end - i;
-        if label_len > 63 || pos + label_len + 1 > buf.len() {
+        if label_len == 0 {
+            // An empty interior label ("a..b", "a." at the end) is not a legal
+            // domain name and used to be encoded as a zero-length label, which
+            // decodes as the root and silently truncates the name.
+            return None;
+        }
+        if label_len > 63 {
+            return None;
+        }
+        // RFC 1035: a name is at most 255 octets including the length bytes.
+        if pos + label_len + 1 > buf.len() || pos + label_len + 1 > 255 {
             return None;
         }
         buf[pos] = label_len as u8;
@@ -104,6 +114,7 @@ fn build_query(id: u16, name: &str, buf: &mut [u8]) -> Option<usize> {
 #[cfg(test)]
 mod host_tests {
     use super::{build_query, encode_name, QCLASS_IN, QTYPE_A, RD_FLAG};
+    use alloc::format;
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -166,6 +177,34 @@ mod host_tests {
         assert_eq!(u16::from_be_bytes([buf[19], buf[20]]), QTYPE_A);
         assert_eq!(u16::from_be_bytes([buf[21], buf[22]]), QCLASS_IN);
         assert_eq!(len, 23);
+    }
+
+    /// Regression: `encode_name` accepted empty interior labels ("a..b") and
+    /// encoded them as a zero-length label, which decodes as the root and
+    /// silently truncates the name being queried.
+    #[test]
+    fn encode_name_rejects_empty_interior_labels() {
+        let mut buf = [0u8; 256];
+        assert!(encode_name("a..b", &mut buf).is_none());
+        assert!(encode_name("..", &mut buf).is_none());
+        assert!(
+            encode_name("a.", &mut buf).is_some(),
+            "a single trailing dot is legal"
+        );
+    }
+
+    /// Regression: nothing bounded the total encoded length, so a caller could
+    /// build a name far past the 255-octet limit of RFC 1035.
+    #[test]
+    fn encode_name_respects_the_255_octet_limit() {
+        let mut buf = [0u8; 512];
+        // 4 labels of 63 octets = 4 * (1 + 63) + 1 = 257 > 255.
+        let long = format!("{}.{}.{}.{}", "a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(63));
+        assert!(encode_name(&long, &mut buf).is_none(), "257 octets must be refused");
+
+        // Three labels of 63 = 3 * 64 + 1 = 193, which fits.
+        let ok = format!("{}.{}.{}", "a".repeat(63), "b".repeat(63), "c".repeat(63));
+        assert!(encode_name(&ok, &mut buf).is_some());
     }
 
     /// A minimal, valid A-record response: header, one question, one answer.

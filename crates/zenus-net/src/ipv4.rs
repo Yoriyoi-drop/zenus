@@ -22,9 +22,17 @@ pub fn parse(packet: &[u8]) -> Option<(Ipv4Header, &[u8])> {
     let ptr = packet.as_ptr();
 
     let version_ihl = unsafe { *ptr };
+    // Reject anything that is not IPv4 before looking at anything else: the
+    // parser used to accept e.g. version 6 packets and then interpreted their
+    // header with IPv4 field offsets.
+    if version_ihl >> 4 != 4 {
+        return None;
+    }
     let ihl = ((version_ihl & 0x0F) * 4) as usize;
 
-    if packet.len() < ihl {
+    // IHL must be at least the fixed header, or the field offsets below read
+    // past the header the packet claims to have.
+    if ihl < 20 || packet.len() < ihl {
         return None;
     }
 
@@ -37,12 +45,15 @@ pub fn parse(packet: &[u8]) -> Option<(Ipv4Header, &[u8])> {
 
     let stored_csum = u16::from_be(unsafe { core::ptr::read_unaligned(ptr.add(10) as *const u16) });
     if stored_csum != 0 {
-        let mut csum_buf = [0u8; 20];
-        csum_buf.copy_from_slice(&packet[..ihl.min(20)]);
+        // Validate over the *whole* header. The old code copied
+        // `packet[..ihl.min(20)]` into a 20-byte buffer and always checksummed
+        // 20 bytes, so a header with options (IHL > 5) was verified against the
+        // wrong bytes — options are attacker-controlled.
+        let mut csum_buf = [0u8; 60];
+        csum_buf[..ihl].copy_from_slice(&packet[..ihl]);
         csum_buf[10] = 0;
         csum_buf[11] = 0;
-        let calc_csum = internet_checksum(&csum_buf[..ihl.min(20)]);
-        if calc_csum != stored_csum {
+        if internet_checksum(&csum_buf[..ihl]) != stored_csum {
             return None;
         }
     }

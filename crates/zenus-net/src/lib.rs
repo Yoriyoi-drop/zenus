@@ -37,9 +37,9 @@ mod host_tests {
     };
     use crate::ipv4::{self, PROTO_TCP, PROTO_UDP};
     use crate::route::{self, GatewayAction};
-    // `crates/zenus-net/src/checksum.rs` is a byte-for-byte duplicate of this
-    // function that no `mod` declaration ever compiled; the tests therefore
-    // cover the live implementation.
+    // The only internet-checksum implementation in the tree (the duplicate
+    // that used to sit in `checksum.rs` was never declared as a module and has
+    // been removed).
     use crate::ipv4::internet_checksum;
     use zenus_sync::spinlock::{SpinLock, SpinLockGuard};
 
@@ -215,6 +215,56 @@ mod host_tests {
         assert!(ipv4::parse(&packet).is_some());
     }
 
+    // ── ipv4 hardening ────────────────────────────────────────────────────
+
+    /// Regression: `parse` accepted any IP version and interpreted the header
+    /// with IPv4 offsets, so a version-6 packet parsed as a valid IPv4 one.
+    #[test]
+    fn ipv4_parse_rejects_other_versions_and_bad_ihl() {
+        let mut packet = ipv4_packet(PROTO_TCP, [1, 2, 3, 4], [5, 6, 7, 8], [0; 4]);
+
+        packet[0] = 0x65; // version 6, IHL 5
+        assert!(ipv4::parse(&packet).is_none(), "version 6 must be rejected");
+
+        packet[0] = 0x40; // version 4, IHL 0
+        assert!(ipv4::parse(&packet).is_none(), "IHL 0 must be rejected");
+
+        packet[0] = 0x44; // IHL 4 < 5 words
+        assert!(ipv4::parse(&packet).is_none(), "IHL < 5 must be rejected");
+    }
+
+    /// Regression: a header with options (IHL > 5) was checksummed over the
+    /// first 20 bytes only, so its attacker-controlled option bytes were never
+    /// verified.
+    #[test]
+    fn ipv4_options_are_covered_by_the_checksum() {
+        // 24-byte header (IHL 6): 20 fixed bytes + 4 option bytes, 4-byte
+        // aligned so the payload starts on a 4-octet boundary as the RFC wants.
+        let mut packet = [0u8; 28];
+        packet[0] = 0x46;
+        packet[2..4].copy_from_slice(&28u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = PROTO_TCP;
+        packet[12..16].copy_from_slice(&[192, 168, 0, 1]);
+        packet[16..20].copy_from_slice(&[192, 168, 0, 2]);
+        packet[20..24].copy_from_slice(&[0x01, 0x01, 0x01, 0x00]); // NOP-ish options
+        let mut header = [0u8; 24];
+        header.copy_from_slice(&packet[..24]);
+        let sum = ipv4::internet_checksum(&header);
+        packet[10..12].copy_from_slice(&sum.to_be_bytes());
+
+        let (parsed, payload) = ipv4::parse(&packet).expect("valid header with options");
+        assert_eq!((parsed.version_ihl & 0x0F) * 4, 24, "IHL 6 -> 24 bytes");
+        assert_eq!(payload, &packet[24..28]);
+
+        // Corrupting an option byte must now be detected.
+        let mut tampered = packet;
+        tampered[21] ^= 0xFF;
+        assert!(ipv4::parse(&tampered).is_none(), "option bytes must be covered");
+    }
+
+    // ── dns name limits ───────────────────────────────────────────────────
+
     // ── route ─────────────────────────────────────────────────────────────
 
     #[test]
@@ -322,9 +372,16 @@ mod host_tests {
         // ...including web traffic. Remove the first rule and web is reachable.
         assert!(firewall::firewall_remove_rule(0));
         assert!(!firewall::firewall_remove_rule(0), "removing twice fails");
+        let rules = firewall::firewall_list_rules();
+        let before = rules[1].expect("allow-web is still there").packets_matched;
         assert_eq!(
             firewall::firewall_check(&tcp_packet([1, 1, 1, 1], [192, 168, 5, 5], 1234, 80)),
             FirewallAction::Accept
+        );
+        assert_eq!(
+            firewall::firewall_list_rules()[1].unwrap().packets_matched,
+            before + 1,
+            "the port-80 rule must be the one that matched"
         );
         // Same destination, wrong port -> falls through to the default accept
         // but must not have matched the port-specific rule. `allow-web` now
@@ -376,12 +433,22 @@ mod host_tests {
         established.established = true;
         assert!(firewall::firewall_add_rule(established));
 
+        // The rule accepts and so does the fall-through default, so "returned
+        // Accept" proves nothing. The per-rule match counter is what actually
+        // distinguishes "matched" from "no rule applied".
+        let matched = |idx: usize| {
+            firewall::firewall_list_rules()[idx]
+                .expect("rule present")
+                .packets_matched
+        };
+
         let pkt = tcp_packet([192, 168, 1, 50], [10, 0, 0, 1], 4000, 4001);
-        // Without a tracked connection the rule cannot match.
+        let baseline = matched(0);
+        assert_eq!(firewall::firewall_check(&pkt), FirewallAction::Accept);
         assert_eq!(
-            firewall::firewall_check(&pkt),
-            FirewallAction::Accept,
-            "no conntrack entry -> rule does not match (default accept)"
+            matched(0),
+            baseline,
+            "without a conntrack entry the rule must not match"
         );
 
         firewall::firewall_track_connection(ConnTrack {
@@ -395,6 +462,11 @@ mod host_tests {
         });
         assert_eq!(firewall::firewall_conn_count(), 1);
         assert_eq!(firewall::firewall_check(&pkt), FirewallAction::Accept);
+        assert_eq!(
+            matched(0),
+            baseline + 1,
+            "with an established conntrack entry the rule must match"
+        );
 
         // Tracking the same 5-tuple again updates state instead of adding a row.
         firewall::firewall_track_connection(ConnTrack {
@@ -441,7 +513,21 @@ mod host_tests {
         });
         assert_eq!(firewall::firewall_conn_count(), MAX_CONNTRACK);
 
+        // `firewall_clear_connections` is an *age*-based evictor despite the
+        // name, so nothing expires unless the tick counter moves. `pit::tick()`
+        // is a plain atomic increment (no port I/O), so it is safe here, and it
+        // is what makes this path observable at all.
+        assert_eq!(firewall::firewall_conn_count(), MAX_CONNTRACK);
+        for _ in 0..400 {
+            zenus_arch::interrupts::pit::tick();
+        }
         firewall::firewall_clear_connections();
+        assert_eq!(
+            firewall::firewall_conn_count(),
+            0,
+            "entries older than the timeout must be evicted"
+        );
+
         firewall::firewall_init();
     }
 
@@ -478,18 +564,27 @@ mod host_tests {
             FirewallAction::Drop
         );
 
-        let mut icmp = PacketInfo {
+        // Deliberately give the ICMP packet port 22 — the same number the rule
+        // filters on. Only the `proto == Tcp || proto == Udp` guard can keep the
+        // port comparison from rejecting it, so this test now fails if that
+        // guard is ever removed.
+        let icmp = PacketInfo {
             src_ip: [1, 1, 1, 1],
             dst_ip: [2, 2, 2, 2],
-            src_port: 0,
-            dst_port: 0,
+            src_port: 22,
+            dst_port: 22,
             proto: FirewallProto::Icmp,
         };
-        icmp.src_port = 22;
+        let baseline = firewall::firewall_list_rules()[0].unwrap().packets_matched;
         assert_eq!(
             firewall::firewall_check(&icmp),
             FirewallAction::Accept,
             "ICMP has no ports, so a port rule must not match"
+        );
+        assert_eq!(
+            firewall::firewall_list_rules()[0].unwrap().packets_matched,
+            baseline,
+            "the TCP-only rule must not have matched"
         );
 
         firewall::firewall_init();

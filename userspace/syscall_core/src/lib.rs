@@ -9,7 +9,10 @@ pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
-pub const SYS_PIPE: u64 = 22;
+// The kernel renumbered its syscall table to remove the old collisions
+// (pipe used to be 22, which is SYS_ACCESS). Keep this in sync with
+// `crates/zenus-syscall/src/syscall.rs`.
+pub const SYS_PIPE: u64 = 111;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_EXIT_GROUP: u64 = 231;
 

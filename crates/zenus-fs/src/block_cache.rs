@@ -41,9 +41,13 @@ impl BlockCache {
         }
     }
 
+    /// Number of slots probed by the (associative) lookup: this is also how far
+    /// the hash spreads a block across the table.
+    const WAYS: usize = 4;
+
     fn find_entry(&self, dev_id: u8, block: u64) -> Option<usize> {
         let start = hash(dev_id, block);
-        for i in 0..4 {
+        for i in 0..Self::WAYS {
             let idx = (start + i) & (CACHE_SIZE - 1);
             if self.entries[idx].valid
                 && self.entries[idx].dev_id == dev_id
@@ -55,16 +59,43 @@ impl BlockCache {
         None
     }
 
+    /// Pick a slot for a new entry: an empty slot in the block's window first,
+    /// then a clean victim in that window.
+    ///
+    /// The old version returned `Some(start)` unconditionally once the window
+    /// was full, which is wrong twice over: it overwrote whatever lived at
+    /// `start` (dropping a dirty entry on the floor), and it did so even when
+    /// free slots existed elsewhere in the table. A fifth block hashing into
+    /// the same window therefore thrashed while 508 entries sat unused.
     fn evict_one(&mut self, dev_id: u8, block: u64) -> Option<usize> {
         let start = hash(dev_id, block);
-        // Cari slot kosong (tidak valid) terlebih dahulu
-        for i in 0..4 {
+
+        // 1. Any invalid slot in this block's window.
+        for i in 0..Self::WAYS {
             let idx = (start + i) & (CACHE_SIZE - 1);
             if !self.entries[idx].valid {
                 return Some(idx);
             }
         }
-        // Semua slot terpakai — usir slot pertama (LRU sederhana)
+
+        // 2. A clean entry in the window: nothing to flush, safe to reuse.
+        for i in 0..Self::WAYS {
+            let idx = (start + i) & (CACHE_SIZE - 1);
+            if !self.entries[idx].dirty {
+                return Some(idx);
+            }
+        }
+
+        // 3. Any clean slot anywhere — the table is a cache, so spending a slot
+        //    outside the window beats thrashing.
+        for idx in 0..CACHE_SIZE {
+            if !self.entries[idx].valid || !self.entries[idx].dirty {
+                return Some(idx);
+            }
+        }
+
+        // 4. Everything is dirty. Prefer the window (its entries are the ones
+        //    most likely to be reused) and let the caller flush it.
         Some(start)
     }
 
@@ -142,12 +173,9 @@ impl BlockCache {
                 if !block_device_read(dev_id as usize, block, &mut sector_buf) {
                     return false;
                 }
-                if buf.len() < SECTOR_SIZE {
-                    // Read-modify-write: keep the rest of the sector
-                    self.entries[idx].data = sector_buf;
-                } else {
-                    self.entries[idx].data = sector_buf;
-                }
+                // Read-modify-write: a short write must keep the rest of the
+                // sector, and a full-sector write overwrites all of it below.
+                self.entries[idx].data = sector_buf;
                 self.entries[idx].dev_id = dev_id;
                 self.entries[idx].block = block;
                 self.entries[idx].valid = true;
@@ -198,6 +226,37 @@ pub fn bc_flush() -> bool {
 
 pub fn bc_stats() -> (u64, u64) {
     BLOCK_CACHE.lock().stats()
+}
+
+/// Drop cached lines for one device/sector pair.
+///
+/// Needed whenever something wrote *behind* the cache's back — the journal
+/// writes its header straight to the device, so without this the cache kept
+/// serving the pre-`journal_init` image to the next `read_header()`.
+pub fn bc_invalidate(dev_id: u8, block: u64) -> bool {
+    let mut cache = BLOCK_CACHE.lock();
+    match cache.find_entry(dev_id, block) {
+        Some(idx) => {
+            cache.entries[idx].valid = false;
+            cache.entries[idx].dirty = false;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Flush everything, then drop every line.
+///
+/// After this the cache holds nothing, so the next read comes from the device.
+/// Returns false if some dirty entry could not be written.
+pub fn bc_invalidate_all() -> bool {
+    let mut cache = BLOCK_CACHE.lock();
+    let flushed = cache.flush_all();
+    for entry in cache.entries.iter_mut() {
+        entry.valid = false;
+        entry.dirty = false;
+    }
+    flushed
 }
 
 #[cfg(feature = "testing")]

@@ -1,7 +1,6 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
-use crate::block_cache::{bc_flush, bc_read, bc_write};
-use crate::devfs::block_device_write;
+use crate::block_cache::{bc_flush, bc_invalidate, bc_read, bc_write};
 
 /// Device-level write barrier, installed by the platform layer.
 ///
@@ -51,20 +50,25 @@ struct JournalHeader {
     targets: [u32; MAX_TARGET_BLOCKS],
 }
 
-static mut JNL_DEV_ID: u8 = 0xFF;
-static mut JNL_START_BLOCK: u64 = 0;
-static mut JNL_NUM_BLOCKS: u64 = 0;
-static mut JNL_SEQUENCE: u32 = 0;
-static mut JNL_ACTIVE: bool = false;
+/// Journal state.
+///
+/// These were five `static mut` words touched from task context and from the
+/// block layer with no synchronisation at all. Each is a single machine word,
+/// so making them atomics removes the data race (and any chance of a torn
+/// value) without adding a lock that would have to be ordered against
+/// `BLOCK_CACHE` — which every function here already takes.
+static JNL_DEV_ID: AtomicU8 = AtomicU8::new(0xFF);
+static JNL_START_BLOCK: AtomicU64 = AtomicU64::new(0);
+static JNL_NUM_BLOCKS: AtomicU64 = AtomicU64::new(0);
+static JNL_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+static JNL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn journal_init(dev_id: u8, start_block: u64, num_blocks: u64) -> bool {
-    unsafe {
-        JNL_DEV_ID = dev_id;
-        JNL_START_BLOCK = start_block;
-        JNL_NUM_BLOCKS = num_blocks;
-        JNL_SEQUENCE = 0;
-        JNL_ACTIVE = false;
-    }
+    JNL_DEV_ID.store(dev_id, Ordering::Release);
+    JNL_START_BLOCK.store(start_block, Ordering::Release);
+    JNL_NUM_BLOCKS.store(num_blocks, Ordering::Release);
+    JNL_SEQUENCE.store(0, Ordering::Release);
+    JNL_ACTIVE.store(false, Ordering::Release);
     let hdr = JournalHeader {
         magic: JOURNAL_MAGIC,
         sequence: 0,
@@ -79,17 +83,26 @@ pub fn journal_init(dev_id: u8, start_block: u64, num_blocks: u64) -> bool {
             core::mem::size_of::<JournalHeader>(),
         )
     };
-    block_device_write(dev_id as usize, start_block, raw)
+    // Through the cache, not straight to the device: a direct
+    // `block_device_write` left the *previous* image of this sector cached, and
+    // the next `read_header()` (i.e. every `journal_begin`) then wrote that
+    // stale header — including the old `num_entries`/`targets[]` — back over
+    // the fresh one.
+    let ok = bc_write(dev_id, start_block, raw) && bc_flush();
+    // Either way, make sure no stale line survives.
+    bc_invalidate(dev_id, start_block);
+    ok
 }
 
 pub fn journal_begin() -> bool {
-    unsafe {
-        if JNL_DEV_ID == 0xFF || JNL_ACTIVE {
-            return false;
-        }
-        JNL_ACTIVE = true;
-        JNL_SEQUENCE += 1;
+    // `swap` so only one caller can win the transaction, and so a nested
+    // `journal_begin` fails instead of nesting.
+    if JNL_DEV_ID.load(Ordering::Acquire) == 0xFF
+        || JNL_ACTIVE.swap(true, Ordering::AcqRel)
+    {
+        return false;
     }
+    JNL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
 
     // Mark the header ACTIVE and make it durable *before* the caller starts
     // writing data blocks. If the header kept saying EMPTY/committed, a crash
@@ -99,27 +112,25 @@ pub fn journal_begin() -> bool {
     let mut hdr = match read_header() {
         Some(h) => h,
         None => {
-            unsafe { JNL_ACTIVE = false };
+            JNL_ACTIVE.store(false, Ordering::Release);
             return false;
         }
     };
     hdr.state = JNL_STATE_ACTIVE;
     if !write_header(&hdr) || !bc_flush() {
-        unsafe { JNL_ACTIVE = false };
+        JNL_ACTIVE.store(false, Ordering::Release);
         return false;
     }
     true
 }
 
 pub fn is_journal_active() -> bool {
-    unsafe { JNL_ACTIVE }
+    JNL_ACTIVE.load(Ordering::Acquire)
 }
 
 pub fn journal_write(target_block: u64, data: &[u8]) -> bool {
-    unsafe {
-        if !JNL_ACTIVE || JNL_DEV_ID == 0xFF {
-            return false;
-        }
+    if !is_journal_active() || JNL_DEV_ID.load(Ordering::Acquire) == 0xFF {
+        return false;
     }
     let hdr = read_header();
     let mut hdr = match hdr {
@@ -136,12 +147,14 @@ pub fn journal_write(target_block: u64, data: &[u8]) -> bool {
     let copy_len = core::cmp::min(data.len(), 512);
     sector_buf[..copy_len].copy_from_slice(&data[..copy_len]);
 
-    let max_data_block = unsafe { JNL_START_BLOCK + 1 + MAX_ENTRIES as u64 - 1 };
-    let data_block = unsafe { JNL_START_BLOCK + 1 + idx as u64 };
+    let start_block = JNL_START_BLOCK.load(Ordering::Acquire);
+    let max_data_block = start_block + 1 + MAX_ENTRIES as u64 - 1;
+    let data_block = start_block + 1 + idx as u64;
     if data_block > max_data_block {
         return false;
     }
-    if !bc_write(unsafe { JNL_DEV_ID }, data_block, &sector_buf) {
+    let dev_id = JNL_DEV_ID.load(Ordering::Acquire);
+    if !bc_write(dev_id, data_block, &sector_buf) {
         return false;
     }
 
@@ -158,10 +171,8 @@ pub fn journal_write(target_block: u64, data: &[u8]) -> bool {
 }
 
 pub fn journal_commit() -> bool {
-    unsafe {
-        if !JNL_ACTIVE || JNL_DEV_ID == 0xFF {
-            return false;
-        }
+    if !is_journal_active() || JNL_DEV_ID.load(Ordering::Acquire) == 0xFF {
+        return false;
     }
 
     let hdr = read_header();
@@ -178,15 +189,16 @@ pub fn journal_commit() -> bool {
             continue;
         }
         let mut data = [0u8; 512];
-        let max_data_block = unsafe { JNL_START_BLOCK + 1 + MAX_ENTRIES as u64 - 1 };
-        let data_block = unsafe { JNL_START_BLOCK + 1 + i as u64 };
+        let start_block = JNL_START_BLOCK.load(Ordering::Acquire);
+        let max_data_block = start_block + 1 + MAX_ENTRIES as u64 - 1;
+        let data_block = start_block + 1 + i as u64;
         if data_block > max_data_block {
             return false;
         }
-        if !bc_read(unsafe { JNL_DEV_ID }, data_block, &mut data) {
+        if !bc_read(JNL_DEV_ID.load(Ordering::Acquire), data_block, &mut data) {
             return false;
         }
-        if !bc_write(unsafe { JNL_DEV_ID }, target, &data) {
+        if !bc_write(JNL_DEV_ID.load(Ordering::Acquire), target, &data) {
             return false;
         }
     }
@@ -226,9 +238,7 @@ pub fn journal_commit() -> bool {
     write_header(&hdr);
     bc_flush();
 
-    unsafe {
-        JNL_ACTIVE = false;
-    }
+    JNL_ACTIVE.store(false, Ordering::Release);
     true
 }
 
@@ -278,22 +288,24 @@ pub fn journal_replay(dev_id: u8, start_block: u64) -> bool {
     bc_flush();
 
     buf[12..16].copy_from_slice(&JNL_STATE_EMPTY.to_ne_bytes());
-    let _ = block_device_write(dev_id as usize, start_block, &buf);
+    // Same reasoning as `journal_init`: go through the cache and flush, so the
+    // retired header is durable *and* no stale line is left behind.
+    let _ = bc_write(dev_id, start_block, &buf);
+    bc_flush();
+    bc_invalidate(dev_id, start_block);
 
-    unsafe {
-        JNL_DEV_ID = dev_id;
-        JNL_START_BLOCK = start_block;
-        JNL_NUM_BLOCKS = 0;
-        JNL_SEQUENCE = 0;
-        JNL_ACTIVE = false;
-    }
+    JNL_DEV_ID.store(dev_id, Ordering::Release);
+    JNL_START_BLOCK.store(start_block, Ordering::Release);
+    JNL_NUM_BLOCKS.store(0, Ordering::Release);
+    JNL_SEQUENCE.store(0, Ordering::Release);
+    JNL_ACTIVE.store(false, Ordering::Release);
 
     true
 }
 
 fn read_header() -> Option<JournalHeader> {
     let mut buf = [0u8; 512];
-    if !bc_read(unsafe { JNL_DEV_ID }, unsafe { JNL_START_BLOCK }, &mut buf) {
+    if !bc_read(JNL_DEV_ID.load(Ordering::Acquire), JNL_START_BLOCK.load(Ordering::Acquire), &mut buf) {
         return None;
     }
     let magic = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
@@ -332,5 +344,5 @@ fn write_header(hdr: &JournalHeader) -> bool {
         }
         buf[off..off + 4].copy_from_slice(&hdr.targets[i].to_ne_bytes());
     }
-    bc_write(unsafe { JNL_DEV_ID }, unsafe { JNL_START_BLOCK }, &buf)
+    bc_write(JNL_DEV_ID.load(Ordering::Acquire), JNL_START_BLOCK.load(Ordering::Acquire), &buf)
 }

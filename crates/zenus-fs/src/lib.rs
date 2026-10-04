@@ -46,6 +46,17 @@ mod host_tests {
         SERIAL.lock()
     }
 
+    /// A clean filesystem for one test.
+    ///
+    /// `vfs::init()` alone is not enough: tmpfs node slots are never recycled,
+    /// so a suite that creates files across a dozen cases exhausts `MAX_NODES`
+    /// and every later `create_file` silently fails — which looks exactly like
+    /// a bug in whatever the test was actually checking.
+    fn fresh_fs() {
+        crate::tmpfs::TmpFs::reset();
+        vfs::init();
+    }
+
     // ── a fake block device ───────────────────────────────────────────────
     //
     // 64 sectors of RAM behind the devfs `BlockDeviceOps` vtable, so the block
@@ -107,7 +118,16 @@ mod host_tests {
         disk[lba as usize]
     }
 
+    /// Reset the fake disk *and* the block cache that shadows it.
+    ///
+    /// Zeroing the RAM alone was not enough: a cached line kept serving the
+    /// pre-wipe contents, and a dirty line left by an earlier test was flushed
+    /// onto the zeroed disk afterwards, so tests passed by luck.
     fn wipe_fake_device() {
+        assert!(
+            crate::block_cache::bc_invalidate_all(),
+            "could not flush the cache before wiping"
+        );
         *FAKE.lock() = [[0u8; SECTOR]; FAKE_SECTORS];
         *FAKE_WRITES.lock() = 0;
     }
@@ -202,11 +222,14 @@ mod host_tests {
 
         // Read back through the cache — this is a hit path, not the device.
         let mut buf = [0u8; 8];
+        let (hits_before, _) = bc_stats(); // process-wide and cumulative
         assert!(bc_read(dev as u8, 3, &mut buf));
         assert_eq!(&buf, &payload);
-
-        let (hits, _) = bc_stats();
-        assert!(hits >= 1, "the second read must be a cache hit");
+        assert_eq!(
+            bc_stats().0,
+            hits_before + 1,
+            "the second read must be a cache hit"
+        );
 
         // Nothing reached the device yet: the entry is still dirty.
         assert_eq!(fake_sector(3)[0], 0);
@@ -250,19 +273,27 @@ mod host_tests {
         let dev = fake_device();
         wipe_fake_device();
 
-        let (before, _, _) = crate::io_scheduler::io_stats();
-        assert!(bc_write(dev as u8, 5, &[0x42; 4]));
-        let (after_write, _, _) = crate::io_scheduler::io_stats();
-        assert!(
-            after_write >= before,
-            "io_stats must not go backwards"
-        );
+        let (before, reads, writes) = crate::io_scheduler::io_stats();
 
-        // A read of an out-of-range sector fails, so it must not be counted.
+        // A completed write *through the scheduler* is counted. (Calling
+        // `bc_write` directly was the bug in this test: it never touches
+        // `total_ios`.)
+        assert!(crate::io_scheduler::io_submit_write(dev as u8, 5, &[0x42; 4]));
+        let (after_write, _, _) = crate::io_scheduler::io_stats();
+        assert_eq!(after_write, before + 1, "one completed IO must be counted");
+
+        // A failing read is not counted.
         let mut buf = [0u8; 4];
-        let before_fail = crate::io_scheduler::io_stats().0;
         assert!(!crate::io_scheduler::io_submit_read(dev as u8, 999, &mut buf));
-        assert_eq!(crate::io_scheduler::io_stats().0, before_fail);
+        assert_eq!(crate::io_scheduler::io_stats().0, after_write);
+
+        // A succeeding one is.
+        assert!(crate::io_scheduler::io_submit_read(dev as u8, 5, &mut buf));
+        assert_eq!(&buf, &[0x42; 4]);
+        assert_eq!(crate::io_scheduler::io_stats().0, after_write + 1);
+
+        // The read/write split is not tracked; the API says so.
+        assert_eq!((reads, writes), (0, 0));
     }
 
     // ── journal over the fake device ──────────────────────────────────────
@@ -367,8 +398,17 @@ mod host_tests {
         const START: u64 = 8;
         assert!(crate::journal::journal_init(dev as u8, START, 16));
         assert!(!crate::journal::is_journal_active());
-        // Nothing to replay: reports "nothing to do" rather than failing.
-        let _ = crate::journal::journal_replay(dev as u8, START);
+
+        // A fresh header is EMPTY, so replay has nothing to redo, says so, and
+        // must not touch a single sector.
+        let before: Vec<[u8; SECTOR]> = (0..FAKE_SECTORS as u64).map(fake_sector).collect();
+        assert!(
+            crate::journal::journal_replay(dev as u8, START),
+            "an empty journal is not an error"
+        );
+        for (lba, sector) in before.iter().enumerate() {
+            assert_eq!(fake_sector(lba as u64), *sector, "sector {lba} was modified");
+        }
     }
 
     // ── tmpfs through the VFS ─────────────────────────────────────────────
@@ -376,7 +416,7 @@ mod host_tests {
     #[test]
     fn tmpfs_file_lifecycle() {
         let _serial = serial();
-        vfs::init();
+        fresh_fs();
 
         assert!(vfs::create_file("/hello.txt"));
         let node = vfs::open("/hello.txt").expect("file is visible");
@@ -409,7 +449,7 @@ mod host_tests {
     #[test]
     fn tmpfs_directories_and_enumeration() {
         let _serial = serial();
-        vfs::init();
+        fresh_fs();
 
         assert!(vfs::create_dir("/dir"));
         assert!(vfs::create_file("/dir/a"));
@@ -435,7 +475,7 @@ mod host_tests {
     #[test]
     fn tmpfs_rejects_missing_parents_and_duplicate_creation() {
         let _serial = serial();
-        vfs::init();
+        fresh_fs();
 
         assert!(!vfs::create_file("/nope/deep/file"), "parent must exist");
         assert!(vfs::create_file("/dup"));
@@ -655,7 +695,7 @@ mod host_tests {
     #[test]
     fn pkg_install_list_and_remove() {
         let _serial = serial();
-        vfs::init();
+        fresh_fs();
         assert!(crate::pkg::pkg_init());
 
         let image = zpk_image("demo", "1.0", "/bin/demo", b"#!/bin/sh\necho hi\n");
@@ -684,7 +724,7 @@ mod host_tests {
     #[test]
     fn pkg_install_rejects_malformed_images() {
         let _serial = serial();
-        vfs::init();
+        fresh_fs();
         assert!(crate::pkg::pkg_init());
 
         // Too short to even hold a header.
@@ -710,7 +750,7 @@ mod host_tests {
     #[test]
     fn over_long_paths_are_refused_not_truncated() {
         let _serial = serial();
-        vfs::init();
+        fresh_fs();
 
         // Build "/x/x/.../deep" with MAX_PATH_SEGMENTS + 1 components.
         let mut deep = String::new();
@@ -779,7 +819,7 @@ mod host_tests {
     #[test]
     fn pkg_install_rejects_path_traversal() {
         let _serial = serial();
-        vfs::init();
+        fresh_fs();
         assert!(crate::pkg::pkg_init());
 
         for evil in [
@@ -849,7 +889,7 @@ mod host_tests {
     #[test]
     fn tmpfs_refuses_to_remove_a_non_empty_directory() {
         let _serial = serial();
-        vfs::init();
+        fresh_fs();
 
         assert!(vfs::create_dir("/d"));
         assert!(vfs::create_file("/d/child"));
@@ -881,5 +921,196 @@ mod host_tests {
         let level = sysctl::sysctl_find("kernel.log_level").expect("key exists");
         assert!(sysctl::sysctl_set(level, SysctlValue::IntVal(3)));
         assert_eq!(sysctl::sysctl_get(level).unwrap().value.as_int(), Some(3));
+    }
+
+    // ── mount namespaces ──────────────────────────────────────────────────
+
+    /// `mount_in_ns`/`umount_in_ns` had no coverage at all: a mount made in one
+    /// namespace must not be visible in another, and the root mount must not be
+    /// removable.
+    #[test]
+    fn mount_is_per_namespace() {
+        let _serial = serial();
+        fresh_fs();
+        zenus_ns::mnt::init();
+        assert!(vfs::create_dir("/mnt"));
+
+        let ns = zenus_ns::mnt::create().expect("create mount namespace");
+        assert!(vfs::create_mnt_ns(ns), "namespace needs its own mount table");
+
+        static OTHER_FS: crate::procfs::ProcFs = crate::procfs::ProcFs;
+        assert!(vfs::mount_in_ns(ns, "/mnt", &OTHER_FS));
+        assert!(vfs::umount_in_ns(ns, "/mnt"), "the mount must be there");
+        assert!(!vfs::umount_in_ns(ns, "/mnt"), "second umount must fail");
+        assert!(
+            !vfs::umount("/mnt"),
+            "the root namespace never had this mount"
+        );
+    }
+
+    // ── .zpk on-disk ABI ──────────────────────────────────────────────────
+
+    /// The `.zpk` reader used to cast byte offsets to `*const ZpkHeader` /
+    /// `*const ZpkFileEntry`, whose 4-byte alignment a packed byte stream does
+    /// not provide: a two-file image with a 5-byte first payload put the second
+    /// record at a misaligned address and aborted the process. These offsets
+    /// are what the (alignment-free) reader uses.
+    #[test]
+    fn zpk_layout_matches_the_structs() {
+        use crate::pkg::{layout, ZpkFileEntry, ZpkHeader};
+        use core::mem::{offset_of, size_of};
+
+        assert_eq!(offset_of!(ZpkHeader, magic), layout::MAGIC);
+        assert_eq!(offset_of!(ZpkHeader, name), layout::NAME);
+        assert_eq!(offset_of!(ZpkHeader, version), layout::VERSION);
+        assert_eq!(offset_of!(ZpkHeader, file_count), layout::FILE_COUNT);
+        assert_eq!(offset_of!(ZpkHeader, total_size), layout::TOTAL_SIZE);
+        assert_eq!(size_of::<ZpkHeader>(), layout::HEADER_SIZE);
+
+        assert_eq!(offset_of!(ZpkFileEntry, path), layout::ENTRY_PATH);
+        assert_eq!(offset_of!(ZpkFileEntry, size), layout::ENTRY_LEN);
+        assert_eq!(offset_of!(ZpkFileEntry, mode), layout::ENTRY_MODE);
+        assert_eq!(offset_of!(ZpkFileEntry, file_type), layout::ENTRY_FILE_TYPE);
+        assert_eq!(size_of::<ZpkFileEntry>(), layout::ENTRY_SIZE);
+    }
+
+    /// Two files in one image: the record walk (`offset += entry + payload`)
+    /// with a payload length that is not a multiple of 4. That is the case the
+    /// pointer casts got wrong.
+    #[test]
+    fn pkg_install_handles_a_multi_file_image() {
+        let _serial = serial();
+        fresh_fs();
+        assert!(crate::pkg::pkg_init());
+
+        use crate::pkg::layout as L;
+
+        let body_a: &[u8] = b"first"; // 5 bytes: not a multiple of 4
+        let body_b: &[u8] = b"second-file";
+        let entry_a = L::HEADER_SIZE;
+        let body_a_at = entry_a + L::ENTRY_SIZE;
+        let entry_b = body_a_at + body_a.len();
+        let body_b_at = entry_b + L::ENTRY_SIZE;
+
+        let mut image = alloc::vec![0u8; body_b_at + body_b.len()];
+        image[L::MAGIC..L::MAGIC + 4].copy_from_slice(b"ZPK1");
+        image[L::NAME..L::NAME + 5].copy_from_slice(b"multi");
+        image[L::VERSION..L::VERSION + 3].copy_from_slice(b"2.0");
+        image[L::FILE_COUNT..L::FILE_COUNT + 4].copy_from_slice(&2u32.to_le_bytes());
+
+        let mut put = |entry_at: usize, body_at: usize, path: &str, body: &[u8]| {
+            image[entry_at..entry_at + path.len()].copy_from_slice(path.as_bytes());
+            image[entry_at + L::ENTRY_LEN..entry_at + L::ENTRY_LEN + 4]
+                .copy_from_slice(&(body.len() as u32).to_le_bytes());
+            image[entry_at + L::ENTRY_MODE..entry_at + L::ENTRY_MODE + 2]
+                .copy_from_slice(&0o644u16.to_le_bytes());
+            image[body_at..body_at + body.len()].copy_from_slice(body);
+        };
+        put(entry_a, body_a_at, "/a.txt", body_a);
+        put(entry_b, body_b_at, "/sub/b.txt", body_b);
+
+        assert!(
+            crate::pkg::pkg_install(&image, 0),
+            "a packed two-file image must install"
+        );
+
+        let mut buf = [0u8; 32];
+        let a = vfs::open("/usr/local/a.txt").expect("first file installed");
+        let n = a.fs.read(a.inode, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n as usize], body_a);
+
+        let b = vfs::open("/usr/local/sub/b.txt").expect("second file installed");
+        let n = b.fs.read(b.inode, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n as usize], body_b);
+
+        let info = crate::pkg::pkg_info("multi").expect("manifest written");
+        assert_eq!(info.file_count, 2);
+        assert_eq!(info.version, "2.0");
+        assert_eq!(info.files, ["/usr/local/a.txt", "/usr/local/sub/b.txt"]);
+        assert!(crate::pkg::pkg_remove("multi"));
+    }
+
+    // ── read offsets ──────────────────────────────────────────────────────
+
+    /// Every procfs read so far used offset 0, so a reader that ignored the
+    /// offset entirely would still pass.
+    #[test]
+    fn procfs_honours_read_offsets() {
+        let _serial = serial();
+        use crate::procfs::{self, ProcFs};
+        use crate::vfs::FileSystem;
+        use alloc::string::String;
+
+        procfs::register_cpuinfo(|| String::from("processor\t: 0\n"));
+        let fs = ProcFs;
+
+        let mut whole = [0u8; 64];
+        let n = fs.read(1, 0, &mut whole).unwrap();
+        assert_eq!(&whole[..n as usize], b"processor\t: 0\n");
+
+        let mut part = [0u8; 4];
+        let n = fs.read(1, 10, &mut part).unwrap();
+        assert_eq!(&part[..n as usize], b": 0\n", "offset 10 of the source");
+        assert_eq!(fs.read(1, 9_999, &mut part).unwrap(), 0, "past the end");
+    }
+
+    #[test]
+    fn cgroup_honours_read_offsets() {
+        use crate::cgroup::CgroupFs;
+        use crate::vfs::FileSystem;
+
+        let fs = CgroupFs;
+        let mut buf = [0u8; 8];
+        let n = fs.read(4, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n as usize], b"cpu io m");
+        assert_eq!(fs.read(4, 9_999, &mut buf).unwrap(), 0);
+    }
+
+    // ── block cache eviction ──────────────────────────────────────────────
+
+    /// `evict_one` used to return the hash slot unconditionally once a 4-slot
+    /// window was full, overwriting whatever lived there — including a dirty
+    /// entry — while hundreds of free slots sat unused elsewhere.
+    #[test]
+    fn block_cache_survives_a_full_hash_window() {
+        let _serial = serial();
+        let dev = fake_device();
+        wipe_fake_device();
+
+        // More distinct blocks than the associativity of one window, spread
+        // across the whole (64-sector) device.
+        for lba in 0..FAKE_SECTORS as u64 {
+            assert!(bc_write(dev as u8, lba, &[lba as u8; 8]), "write {lba}");
+        }
+        // Everything written must still read back, i.e. no entry was
+        // overwritten on the way.
+        let mut buf = [0u8; 8];
+        for lba in 0..FAKE_SECTORS as u64 {
+            assert!(bc_read(dev as u8, lba, &mut buf), "read {lba}");
+            assert_eq!(buf[0], lba as u8, "sector {lba} was overwritten");
+        }
+
+        // Dirty entries are still pending: nothing may have been lost.
+        assert!(bc_flush());
+        assert_eq!(fake_sector(FAKE_SECTORS as u64 - 1)[0], (FAKE_SECTORS - 1) as u8);
+    }
+
+    /// Regression: a write to a sector the device rejects used to be cached
+    /// anyway and could never be flushed, so one bad LBA made every later
+    /// `bc_flush()` (and any read that had to evict) fail for the rest of the
+    /// session.
+    #[test]
+    fn a_rejected_sector_does_not_poison_the_cache() {
+        let _serial = serial();
+        let dev = fake_device();
+        wipe_fake_device();
+
+        assert!(bc_write(dev as u8, 7, &[0x11; 8]));
+        assert!(!bc_write(dev as u8, 9_000, &[0x22; 8]), "out-of-range write");
+        assert!(bc_flush(), "a rejected write must not wedge later flushes");
+
+        let mut buf = [0u8; 8];
+        assert!(bc_read(dev as u8, 7, &mut buf));
+        assert_eq!(&buf, &[0x11; 8]);
     }
 }

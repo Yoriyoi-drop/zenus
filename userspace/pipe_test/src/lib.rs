@@ -15,7 +15,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 //   [rsp+16]  = read buffer (64 bytes)
 //
 // Algorithm:
-//   1. sys_pipe(fds)  → SYS_PIPE=22, rdi=rsp
+//   1. sys_pipe(fds)  → SYS_PIPE=111, rdi=rsp (was 22 = SYS_ACCESS)
 //   2. Write "Hello from pipe!\n" to write_fd via SYS_WRITE=1
 //   3. Read from read_fd via SYS_READ=0
 //   4. Write buffer to stdout (fd 1)
@@ -28,7 +28,7 @@ global_asm!(
     "  sub rsp, 96",
     "",
     // 1. sys_pipe(fds) — create pipe, fds at [rsp]
-    "  mov rax, 22",              // SYS_PIPE
+    "  mov rax, 111",             // SYS_PIPE
     "  mov rdi, rsp",             // fds buffer
     "  xor rsi, rsi",             // flags (0)
     "  xor rdx, rdx",             // unused
