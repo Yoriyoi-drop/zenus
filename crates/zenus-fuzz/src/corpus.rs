@@ -85,10 +85,13 @@ pub fn get_next_input() -> Vec<u8> {
         return get_default_seeds()[0].to_vec();
     }
     let idx = c.next_idx % c.size;
-    c.next_idx = c.next_idx.wrapping_add(1);
     // Clone out before touching `next_idx`: indexing the array borrows `c`
     // immutably, and the counter update needs it mutably.
     let input = c.inputs[idx].clone().unwrap_or_default();
+    // Advance exactly once. This used to be incremented twice — once before
+    // the clone and once after — so with a corpus of 2 (or any even size) the
+    // cursor moved by 2 per call and `idx` stayed 0 forever: the campaign
+    // replayed the first input and never tried the rest.
     c.next_idx = c.next_idx.wrapping_add(1);
     drop(c);
     input

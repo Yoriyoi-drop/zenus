@@ -41,6 +41,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Host unit tests
+        run: |
+          echo "Running host-side unit tests..."
+          # Explicit host triple: the workspace default is the bare-metal one,
+          # which has no std and therefore no test harness.
+          cargo test --workspace --target x86_64-unknown-linux-gnu
+          echo "✅ Host unit tests passed"
+
       - name: Build with Testing Feature
         run: |
           echo "Building Zenus with testing feature..."

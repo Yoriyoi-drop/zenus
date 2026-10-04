@@ -100,5 +100,16 @@ pub fn init() {
 #[no_mangle]
 pub extern "x86-interrupt" fn interrupt_stray(_frame: InterruptStackFrame) {
     pic_eoi_if_bsp();
+    // Known limitation: this handler is installed on every vector from 34 to
+    // 255 that has no owner, and it acknowledges unconditionally. For a vector
+    // that did *not* arrive through the LAPIC (a legacy PIC IRQ, a stray `int`)
+    // there is no LAPIC ISR bit to clear, and the EOI clears whichever vector
+    // is in service on this CPU instead — which can swallow an unrelated
+    // interrupt.
+    //
+    // Gating it properly needs the vector number, and
+    // `x86_interrupt::InterruptStackFrame` does not expose it. Reading it back
+    // out of the frame by hand would depend on the gate type and stack width,
+    // so this stays documented rather than guessed.
     crate::interrupts::apic::eoi();
 }

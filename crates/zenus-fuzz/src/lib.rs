@@ -420,3 +420,223 @@ pub fn reset() {
     *stats = FuzzStats::new();
     stats.start_time = zenus_arch::interrupts::pit::get_ticks();
 }
+
+/// Host-side unit tests (`cargo test --workspace`).
+///
+/// The campaign itself needs the fault-containment machinery and a booted
+/// kernel, but the parts that decide *what* to feed it — mutation, minimisation
+/// bookkeeping, corpus and coverage accounting — are pure logic and are exactly
+/// where a silently wrong result costs days of debugging.
+#[cfg(test)]
+mod host_tests {
+    use crate::corpus;
+    use crate::coverage;
+    use zenus_sync::spinlock::{SpinLock, SpinLockGuard};
+    use crate::minimizer::{minimize, minimize_all, minimize_with};
+    use crate::mutator::{generate_mutations, mutate, MutationStrategy, STRATEGIES};
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// Corpus and coverage are process-global, and `cargo test` runs tests on
+    /// parallel threads: without this the cases reset each other's state
+    /// mid-assertion.
+    static SERIAL: SpinLock<()> = SpinLock::new(());
+
+    fn serial() -> SpinLockGuard<'static, ()> {
+        SERIAL.lock()
+    }
+
+    // ── mutation ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn every_strategy_changes_a_non_empty_input() {
+        let input = b"the quick brown fox jumps over the lazy dog";
+        for strategy in STRATEGIES {
+            let out = mutate(input, strategy);
+            assert_ne!(out, input, "{strategy:?} left the input untouched");
+        }
+    }
+
+    #[test]
+    fn mutation_is_deterministic_for_a_given_input() {
+        // The campaign relies on this: a recorded crash is replayed by feeding
+        // the *same* bytes back, not by re-deriving the mutation.
+        let input = b"deterministic please";
+        for strategy in STRATEGIES {
+            assert_eq!(
+                mutate(input, strategy),
+                mutate(input, strategy),
+                "{strategy:?} is not deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_input_is_handled_by_every_strategy() {
+        for strategy in STRATEGIES {
+            let out = mutate(b"", strategy);
+            assert!(out.is_empty(), "{strategy:?} invented data from nothing");
+        }
+    }
+
+    #[test]
+    fn single_byte_input_survives_arithmetic() {
+        // `arithmetic` needs two bytes to read its delta from; a one-byte input
+        // must not panic.
+        let out = mutate(b"\x05", MutationStrategy::Arithmetic);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn generated_mutations_are_distinct_from_the_seed() {
+        let seed = b"seed input for the campaign";
+        let cases = generate_mutations(seed, 8);
+        assert!(cases.len() >= 8, "asked for 8 cases");
+        for case in &cases {
+            assert_ne!(case, &seed.to_vec());
+        }
+    }
+
+    // ── minimisation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn minimisation_never_returns_an_input_the_predicate_rejects() {
+        // Oracle: "crashes if the first byte is 0xAA". The minimiser must find a
+        // one-byte input and then be unable to improve on it.
+        let input = b"\xAA\x01\x02\x03\x04\x05";
+        let oracle = |candidate: &[u8]| candidate.first() == Some(&0xAA);
+        let minimal = minimize_with(input, oracle);
+        assert_eq!(minimal, b"\xAA", "must shrink to the minimal witness");
+        assert!(oracle(&minimal));
+    }
+
+    #[test]
+    fn minimisation_respects_a_predicate_that_rejects_everything() {
+        let input = b"\x00\x01\x02";
+        let minimal = minimize_with(input, |_| false);
+        assert_eq!(minimal, input, "nothing may be removed if nothing crashes");
+    }
+
+    #[test]
+    fn minimisation_stops_at_a_fixed_point() {
+        let input = b"\xAA\xAA\xAA";
+        let oracle = |candidate: &[u8]| candidate.len() >= 2 && candidate[0] == 0xAA;
+        let minimal = minimize_with(input, oracle);
+        assert!(oracle(&minimal));
+        assert!(minimal.len() < input.len());
+        // Running it again must not shrink further (the loop terminates).
+        assert_eq!(minimize_with(&minimal, oracle), minimal);
+    }
+
+    #[test]
+    fn default_minimise_keeps_at_least_one_byte() {
+        // The built-in predicate cannot run anything, so this documents its
+        // actual (weak) behaviour instead of pretending it debugs.
+        // Any non-empty candidate "crashes", so the search shrinks to one byte
+        // and then zeroes it. This is exactly why the built-in predicate cannot
+        // debug anything: the result carries no information about the crash.
+        assert_eq!(minimize(b"abcdef"), vec![0u8]);
+        assert_eq!(minimize(b""), Vec::<u8>::new());
+        assert_eq!(minimize_all(&[b"abc".to_vec()]), vec![vec![0u8]]);
+    }
+
+    // ── coverage ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn coverage_counts_only_new_edges() {
+        let _serial = serial();
+        coverage::init();
+
+        assert_eq!(coverage::edge_count(), 0);
+        coverage::record_edge(0x1111);
+        assert_eq!(coverage::edge_count(), 1);
+        coverage::record_edge(0x1111);
+        assert_eq!(coverage::edge_count(), 1, "a repeated edge is not new");
+        coverage::record_edge(0x2222);
+        assert_eq!(coverage::edge_count(), 2);
+        // `is_new_edge` means "not recorded yet", so it is false for both now.
+        assert!(!coverage::is_new_edge(0x2222));
+        assert!(!coverage::is_new_edge(0x1111));
+        assert!(coverage::is_new_edge(0x3333), "an unseen edge is new");
+    }
+
+    #[test]
+    fn coverage_delta_tracks_one_case() {
+        let _serial = serial();
+        coverage::init();
+        coverage::record_edge(0xAAAA);
+        assert!(coverage::is_new_edge(0xAAAA) == false, "already known");
+
+        coverage::reset_delta();
+        coverage::record_edge(0xAAAA);
+        assert!(!coverage::grew(), "re-walking a known edge is not growth");
+
+        coverage::record_edge(0xBBBB);
+        assert!(coverage::grew(), "a new edge inside the case is growth");
+        assert_eq!(coverage::delta(), 1);
+    }
+
+    #[test]
+    fn coverage_percentage_is_bounded() {
+        let _serial = serial();
+        coverage::init();
+        assert_eq!(coverage::coverage_percent(), 0);
+
+        // The percentage is measured against the 65536-slot map, so a handful
+        // of edges rounds down to 0. What matters is that it stays a
+        // percentage and never exceeds 100.
+        coverage::record_edge(1);
+        let pct = coverage::coverage_percent();
+        assert!((0..=100).contains(&pct), "percent out of range: {pct}");
+        assert_eq!(pct, (coverage::edge_count() * 100 / 65_536) as u32);
+    }
+
+    // ── corpus ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn corpus_stores_and_returns_inputs() {
+        let _serial = serial();
+        corpus::init();
+
+        corpus::add_input(b"first".to_vec());
+        corpus::add_input(b"second".to_vec());
+        assert_eq!(corpus::size(), 2);
+        assert_eq!(corpus::get_input(0), Some(b"first".to_vec()));
+        assert_eq!(corpus::get_input(1), Some(b"second".to_vec()));
+        assert_eq!(corpus::get_input(2), None, "out of range");
+    }
+
+    #[test]
+    fn corpus_rejects_empty_and_oversized_inputs() {
+        let _serial = serial();
+        corpus::init();
+
+        corpus::add_input(Vec::new());
+        assert_eq!(corpus::size(), 0, "an empty input is not a test case");
+
+        corpus::add_input(vec![0u8; 100_000]);
+        assert_eq!(corpus::size(), 0, "an oversized input is dropped");
+    }
+
+    #[test]
+    fn corpus_clear_drops_everything() {
+        let _serial = serial();
+        corpus::init();
+        corpus::add_input(b"x".to_vec());
+        corpus::clear();
+        assert_eq!(corpus::size(), 0);
+        assert_eq!(corpus::get_input(0), None);
+    }
+
+    #[test]
+    fn corpus_next_input_cycles_through_what_was_added() {
+        let _serial = serial();
+        corpus::init();
+        corpus::add_input(b"a".to_vec());
+        corpus::add_input(b"b".to_vec());
+
+        let first = corpus::get_next_input();
+        let second = corpus::get_next_input();
+        assert_ne!(first, second, "the cursor must advance");
+    }
+}

@@ -211,4 +211,57 @@ mod host_tests {
         mnt::destroy(NS_ROOT);
         assert!(mnt::exists(NS_ROOT), "root mnt namespace is indestructible");
     }
+
+    #[test]
+    fn namespace_tables_report_full_instead_of_overflowing() {
+        let _serial = serial();
+        ipc::init();
+        // 16 slots, one of them the root namespace.
+        for _ in 0..15 {
+            assert!(ipc::create().is_some());
+        }
+        assert_eq!(ipc::create(), None, "the table must be full");
+        assert!(ipc::exists(NS_ROOT));
+    }
+
+    #[test]
+    fn pid_entry_table_is_bounded() {
+        let _serial = serial();
+        pid::init();
+        let ns = pid::create().expect("create pid namespace");
+
+        // 64 entries per namespace.
+        for _ in 0..64 {
+            assert!(pid::register_task(ns, 1).is_some());
+        }
+        assert_eq!(
+            pid::register_task(ns, 2),
+            None,
+            "a full entry table must refuse, not overwrite"
+        );
+        // The surviving entries are still resolvable.
+        assert!(pid::global_tid(ns, 1).is_some());
+    }
+
+    /// Regression shape: `map_uid` used to accept a second mapping for the same
+    /// inner uid, and `translate_uid` then returned whichever came first — so
+    /// the mapping depended on insertion order.
+    #[test]
+    fn user_namespace_reports_duplicate_mappings_instead_of_shadowing() {
+        let _serial = serial();
+        user::init();
+        let ns = user::create().expect("create user namespace");
+
+        assert!(user::map_uid(ns, 0, 1000));
+        assert_eq!(user::translate_uid(ns, 0), Some(1000));
+
+        // A second mapping for the same inner uid is refused, so the mapping
+        // can never depend on insertion order.
+        assert!(!user::map_uid(ns, 0, 2000), "duplicate inner uid must fail");
+        assert_eq!(user::translate_uid(ns, 0), Some(1000), "first wins, no shadowing");
+
+        // A different inner uid still maps.
+        assert!(user::map_uid(ns, 1, 2001));
+        assert_eq!(user::translate_uid(ns, 1), Some(2001));
+    }
 }

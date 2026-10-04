@@ -62,14 +62,21 @@ mod host_tests {
         assert_eq!(*LOCK.lock_no_irq(), 42);
     }
 
+    /// `IrqGuard` masks interrupts on bare metal and compiles to nothing on the
+    /// host (`cli` faults in ring 3), so there is nothing to observe here. The
+    /// test that used to "cover" it only incremented its own counter, which
+    /// passed whether or not the guard did anything.
+    ///
+    /// What *is* checkable off-target is that the type is usable as a scope
+    /// guard and does not panic on construction or drop.
     #[test]
-    fn irq_guard_is_scope_guard_on_host() {
-        static LOCK: SpinLock<u32> = SpinLock::new(0);
+    fn irq_guard_is_a_scope_guard_on_host() {
+        let mut nested: Option<IrqGuard> = None;
         {
-            let _guard = IrqGuard::new();
-            *LOCK.lock() += 1;
+            let _outer = IrqGuard::new();
+            nested = Some(IrqGuard::new());
         }
-        assert_eq!(*LOCK.lock(), 1);
+        drop(nested.take());
     }
 
     #[test]

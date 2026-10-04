@@ -513,6 +513,10 @@ mod host_tests {
 
     #[test]
     fn procfs_exposes_the_expected_directory_listing() {
+        // `read_dir` walks the same process-global sources that
+        // `procfs_reads_registered_sources` registers, so this needs the lock
+        // too — otherwise the listing depends on which test runs first.
+        let _serial = serial();
         use crate::procfs::ProcFs;
         use crate::vfs::FileSystem;
 

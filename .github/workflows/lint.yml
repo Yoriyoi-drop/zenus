@@ -71,8 +71,17 @@ jobs:
 
       - name: Run Clippy
         run: |
-          cargo clippy --all-targets --all-features -- -D warnings
-          echo "✅ Clippy checks passed"
+          # `--all-targets` includes test targets, which need a host triple:
+          # x86_64-unknown-none has no `std`, so the harness cannot link there.
+          cargo clippy --all-targets --all-features --target x86_64-unknown-linux-gnu -- -D warnings
+          echo "✅ Clippy checks passed (host)"
+
+      - name: Clippy (kernel target)
+        run: |
+          # The kernel crates are no_std and must also be linted for the real
+          # target; `--lib` keeps the un-linkable test harness out of it.
+          cargo clippy --workspace --lib --target x86_64-unknown-none -- -D warnings
+          echo "✅ Clippy checks passed (kernel)"
 
   rustdoc:
     name: Rust Documentation
@@ -134,7 +143,8 @@ jobs:
 
       - name: Memory Safety Scan
         run: |
-          cargo clippy --all-targets --all-features -- -D warnings -D clippy::integer_arithmetic -D clippy::unwrap_used -D clippy::out_of_bounds
+          cargo clippy --all-targets --all-features --target x86_64-unknown-linux-gnu -- \
+            -D warnings -D clippy::integer_arithmetic -D clippy::unwrap_used -D clippy::out_of_bounds
 
       - name: Unsafe Code Audit
         run: |

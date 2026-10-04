@@ -236,7 +236,33 @@ const SYS_GETPPID: u64 = 210;
 
 type SyscallFn = fn(u64, u64, u64, u64, u64, u64) -> u64;
 
-static SYSCALL_TABLE: [Option<SyscallFn>; 256] = init_table();
+/// Number of dispatch slots. The ABI reserves 0..255, and `syscall_dispatch6`
+/// rejects anything above it.
+pub const SYSCALL_TABLE_SIZE: usize = 256;
+
+static SYSCALL_TABLE: [Option<SyscallFn>; SYSCALL_TABLE_SIZE] = init_table();
+
+/// Syscall numbers that have a handler, in table order.
+///
+/// The table is built by a `const fn`, so this is the only way to look at it
+/// from outside. It exists so the host test suite can prove what the ABI bugs
+/// actually were about: a number registered twice (one handler silently
+/// shadows the other), a number outside the table, or `userspace/` hard-coding
+/// a number the kernel no longer uses.
+pub fn registered_syscalls() -> alloc::vec::Vec<u64> {
+    let mut out = alloc::vec::Vec::new();
+    for (number, slot) in SYSCALL_TABLE.iter().enumerate() {
+        if slot.is_some() {
+            out.push(number as u64);
+        }
+    }
+    out
+}
+
+/// How many syscalls are implemented.
+pub fn syscall_count() -> usize {
+    registered_syscalls().len()
+}
 
 const fn init_table() -> [Option<SyscallFn>; 256] {
     let mut t: [Option<SyscallFn>; 256] = [None; 256];

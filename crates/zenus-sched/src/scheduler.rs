@@ -370,6 +370,9 @@ core::arch::global_asm!(
     "  xor edi, edi",
     "  mov rsi, rsp",
     "  call frame_error_report",
+    // `frame_error_report` is `-> !`; trap instead of running off the end of
+    // the asm block if that ever changes.
+    "  ud2",
     ".att_syntax prefix",
 );
 
@@ -531,6 +534,9 @@ core::arch::global_asm!(
     "  mov edi, 1",
     "  mov rsi, rsp",
     "  call frame_error_report",
+    // `frame_error_report` is `-> !`; trap instead of running off the end of
+    // the asm block if that ever changes.
+    "  ud2",
     ".att_syntax prefix",
 );
 
@@ -1927,7 +1933,15 @@ pub fn idle() -> ! {
 /// keeps the boot task's frame on the boot stack instead of `IDLE_RSP`, and
 /// the context switch never completes — the boot task simply spins and the
 /// campaign task is never entered.
-pub fn idle_until(cond: fn() -> bool) {
+/// Spin on the idle stack until `cond` returns true, then run `finished`.
+///
+/// `finished` is a separate `fn() -> !` on purpose. This function switches
+/// RSP to `IDLE_RSP`, so control can never come back to the caller's frame:
+/// if `cond` returned true and the asm simply fell through, the following `ret`
+/// would pop a "return address" out of the idle task's frame and jump to
+/// garbage. That made `fuzz_runner`'s `abort("watchdog")` unreachable — the
+/// watchdog path could never report a timeout.
+pub fn idle_until(cond: fn() -> bool, finished: fn() -> !) {
     let check: fn() -> bool = cond;
     unsafe {
         core::arch::asm!(
@@ -1944,11 +1958,15 @@ pub fn idle_until(cond: fn() -> bool) {
             "hlt",
             "jmp 3b",
             "4:",
-            "sti",
+            "call {done}",
+            // `done` never returns; trap rather than fall through into
+            // whatever follows.
+            "ud2",
             idle_rsp = sym IDLE_RSP,
             check = in(reg) check,
-            // The predicate is an ordinary Rust `fn` pointer; the `call` above
-            // goes through it, so nothing else needs to know it is Rust-ABI.
+            done = in(reg) finished,
+            // The predicates are ordinary Rust `fn` pointers; the `call`s above
+            // go through them, so nothing else needs to know it is Rust-ABI.
         );
     }
 }

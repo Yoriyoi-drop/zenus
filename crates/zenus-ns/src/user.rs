@@ -102,6 +102,13 @@ pub fn map_uid(ns_id: NsId, inside: u32, outside: u32) -> bool {
     if ns.count >= MAX_UID_MAP {
         return false;
     }
+    // One mapping per inner uid. Accepting a second one made the result depend
+    // on insertion order, because `translate_uid` returns the first match.
+    for i in 0..ns.count {
+        if ns.uid_map[i].0 == inside {
+            return false;
+        }
+    }
     ns.uid_map[ns.count] = (inside, outside);
     ns.count += 1;
     true

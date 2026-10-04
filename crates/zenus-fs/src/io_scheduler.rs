@@ -32,6 +32,10 @@ pub fn io_flush() {
     crate::block_cache::bc_flush();
 }
 
+/// `(total, reads, writes)`.
+///
+/// Only `total` is tracked: the read/write split is not broken out, so the last
+/// two are always 0. Callers must not read them as a breakdown.
 pub fn io_stats() -> (u64, u64, u64) {
     let sched = IO_SCHEDULER.lock();
     (sched.total_ios, 0, 0)

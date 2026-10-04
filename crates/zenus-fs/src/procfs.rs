@@ -83,6 +83,20 @@ pub fn register_task_count(f: CountFn) {
     *TASK_COUNT_FN.lock() = Some(f);
 }
 
+/// Forget every registered data source.
+///
+/// The registrations are process-global and there is no other way to clear
+/// them, so a host test that registers a source leaks it into every later
+/// `procfs` read in the same process.
+pub fn reset_sources() {
+    *CPUINFO_FN.lock() = None;
+    *MEMINFO_FN.lock() = None;
+    *UPTIME_FN.lock() = None;
+    *STAT_FN.lock() = None;
+    *LOADAVG_FN.lock() = None;
+    *TASK_COUNT_FN.lock() = None;
+}
+
 fn call_data(f: &SpinLock<Option<DataFn>>, fallback: &str) -> String {
     let lock = f.lock();
     lock.as_ref()

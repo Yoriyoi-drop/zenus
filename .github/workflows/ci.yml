@@ -44,7 +44,7 @@ jobs:
 
       - name: Clippy Lint
         run: |
-          cargo clippy --all-targets --all-features -- -D warnings
+          cargo clippy --all-targets --all-features --target x86_64-unknown-linux-gnu -- -D warnings
 
   test-unit:
     name: Unit Tests
@@ -78,7 +78,9 @@ jobs:
 
       - name: Run Unit Tests
         run: |
-          cargo test --target x86_64-unknown-none --features testing
+          # Host triple is mandatory: x86_64-unknown-none has no std, so there
+          # is no test harness to link there ("can't find crate for `test`").
+          cargo test --workspace --target x86_64-unknown-linux-gnu
 
   test-integration:
     name: Integration Tests
@@ -185,11 +187,11 @@ jobs:
 
       - name: Security Scan
         run: |
-          cargo valgrind test --target x86_64-unknown-none --features testing
+          cargo valgrind test --workspace --target x86_64-unknown-linux-gnu
 
       - name: Memory Safety Check
         run: |
-          cargo clippy --all-targets --all-features -- -D warnings -D clippy::integer_arithmetic -D clippy::unwrap_used
+          cargo clippy --all-targets --all-features --target x86_64-unknown-linux-gnu -- -D warnings -D clippy::integer_arithmetic -D clippy::unwrap_used
 
   documentation:
     name: Documentation

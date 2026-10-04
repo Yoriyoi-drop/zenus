@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 /// Mutation strategies for fuzzing
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MutationStrategy {
     BitFlip,
     ByteFlip,

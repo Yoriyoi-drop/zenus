@@ -1,112 +1,123 @@
-# AGENTS.md - Zenus OS Production Review
+# AGENTS.md - Zenus OS
 
 ## Overview
 
-This file contains the comprehensive production review configuration for Zenus OS, an x86_64 server kernel written in Rust. The project is currently at **pre-alpha** stage (approximately 18.5% production readiness) with core infrastructure like a scheduler, memory manager, filesystem, networking stack, and user mode support already functional.
+Zenus is an x86_64 kernel written in Rust (`no_std`). It boots via Limine
+(BIOS + UEFI), runs under QEMU, and has an interactive shell, an in-kernel
+fuzzing framework and a host-side unit-test suite.
+
+State: **pre-alpha**. Core subsystems work; the security model is incomplete
+(see `SECURITY.md`) and several subsystems are deliberately shallow (see
+"Known shallow spots" below).
+
+## Build and run
+
+```bash
+make build          # kernel -> build/zenus (cargo build --target x86_64-unknown-none)
+make iso            # bootable ISO
+make run-gui        # QEMU with a window
+make run-serial     # QEMU headless, serial on stdio
+make run-tcp        # serial over TCP (nc localhost 45678)
+```
+
+**Target discipline matters.** The repo has *no* default cargo target on
+purpose. `cargo build`/`cargo test` therefore build for the host, and anything
+producing kernel code passes `--target x86_64-unknown-none` explicitly (the
+Makefile does). `x86_64-unknown-none` has no `std`, so `cargo test` there
+fails with "can't find crate for `test`" and a missing `#[panic_handler]`.
+Do not "fix" this by adding `[build] target` back, and do not add a cargo
+alias for it either: cargo silently ignores an alias that shadows a built-in
+command.
+
+## Testing
+
+Two layers:
+
+```bash
+make test-host      # host unit tests: cargo test --workspace
+make test           # in-kernel suite inside QEMU (apps/src/test_runner.rs)
+make fuzz-smoke     # in-kernel fuzzing campaign
+```
+
+- **Host tests** are `#[cfg(test)] mod host_tests` modules inside the kernel
+  crates, run for the host triple. They cover pure logic and must never touch
+  privileged instructions: `cli`/`sti`, `in`/`out` port I/O, CR0/CR3/CR8, MSRs
+  and MMIO all fault in ring 3. Where a bare-metal path needs one of those, it
+  is `#[cfg(target_os = "none")]`-gated with a host twin.
+- **In-kernel tests** are `#[cfg(feature = "testing")] pub mod tests` modules
+  returning `Result<(), &'static str>`, registered in
+  `apps/src/test_runner.rs`. Only this layer can test MMIO/IDT/APIC.
+
+Conventions:
+
+- Host tests use `#[test]` and `assert!`. Kernel tests use `test!()` and return
+  `Result`. The two are named differently (`host_tests` vs `tests`) on purpose.
+- Module-global kernel state (block cache, devfs, VFS, sysctl, procfs, journal,
+  route table, firewall, corpus, coverage, lockdep) is shared by every test in
+  the process. Guard such tests with a `static SERIAL: SpinLock<()>`.
+- Cross-process state that leaks between tests needs a reset API
+  (`TmpFs::reset`, `procfs::reset_sources`, `bc_invalidate_all`, …); add one
+  rather than writing a test that depends on ordering.
+- A new feature comes with a test. If a test finds a bug, fix the bug and keep
+  the test as the regression.
 
 ## Architecture
 
-### Kernel Architecture Overview
+Layered crates, bottom to top: `zenus-sync` → `zenus-console`/`zenus-mem` →
+`zenus-arch` → `zenus-fs`/`zenus-net` → `zenus-sched` → `zenus-syscall`, with
+`apps` as the entry point and `zenus-fuzz` as an alternate entry point.
 
-#### Layer 1: Core Infrastructure
-- **Architecture** (`zenus-arch`): x86_64 details, APIC, ACPI, PCI, SMP, GDT, IDT, interrupts, drivers (keyboard, ATA, RTC)
-- **Console** (`zenus-console`): VGA text mode, serial, logging, kernel messages
-- **Synchronization** (`zenus-sync`): Spinlock, IRQ guard, lockdep for deadlock detection
+Boot order in `apps::entry`: Limine/HHDM → frame allocator → paging → IDT →
+APIC (timer) → keyboard + serial IRQ → scheduler → VFS mounts → namespaces →
+PCI → virtio → ATA → ext2 (`/mnt`, `/virtio`) → journal replay → network →
+SMP bring-up → init system → shell task → `loop { scheduler::idle() }`.
 
-#### Layer 2: Resource Management
-- **Memory** (`zenus-mem`): Paging, frame allocator, heap allocator, virtual memory
-- **Scheduler** (`zenus-sched`): Preemptive round-robin, task management, SMP support
+Three things worth knowing before touching the scheduler:
 
-#### Layer 3: Storage and File Systems
-- **Filesystem** (`zenus-fs`): ext2 (read-write), tmpfs, devfs, tarfs, VFS
-- **Block Cache**: 64-entry LRU write-back cache
+- `TSS.RSP0` points at `kernel_rsp_top`, so the timer ISR descends from the top
+  of each task stack. Task frames live `STACK_GUARD` bytes below it
+  (`scheduler::frame_base`); every constructor must use that helper.
+- `SpinLock::lock()` masks interrupts on bare metal. Anything called from an
+  ISR must not take a lock that a task can hold.
+- Interrupt vectors are shared constants in `zenus_arch::interrupts`
+  (`TIMER_VECTOR`, `SERIAL_VECTOR`, `NIC_VECTOR`, `SPURIOUS_VECTOR`,
+  `RESERVED_VECTORS`). A driver that routes to a vector not in that list gets
+  its interrupt acknowledged and dropped.
 
-#### Layer 4: Networking
-- **Network Stack** (`zenus-net`): IPv4/TCP/UDP/ICMP, DHCP, DNS, routing, RTL8139 driver
-- **VirtIO**: virtio-net, virtio-blk, virtio-balloon drivers
+## Known shallow spots
 
-#### Layer 5: User Interface and Services
-- **Syscall** (`zenus-syscall`): Basic Linux-compatible system call interface
-- **Userspace**: ELF loader, user-mode task execution via SYSCALL/SYSRET
-- **Init System** (`zenus-sched/init.rs`): PID 1 process manager, service supervision
+Do not assume these work; read the code first.
 
-### Key Features Implemented
+- **SMAP/SMEP are implemented but disabled** at boot (`apps/src/lib.rs`, the
+  commented-out `enable_smep_smap`). They fault in userspace programs because
+  writing the user stack through HHDM with `stac` is unreliable; the suspected
+  cause is PML4 U/S handling in `create_address_space` / `map_user_page_raw`.
+  Until that is fixed the kernel can touch user memory freely.
+- No KPTI, no capabilities, no secure boot, no crypto library.
+- `zenus-fs/src/cgroup.rs` is a **read-only view** of the cgroup v2 layout:
+  create/unlink/write all fail, no controller is enforced.
+- `zenus-net/src/ssh.rs` speaks a homegrown `ZENUS_SSH/1.0` line protocol with a
+  hand-rolled keystream and a default password of `zenus`. It is not SSH.
+- `zenus-fuzz`'s `minimizer::minimize` uses a predicate that cannot reproduce a
+  crash (it only refuses to shrink to nothing); use `minimize_with` with a real
+  oracle.
+- `io_scheduler::io_stats()` returns a total and two hardcoded zeros.
+- The ZENUS_SSH keystream has ~2 bits of entropy per byte (pinned by a test).
 
-#### Core Infrastructure ✅
-- **Boot**: Limine bootloader (BIOS + UEFI support)
-- **SMP**: Multi-core support with APIC timer, per-CPU data
-- **Memory**: 4-level paging with user/kernel space isolation
-- **Interrupts**: IDT with all 32 exceptions + IRQ support
+## Docs
 
-#### Storage ✅
-- **Filesystems**: ext2 (read-write), journaling, fsck, block cache
-- **Device Model**: devfs with ATA driver for disk access
+`ARCHITECTURE.md` (layers), `SECURITY.md` (threats and gaps), `ROADMAP.md`
+(phases), `CONTRIBUTING.md` (workflow), `doc/fuzzing.md` (campaign modes),
+`DESIGN.md` / `AETHER.md` (proposed executable formats and CLI design — design
+documents, not descriptions of the current code).
 
-#### Networking ✅
-- **Stack**: Full TCP (3-way handshake, retransmissions), UDP, ICMP, DHCP server/client
-- **Routing**: Static routing with longest-prefix match
-- **Network Interface**: RTL8139 PIO driver + virtio networking
+## Style
 
-#### User Space ✅
-- **Process Model**: User-mode tasks via SYSCALL/SYSRET, ring 3 support
-- **System Calls**: 22 implemented, 22 missing (fork, exec, pipe, signals etc.)
-- **Services**: Init system with supervision, crash recovery
-
-### Critical Missing Components ⚠️
-
-#### Security (Critical Issues)
-- User/kernel isolation: No SMAP/SMEP, no KPTI
-- Capability system: Absent
-- Authentication/Authorization: Not implemented
-- Secure boot: Not supported
-- Memory safety: Extensive unsafe blocks without audit
-
-#### Process Management (Critical)
-- No fork/exec system calls
-- Missing pipe IPC
-- No signal handling
-- No shared libraries (no libc)
-
-#### Storage (Critical)
-- Driver model: Monolithic drivers, no hotplug
-- ATA implementation: PIO-only (performance issues)
-- No virtualization drivers beyond virtio
-
-#### Cloud & Production (Critical)
-- Container namespaces: Partial (PID + UTS only)
-- Cgroups v2: Missing
-- OCI runtime: Not implemented
-- Docker compatibility: None
-
-#### Developer Experience (High)
-- Documentation: Minimal (this audit.md is primary documentation)
-- Build system: Custom Makefile (no standardized CI/CD)
-- Testing: 25 unit tests (limited coverage)
-- API stability: Not versioned
-
-### Target Audience
-
-**Primary Purpose**: Educational operating system for understanding kernel development in Rust
-**Not suitable for**: Production workloads, cloud infrastructure, mission-critical systems
-
-## Notes
-
-### Current Strengths
-- Rust-based memory safety
-- Modular crate architecture
-- Detailed TCP/IP implementation
-- ext2 journaling and crash recovery
-- BSD socket API familiarity
-
-### Current Limitations
-- User/kernel isolation model incomplete
-- Syscall interface very limited
-- No modern networking security features
-- Development tools not standardized
-- Performance limited by PIO-only drivers
-
-### Recommended Next Steps
-
-1. **Phase 1 Complete** (6-12 months): User/kernel isolation, complete syscall set
-2. **Phase 2 Focus** (12-18 months): Container support, cgroups, secure boot
-3. **Phase 3 Vision** (18-24 months): Cloud readiness, virtualization integration
+- Comments explain *why*, especially when the obvious implementation is wrong.
+  Several invariants here were learned the hard way and are documented at the
+  code that enforces them; keep that up.
+- Prefer a pure helper over logic that can only be tested in a VM. That is how
+  `frame_base`, `stack_size_is_valid`, `install_path_for`, `minimize_with` and
+  `error::catalog` came to exist.
+- Keep `unsafe` blocks local and justified; several exist to talk to hardware
+  and say so in a comment.

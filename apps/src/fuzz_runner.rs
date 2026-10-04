@@ -154,10 +154,10 @@ pub fn run_and_exit(mode: zenus_fuzz::Mode, cases: u64) -> ! {
     // `scheduler::idle()` does for the shell. A bare `yield_now()` from the boot
     // task leaves the boot task's frame on the boot stack and the switch never
     // completes, so the campaign task would never run.
-    zenus_sched::scheduler::idle_until(watchdog);
-
-    // Only reached when the watchdog fired.
-    abort("watchdog")
+    // `finished` runs *on the idle stack* (the loop below swaps RSP before
+    // polling), so it can never return to this frame — hence `fn() -> !`
+    // instead of calling `abort` afterwards.
+    zenus_sched::scheduler::idle_until(watchdog, || abort("watchdog"));
 }
 
 /// Watchdog predicate: true once the deadline expired or the campaign task
