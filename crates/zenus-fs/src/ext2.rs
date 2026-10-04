@@ -17,6 +17,27 @@ static EXT2_POOL: SpinLock<[Option<Ext2Fs>; MAX_EXT2_INSTANCES]> =
 
 static NEXT_EXT2_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
+/// How many groups of `per_group` items are needed to hold `count` items.
+///
+/// `s_inodes_per_group` and `s_blocks_per_group` are plain `u32` fields in the
+/// superblock, and nothing rejected a zero in either. Every caller then did
+/// `(count + per_group - 1) / per_group` on them, so a superblock with
+/// `s_inodes_per_group == 0` at offset `0x28` took a `#DE` — in `fsck` on the
+/// statement immediately after it had *reported* the problem, and in
+/// `read_inode_raw` / `alloc_block` on any mounted filesystem, without needing
+/// `fsck` at all. `mount` validated `s_inode_size` and `s_log_block_size` but
+/// not these two, so the arithmetic ran on a hostile image.
+///
+/// `None` means the geometry is unusable. The ceiling uses `div_ceil` rather
+/// than `count + per_group - 1`, which would overflow its intermediate for a
+/// large `count` and silently report fewer groups than needed.
+pub fn group_count(count: u64, per_group: u64) -> Option<u64> {
+    if per_group == 0 {
+        return None;
+    }
+    Some(count.div_ceil(per_group))
+}
+
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct RawSuperblock {
@@ -190,6 +211,13 @@ impl Ext2Fs {
         if log_block_size > 6 {
             return None;
         }
+        // Group geometry is divided by on every inode and block lookup, so a
+        // zero in either field has to fail the mount rather than the first
+        // lookup. `fsck` reports the same condition, but a mounted filesystem
+        // never gets that far.
+        if raw_sb.inodes_per_group == 0 || raw_sb.blocks_per_group == 0 {
+            return None;
+        }
         let block_size = (1024u64) << log_block_size;
         let bgdt_start = if block_size == 1024 { 2u64 } else { 1u64 };
 
@@ -266,8 +294,12 @@ impl Ext2Fs {
         if inode == 0 || inode > self.inodes_count as u64 {
             return None;
         }
-        let group = ((inode - 1) / self.inodes_per_group as u64) as u32;
-        let local_idx = ((inode - 1) % self.inodes_per_group as u64) as u32;
+        let inodes_per_group = self.inodes_per_group as u64;
+        if inodes_per_group == 0 {
+            return None;
+        }
+        let group = ((inode - 1) / inodes_per_group) as u32;
+        let local_idx = ((inode - 1) % inodes_per_group) as u32;
         let bgd = self.read_bgdt(group)?;
 
         let inode_size = self.inode_size as u64;
@@ -461,8 +493,7 @@ impl Ext2Fs {
     }
 
     fn alloc_block(&self) -> Option<u32> {
-        let num_groups = (self.blocks_count as u64 + self.blocks_per_group as u64 - 1)
-            / self.blocks_per_group as u64;
+        let num_groups = group_count(self.blocks_count as u64, self.blocks_per_group as u64)?;
 
         for group in 0..num_groups as u32 {
             let mut bitmap = match self.read_block_bitmap(group) {
@@ -529,8 +560,12 @@ impl Ext2Fs {
         if inode == 0 || inode > self.inodes_count as u64 {
             return false;
         }
-        let group = ((inode - 1) / self.inodes_per_group as u64) as u32;
-        let local_idx = ((inode - 1) % self.inodes_per_group as u64) as u32;
+        let inodes_per_group = self.inodes_per_group as u64;
+        if inodes_per_group == 0 {
+            return false;
+        }
+        let group = ((inode - 1) / inodes_per_group) as u32;
+        let local_idx = ((inode - 1) % inodes_per_group) as u32;
         let bgd = match self.read_bgdt(group) {
             Some(b) => b,
             None => return false,

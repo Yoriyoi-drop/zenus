@@ -57,9 +57,9 @@ kernel.
 
 **Fix:** helper murni `tmpfs::write_end(offset, buf_len) -> Option<usize>` yang
 menggunakan `checked_add` dan membandingkan batas *sebelum* slicing.
-`TmpFs::write` memakainya. Helper-nya murni supaya bisa diuji di host tanpa VM —
-membuat helper-nya murni agar bisa diuji di host tanpa VM — sesuai `AGENTS.md`
-("prefer a pure helper over logic that can only be tested in a VM").
+`TmpFs::write` memakainya. Helper-nya murni agar bisa diuji di host tanpa VM —
+sesuai `AGENTS.md` ("prefer a pure helper over logic that can only be tested in
+a VM").
 
 **Kenapa dua test, satu bug:** yang pertama mengunci helper (termasuk kasus
 `MAX_FILE_SIZE + 1` dengan `buf_len = 0`, yang tidak bisa dihasilkan oleh
@@ -74,23 +74,104 @@ dibiarkan benar.
 
 ---
 
+### BUG-002 — `s_inodes_per_group == 0` → `#DE` di `fsck` dan di setiap lookup inode
+
+**Status:** sudah di-fix
+**Keparahan:** tinggi — satu `#DE` menghentikan kernel; reachable lewat `fsck`
+di shell, atau lewat mount image crafted tanpa perlu `fsck` sama sekali
+**Test:** `crates/zenus-fs/src/lib.rs`
+- `host_tests::ext2_group_count_refuses_a_zero_divisor_instead_of_faulting`
+
+**Di mana:**
+- `crates/zenus-fs/src/ext2_fsck.rs` — `fsck()`
+- `crates/zenus-fs/src/ext2.rs` — `mount()`, `read_inode_raw()`, `alloc_block()`
+
+**Yang salah:** `s_inodes_per_group` dan `s_blocks_per_group` adalah `u32`
+biasa di superblock, dan tidak ada yang menolak nilai nol. Semua pemakai
+kemudian membaginya sebagai `(count + per_group - 1) / per_group`.
+
+Yang paling buruk ada di `fsck()`: ia memanggil
+`add_msg("inodes_per_group is zero")` lalu menjalankan pembagIANnya pada
+pernyataan berikutnya. Jadi alat yang tugasnya melaporkan filesystem rusak
+mati persis pada masukan yang ia laporkan — dan `#DE` di kernel berarti
+`panic` → `abort`.
+
+`Ext2Fs::mount` sudah memvalidasi `s_inode_size` dan `s_log_block_size`, tapi
+tidak dua field ini. Jadi `read_inode_raw` (dipakai oleh stat/read) dan
+`alloc_block` (dipakai oleh write) ikut membagi dengan nol pada filesystem
+yang sudah ter-mount, tanpa perlu `fsck` di mana pun.
+
+**Fix:** helper murni `ext2::group_count(count, per_group) -> Option<u64>` yang
+menolak pembagi nol. Dipakai di keempat tempat. `mount` kini menolak mount saat
+salah satu field nol, bukan menunggu lookup pertama. Langitnya dari `u64` ke
+`u32` di `fsck` dijaga dengan komentar, karena `group_count` menghasilkan
+ceiling dari dua `u32` dengan pembagi `u32` tak nol.
+
+**Bonus yang ketemu saat menulis fix:** bentuk lama `(count + per_group - 1)`
+juga bisa *overflow* kalau `count` mendekati `u64::MAX`, dan diam-diam melaporkan
+jumlah group yang lebih sedikit dari seharusnya. Sekarang ceiling ditulis
+`count / per_group + (count % per_group != 0)`. Kedua sisi ada di test.
+
+---
+
+### BUG-003 — `fsck` menghitung ukuran group terakhir dengan pengurangan yang bisa underflow
+
+**Status:** sudah di-fix (ditemukan saat menulis fix BUG-002)
+**Keparahan:** sedang-tinggi — `u32` underflow; dev build panic, release build
+wrap ke ~4 miliar
+**Test:** `crates/zenus-fs/src/lib.rs`
+- `host_tests::ext2_fsck_last_group_survives_a_mismatched_group_count`
+
+**Di mana:** `crates/zenus-fs/src/ext2_fsck.rs`, `fsck()`
+
+```rust
+// sebelum
+let num_groups = core::cmp::max(num_groups, blocks_groups);
+let last_group_blocks = blocks_count as u64 - (num_groups - 1) as u64 * blocks_per_group as u64;
+let last_group_inodes = inodes_count - (num_groups - 1) * inodes_per_group;
+```
+
+**Yang salah:** `num_groups` adalah nilai **terbesar** dari hitungan group yang
+berasal dari inode dan yang berasal dari block. Filesystem yang kedua
+hitungannya berbeda adalah filesystem *yang valid*, bukan yang rusak —
+`inodes_per_group = 8192` dengan 8193 inode memberi 2 group inode, sedangkan
+`blocks_per_group = 1024` dengan 8192 block memberi 8 group block.
+
+fsck melaporkan ketidakcocokan itu sebagai warning 11, lalu berjalan 8 group,
+lalu menghitung `8193 - 7 * 8192` = **-50111**. Pada `u32` itu wrap menjadi
+`4294912185` — jumlah inode bebas di group terakhir yang diklaim filesystem
+hampir empat miliar.
+
+Jadi `fsck` mati pada masukan yang baru saja ia laporkan sendiri.
+
+**Fix:** helper murni `ext2_fsck::last_group_size(total, per_group, num_groups)`
+dengan `saturating_sub` di seluruh rantainya. Saturating, bukan wrapping:
+filesystem yang terlalu rusak untuk mendeskripsikan group terakhir sendiri
+bukan alasan untuk berhenti memeriksa sisa groupnya.
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:
 
 | # | Lokasi | Bug | Uji |
 |---|---|---|---|
-| 2 | `zenus-fs/src/ext2_fsck.rs:148-172` | `inodes_per_group == 0` → pesan error lalu langsung `÷0` → `#DE`. `mount` tidak cek field ini juga, jadi jalur panic tanpa perlu fsck | host (helper geometri) |
-| 3 | `zenus-fs/src/ext2_fsck.rs:466` | `inode_size` dari superblock menentukan loop sector; `buf` cuma 1024 byte → tulis melewati stack buffer. `fsck` di shell reachable | host |
-| 4 | `zenus-net/src/nic.rs:118-121` | Balasan ARP dihitung lalu dibuang (`arp::handle` return-nya diabaikan). Virtio NIC tidak pernah menjawab ARP → semua IPv4 outbound gagal | in-kernel |
-| 5 | `zenus-net/src/nic.rs:120` | `our_mac` yang dikirim adalah MAC peminta, dan IP di-hardcode `10.0.2.15`. Kalau #4 diperbaiki, hasilnya ARP poisoning yang sticky | host (arg builder) |
-| 6 | `zenus-net/src/tcp.rs:681` | Window rx dihitung di ruang 65535 padahal buffer 4096 byte → zero-window tak pernah diumumkan, payload dropout | host (helper) |
-| 7 | `zenus-net/src/tcp.rs:446` | `seq + payload.len()` overflow u32 → panic dari satu paket tak terautentikasi ke port tertutup | host (helper) |
-| 8 | `zenus-net/src/udp.rs:42` | Field `length` UDP dibaca lalu tidak pernah dipakai; checksum diverifikasi atas panjang yang salah → data di luar datagram masuk ke DHCP/DNS | host |
-| 9 | `zenus-syscall/src/syscall.rs:2681` | `8 * nfds` overflow → ukuran tervalidasi 0, ukuran terpakai 2^61 | host (helper) |
-| 10 | `zenus-syscall/src/syscall.rs:2459` | `sys_shmdt` `invlpg` tanpa menulis PTE → frame di-free sementara PTE masih hidup → UAF antar task | in-kernel |
-| 11 | `zenus-syscall/src/syscall.rs:1346` | `recv` alokasi `len` yang hanya dibatasi `USER_SPACE_LIMIT` (128 TiB), tidak seperti `sys_read`'s `MAX_READ` | host (helper) |
-| 12 | `zenus-syscall/src/syscall/fd.rs:545` | `vfs_access` mengabaikan mode dan melewati `access_check` → `access("/etc/shadow", W_OK)` = 0 untuk file mode 000 | host |
-| 13 | `zenus-syscall/src/syscall/fd.rs:537` | `vfs_chown` resolve node lalu membuangnya, selalu `true`. `FileSystem::chown` sudah diimplementasi tapi tidak pernah dipanggil | host |
-| 14 | `zenus-fs/src/vfs.rs:335-380` | Semua jalur mutating VFS (mkdir/unlink/chmod/chown) tanpa permission check; hanya `fd_open` yang memanggil `access_check` | host |
-| 15 | `zenus-syscall/src/syscall.rs:2034` | `sys_mount` menerima `MS_RDONLY\|MS_NOSUID\|MS_NODEV\|MS_NOEXEC` lalu mengabaikan semuanya, return 0. `vfs::Mount` tidak punya field flag sama sekali | host |
+| 1 | `zenus-fs/src/ext2_fsck.rs:466` | `inode_size` dari superblock menentukan loop sector; `buf` cuma 1024 byte → tulis melewati stack buffer. `fsck` di shell reachable. `Ext2Fs::mount` **sudah** validasi field ini (`ext2.rs:181`), jadi fsck yang belum | host |
+| 2 | `zenus-net/src/nic.rs:118-121` | Balasan ARP dihitung lalu dibuang (`arp::handle` return-nya diabaikan). Virtio NIC tidak pernah menjawab ARP → semua IPv4 outbound gagal | in-kernel |
+| 3 | `zenus-net/src/nic.rs:120` | `our_mac` yang dikirim adalah MAC peminta, dan IP di-hardcode `10.0.2.15`. Kalau #2 diperbaiki, hasilnya ARP poisoning yang sticky (`arp.rs:64-69` menolak mengubah MAC untuk IP yang sudah ada) | host (arg builder) |
+| 4 | `zenus-net/src/tcp.rs:681` | Window rx dihitung di ruang 65535 padahal buffer 4096 byte → zero-window tak pernah diumumkan, payload masuk sack_blocks lalu hilang. `recv_window` juga dipakai untuk *window yang kita umumkan*, diisi dari window yang di-peer-advertise | host (helper) |
+| 5 | `zenus-net/src/tcp.rs:446` | `seq + payload.len()` overflow u32 → panic dari satu paket tak terautentikasi ke port tertutup. Sama di `:768`, `:790` | host (helper) |
+| 6 | `zenus-net/src/udp.rs:42` | Field `length` UDP dibaca lalu tidak pernah dipakai; checksum diverifikasi atas panjang yang salah → data di luar datagram masuk ke DHCP/DNS | host |
+| 7 | `zenus-syscall/src/syscall.rs:2681` | `8 * nfds` overflow → ukuran tervalidasi 0, ukuran terpakai 2^61 | host (helper) |
+| 8 | `zenus-syscall/src/syscall.rs:2459` | `sys_shmdt` `invlpg` tanpa menulis PTE → frame di-free sementara PTE masih hidup → UAF antar task. `shmat` juga tidak menaikkan `attached` | in-kernel |
+| 9 | `zenus-syscall/src/syscall.rs:1346` | `recv` alokasi `len` yang hanya dibatasi `USER_SPACE_LIMIT` (128 TiB), tidak seperti `sys_read`'s `MAX_READ` | host (helper) |
+| 10 | `zenus-syscall/src/syscall/fd.rs:545` | `vfs_access` mengabaikan mode dan melewati `access_check` → `access("/etc/shadow", W_OK)` = 0 untuk file mode 000 | host |
+| 11 | `zenus-syscall/src/syscall/fd.rs:537` | `vfs_chown` resolve node lalu membuangnya, selalu `true`. `FileSystem::chown` sudah diimplementasi tapi tidak pernah dipanggil | host |
+| 12 | `zenus-fs/src/vfs.rs:335-380` | Semua jalur mutating VFS (mkdir/unlink/chmod/chown) tanpa permission check; hanya `fd_open` yang memanggil `access_check` | host |
+| 13 | `zenus-syscall/src/syscall.rs:2034` | `sys_mount` menerima `MS_RDONLY\|MS_NOSUID\|MS_NODEV\|MS_NOEXEC` lalu mengabaikan semuanya, return 0. `vfs::Mount` tidak punya field flag sama sekali. Tidak ada cek `euid == 0` | host |
+| 14 | `zenus-syscall/src/syscall.rs:708` | `brk(small)` menjalankan `unmap_heap_pages` yang menelusuri *semua* halaman di `[addr, heap_brk)` lalu `free_frame` tiap yang ter-map → program membebaskan frame ELF-nya sendiri, dan menelusuri 6.4e9 entri page table (hang). `heap_brk = loaded.heap_base ≈ 0x6000_0000_0000` | host |
+| 15 | `zenus-fs/src/journal.rs:151` | Batas indeks blok data memakai konstanta `MAX_ENTRIES` (123), bukan `num_blocks` yang dikonfigurasi. Boot pakai journal 15 blok (`journal_init(0, 3000, 16)`), jadi entri #16 menulis ke blok 3016 — blok ext2 yang hidup | host |
+| 16 | `zenus-fs/src/vfs.rs:170` | Pencocokan mount `path.starts_with(m.path)` tanpa cek separator → mount di `/tmp` juga menangkap `/tmp.evil/x` | host |
+| 17 | `zenus-fs/src/pkg.rs:329` | `pkg_remove` memanggil `vfs::remove` pada tiap baris manifest tanpa menjalankan ulang `install_path_for` → arbitrary-path delete | host |
+| 18 | `zenus-net/src/tcp.rs:894` | `KEEPALIVE_PROBE_INTERVAL` dihitung lalu dibuang (`let _probe_interval = ...`) → probe 96× lebih lambat dari yang didokumentasikan | host |

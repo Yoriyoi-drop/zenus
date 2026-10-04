@@ -20,6 +20,28 @@ pub enum FsckSeverity {
     Fatal = 3,
 }
 
+/// How many items the final group actually holds, given a total, a per-group
+/// size and the group count fsck is about to walk.
+///
+/// `num_groups` is the *larger* of the inode-derived and block-derived counts —
+/// a filesystem whose two counts disagree is reported as warning 11 — so
+/// `(num_groups - 1) * per_group` can exceed the total it was derived from.
+/// That is a real filesystem, not a malformed one: `inodes_per_group` of 8192
+/// with 8193 inodes gives 2 inode groups, while `blocks_per_group` of 1024
+/// with 8192 blocks gives 8 block groups. fsck walked 8 groups and then
+/// computed `8193 - 7 * 8192`, which is negative.
+///
+/// Both of these subtractions used to be plain subtraction and underflowed on
+/// exactly that image — the filesystem that fsck had just *reported* as
+/// having a mismatched group count then faulted on the next line, and a
+/// checker that dies on the input it is checking is worse than no checker.
+///
+/// Saturating, not wrapping: a filesystem too damaged to describe its own last
+/// group is not a reason to stop checking the rest of it.
+pub fn last_group_size(total: u64, per_group: u64, num_groups: u64) -> u64 {
+    total.saturating_sub(num_groups.saturating_sub(1).saturating_mul(per_group))
+}
+
 #[derive(Clone, Copy)]
 pub struct FsckMessage {
     pub severity: FsckSeverity,
@@ -168,8 +190,34 @@ pub fn fsck(dev_id: u8) -> FsckReport {
     let inodes_count = raw_sb.inodes_count;
     let blocks_count = raw_sb.blocks_count;
 
-    let num_groups = (inodes_count + inodes_per_group - 1) / inodes_per_group;
-    let blocks_groups = (blocks_count + blocks_per_group - 1) / blocks_per_group;
+    // Both of these used to be computed as `(count + per_group - 1) / per_group`
+    // *after* reporting a zero divisor, so the statement after the complaint
+    // was the one that faulted. Group geometry with a zero in it cannot be
+    // reasoned about at all, so fsck stops here and says so.
+    let num_groups = match crate::ext2::group_count(inodes_count as u64, inodes_per_group as u64) {
+        Some(n) => n,
+        None => {
+            add_msg(
+                &mut report,
+                FsckSeverity::Fatal,
+                10,
+                "Cannot compute group count: inodes_per_group is zero",
+            );
+            return report;
+        }
+    };
+    let blocks_groups = match crate::ext2::group_count(blocks_count as u64, blocks_per_group as u64) {
+        Some(n) => n,
+        None => {
+            add_msg(
+                &mut report,
+                FsckSeverity::Fatal,
+                9,
+                "Cannot compute block groups: blocks_per_group is zero",
+            );
+            return report;
+        }
+    };
     if num_groups != blocks_groups {
         add_msg(
             &mut report,
@@ -183,6 +231,9 @@ pub fn fsck(dev_id: u8) -> FsckReport {
         add_msg(&mut report, FsckSeverity::Error, 12, "Zero groups");
         return report;
     }
+    // Both inputs are ceilings of a `u32` count by a non-zero `u32`, so neither
+    // can exceed `u32::MAX` and this narrowing cannot truncate.
+    let num_groups = num_groups as u32;
 
     if raw_sb.free_blocks_count > raw_sb.blocks_count {
         add_msg(
@@ -210,8 +261,11 @@ pub fn fsck(dev_id: u8) -> FsckReport {
         add_msg(&mut report, FsckSeverity::Error, 15, "inode_size < 128");
     }
 
-    let last_group_blocks = blocks_count as u64 - (num_groups - 1) as u64 * blocks_per_group as u64;
-    let last_group_inodes = inodes_count - (num_groups - 1) * inodes_per_group;
+    // `num_groups` is the larger of the two derived counts, so this subtraction can
+    // underflow on a filesystem whose group counts disagree; see
+    // `last_group_size`.
+    let last_group_blocks = last_group_size(blocks_count as u64, blocks_per_group as u64, num_groups as u64);
+    let last_group_inodes = last_group_size(inodes_count as u64, inodes_per_group as u64, num_groups as u64);
 
     add_msg(
         &mut report,
@@ -288,7 +342,7 @@ pub fn fsck(dev_id: u8) -> FsckReport {
         let this_group_inodes = if is_last {
             last_group_inodes
         } else {
-            inodes_per_group
+            inodes_per_group as u64
         };
 
         if bgd.free_blocks_count as u64 > this_group_blocks {

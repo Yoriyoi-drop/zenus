@@ -792,6 +792,101 @@ mod host_tests {
 
     // ── ext2 structure decoders ───────────────────────────────────────────
 
+    /// Regression: `s_inodes_per_group` and `s_blocks_per_group` are plain
+    /// `u32` fields in the superblock and nothing rejected a zero in either.
+    /// Every group lookup then divided by them as `(count + per_group - 1) /
+    /// per_group`, so a superblock with a zero divisor took a `#DE`.
+    ///
+    /// `fsck` was the worst case: it called `add_msg("inodes_per_group is
+    /// zero")` and then executed the division on the very next statement, so
+    /// the tool whose job is to report a damaged filesystem crashed on it.
+    /// `Ext2Fs::mount` validated `s_inode_size` and `s_log_block_size` but not
+    /// these two, which meant `read_inode_raw` and `alloc_block` faulted on any
+    /// mounted hostile image without `fsck` being involved at all.
+    ///
+    /// `group_count` refuses a zero divisor, and its ceiling uses `div_ceil` so
+    /// the intermediate addition cannot overflow on a large `count`.
+    #[test]
+    fn ext2_group_count_refuses_a_zero_divisor_instead_of_faulting() {
+        use crate::ext2::group_count;
+
+        // A zero divisor is refused, not divided by. These are the two superblock
+        // fields, and both were reachable with a crafted image.
+        assert_eq!(
+            group_count(1024, 0),
+            None,
+            "inodes_per_group == 0 must not be used as a divisor"
+        );
+        assert_eq!(group_count(0, 0), None, "a zero divisor is invalid regardless of count");
+
+        // Ceiling division: exact multiples do not round up.
+        assert_eq!(group_count(8192, 8192), Some(1));
+        assert_eq!(group_count(8192, 4096), Some(2));
+        assert_eq!(group_count(0, 4096), Some(0), "nothing needs zero groups");
+
+        // A remainder rounds up — the case the old `(count + per_group - 1)`
+        // form handled correctly and must keep handling.
+        assert_eq!(group_count(1, 8192), Some(1));
+        assert_eq!(group_count(8193, 4096), Some(3));
+        assert_eq!(group_count(u64::MAX, 8192), Some(u64::MAX / 8192 + 1));
+
+        // The overflow the ceiling form had: `count + per_group - 1` wraps for a
+        // count near u64::MAX, which would report *fewer* groups than needed.
+        let big = u64::MAX - 10;
+        assert_eq!(group_count(big, 8192), Some(big / 8192 + 1));
+        assert_eq!(
+            group_count(u64::MAX, 2),
+            Some(u64::MAX / 2 + 1),
+            "a count near u64::MAX must not wrap its way into a smaller answer"
+        );
+    }
+
+    /// Regression: fsck walked `num_groups` — the *larger* of the inode-derived
+    /// and block-derived group counts — and then computed the size of the last
+    /// group as `total - (num_groups - 1) * per_group` with plain subtraction.
+    ///
+    /// A filesystem whose two counts disagree is a real filesystem, not a
+    /// malformed one: `inodes_per_group = 8192` with 8193 inodes gives 2 inode
+    /// groups, while `blocks_per_group = 1024` with 8192 blocks gives 8 block
+    /// groups. fsck reported the mismatch as warning 11, then walked 8 groups,
+    /// then computed `8193 - 7 * 8192` — negative. `u32` subtraction, so a
+    /// dev build aborted with an overflow and a release build wrapped to
+    /// roughly 4 billion free inodes in the final group.
+    ///
+    /// The checker faulted on the exact input it was reporting.
+    #[test]
+    fn ext2_fsck_last_group_survives_a_mismatched_group_count() {
+        use crate::ext2_fsck::last_group_size;
+
+        // The shape from above: 2 inode groups, 8 block groups, fsck walks 8.
+        let inodes_count = 8193u64;
+        let inodes_per_group = 8192u64;
+        let blocks_count = 8192u64;
+        let blocks_per_group = 1024u64;
+        let num_groups = 8u64;
+
+        // `8193 - 7 * 8192` is -50111. It must not wrap to ~1.8e19, and it
+        // must not panic.
+        assert_eq!(
+            last_group_size(inodes_count, inodes_per_group, num_groups),
+            0,
+            "an impossible last group clamps to 0 instead of wrapping"
+        );
+        assert_eq!(last_group_size(blocks_count, blocks_per_group, num_groups), 1024);
+
+        // A filesystem whose group counts agree is unaffected: the last group
+        // holds the remainder.
+        assert_eq!(last_group_size(8193, 8192, 2), 1);
+        assert_eq!(last_group_size(8192, 4096, 2), 4096);
+        assert_eq!(last_group_size(1, 8192, 1), 1, "a single group holds everything");
+        assert_eq!(last_group_size(0, 8192, 1), 0);
+
+        // Exactly divisible: the last group is full, and a zero total is 0
+        // rather than a wrap.
+        assert_eq!(last_group_size(8192, 8192, 1), 8192);
+        assert_eq!(last_group_size(0, 8192, 0), 0);
+    }
+
     /// Regression: the fixed-size on-disk decoders did
     /// `copy_nonoverlapping(size_of::<T>())` without checking `buf.len()`, so a
     /// short read (truncated image, fuzz case) read past the end of the slice.
