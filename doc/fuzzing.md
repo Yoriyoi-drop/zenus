@@ -198,12 +198,36 @@ Format crash ID: `ZENUS-FUZZ-000127`
 
 ## Mode Operasi
 
-| Mode | Cases | Kapan |
-|---|---|---|
-| smoke | 100–10.000 | Setiap commit |
-| coverage | 10⁵–10⁶ | Cari jalur baru |
-| stress | 10⁶+ | Overnight |
-| regression | semua crash | Setiap build |
+| Mode | Cases (default) | Kapan | Perintah |
+|---|---|---|---|
+| smoke | 2 000 | Setiap commit | `make fuzz-smoke` |
+| coverage | 50 000 | Cari jalur baru | `make fuzz-coverage` |
+| stress | — | Overnight | belum diimplementasikan |
+| regression | semua crash tercatat | Setiap build | `make fuzz-regression` (belum berfungsi — lihat batasan) |
+
+Default-nya ada di `zenus_fuzz::Mode::default_cases()`.
+
+### Batasan yang diketahui
+
+Jujur soal apa yang benar-benar bekerja:
+
+- **Minimisasi belum reproduktif.** `minimizer::minimize` memakai predikat
+  yang tidak bisa menjalankan input (hanya menolak hasil kosong), jadi hasilnya
+  tidak berguna untuk debugging. Yang bisa dipakai: `minimize_with`, dengan
+  oracle yang sebenarnya. Ada test yang mengunci perilaku ini.
+- **Konten minimalisasi tidak persisten.** Corpus dan crash disimpan di memori
+  kernel saja; `build/fuzz/fuzz.log` adalah satu-satunya jejak setelah VM mati.
+- **Fault containment hanya di BSP.** `fuzz_guard` menyimpan satu pasangan
+  (rsp, rip), jadi hanya CPU yang memasang checkpoint yang bisa memulih; AP
+  diambil jalur panic biasa.
+- **Snapshot QEMU belum dipakai.** `snapshot.rs` masih kerangka; yang bekerja
+  adalah containment in-kernel, bukan save/restore dari luar.
+- **Coverage berbasis edge counter**, bukan instrumentasi LLVM: nilainya kasar, dan
+  "jalur baru" berarti counter edge yang belum pernah naik.
+- **Mode regression kosong.** Log crash hanya ada di memori kernel dan
+  `zenus_fuzz::init()` memanggil `crash::clear()`, jadi saat boot `get_crash_count()`
+  selalu 0, loop tidak pernah jalan, dan target mencetak `[FUZZ] EXIT code=0`.
+  Butuh corpus crash di disk lebih dulu.
 
 ## Urutan Implementasi
 

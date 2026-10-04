@@ -1,3 +1,11 @@
+<!--
+DESIGN DOCUMENT — "AETHER SHIELD", a proposal for an adaptive firewall
+architecture. The shipped networking stack has a conventional stateful packet
+filter (`crates/zenus-net/src/firewall.rs`: 32 rules, connection tracking,
+protocol/port/established matching) and nothing resembling the learning or
+evolutionary behaviour described below. Kept as a design record.
+-->
+
 AETHER SHIELD
 
 Adaptive Hyper-Evolutionary Threat Elimination & Resilient Shield

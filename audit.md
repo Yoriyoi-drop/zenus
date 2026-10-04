@@ -1,3 +1,18 @@
+<!--
+AUDIT SNAPSHOT — dated 2026-06-21. Historical record, kept for reference.
+
+The claims below that no longer hold are the optimistic ones, not the
+pessimistic ones: it credits Phase 3 at 100%, lists TCP congestion control and
+a firewall as missing (both shipped), lists journalling as missing (it shipped),
+and describes the container work as "PID + UTS" (all six namespace kinds exist).
+It also predates the host test suite, the SMAP/SMEP investigation, the syscall
+renumbering and the fuzzing framework.
+
+Its *negative* findings are still accurate: no capability system, no KPTI, no
+encryption, no secure boot. For the current state read SUMMARY.md, SECURITY.md
+and ROADMAP.md instead.
+-->
+
 # Zenus OS — Production Readiness Audit
 
 **OS:** Zenus OS v0.1.0

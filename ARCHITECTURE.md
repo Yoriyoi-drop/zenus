@@ -1,224 +1,185 @@
 # Zenus OS Architecture
 
-## Overview
-Zenus OS is a 64-bit x86 operating system kernel written in Rust, designed as an educational platform for understanding modern kernel development. It follows a modular, layered architecture that separates concerns across multiple crates while maintaining Rust's memory safety guarantees.
+A 64-bit x86 kernel written in Rust. Layered so that each crate only depends on
+the ones below it, and so that the pure logic of each layer can be unit-tested
+on the host without booting anything.
 
-## Project Structure
+```
+zenus-sync          spinlocks, IRQ guard, lockdep
+     │
+zenus-console  zenus-mem          output/logging        paging, heap, VMAs
+     │                              │
+zenus-arch ─────────────────────────┘   CPU, IDT/GDT, APIC, PCI, ACPI, SMP,
+     │                                     ATA, keyboard, RTC, crash dump
+zenus-fs   zenus-net   zenus-ns   zenus-virtio   zenus-sched
+     │                                    │               │
+     └──────────── zenus-syscall ─────────┴───────────────┘
+                              │
+                           apps  (entry, boot sequence, init, shell)
+        zenus-fuzz   fuzzing engine, called from apps::entry
+```
 
-### Workspace Components
-The entire project is organized as a Cargo workspace with the following key crates:
+`apps` is the only entry point (`#![no_main]`, one `_start` → `entry()`).
+`zenus-fuzz` is a library it calls: a fuzzing build is still `zenus`, compiled
+with `--features fuzz-<mode>`, and `apps::entry` replaces the shell with the
+campaign. Both link through `apps/src/linker.ld`.
 
-- `apps/` - Entry point, boot sequence, shell, user mode, and main integration
-- `crates/zenus-arch/` - x86 architecture and hardware abstraction
-- `crates/zenus-mem/` - Memory management and paging
-- `crates/zenus-sched/` - Task scheduling and management
-- `crates/zenus-fs/` - Filesystem implementation and virtual filesystem
-- `crates/zenus-net/` - Networking stack
-- `crates/zenus-syscall/` - System call interface
-- `crates/zenus-sync/` - Synchronization primitives
-- `crates/zenus-console/` - Console and logging
-- `crates/zenus-virtio/` - VirtIO virtualization drivers
-- `crates/zenus-ns/` - Namespace implementation for containers
-- `zutils/crates/` - User-space utilities (coreutils-style commands)
+## Layer 1 — Synchronization (`zenus-sync`)
 
-### Architecture Layers
+| Component | Notes |
+|---|---|
+| `SpinLock<T>` | Atomic CAS with exponential backoff; masks interrupts on bare metal |
+| `IrqGuard` | Scoped IF masking |
+| `lockdep` | Lock-order graph; 64 classes, 256 edges, per-CPU depth 8 |
 
-#### Layer 1: Core Infrastructure
-**Crate: `zenus-arch`**
+`lockdep` class IDs are **1-based**: `0` is the "not registered" sentinel, and
+the first lock must not be handed it. `LockdepSnapshot::classes` is indexed by
+class ID, so slot 0 is always empty. No production path registers classes yet —
+lockdep is wired up and reported by `lockdep-status`, but nothing feeds it.
 
-| Component | Purpose |
-|-----------|---------|
-| CPU & Peripherals | x86_64 instruction set, CPUID, APIC, PCI, ACPI |
-| Interrupt Handling | IDT, IRQ routing, exception handling |
-| Memory Management Unit | GDT, TSS, descriptor tables |
-| Hardware Drivers | Keyboard, ATA disk, RTC, timer |
-| Boot Protocol | Limine integration for BIOS/UEFI boot |
+Everything is host-safe: interrupt masking, the CR8 read in `current_cpu` and
+the UART diagnostics are `cfg(target_os = "none")`-gated with host twins, so
+`cargo test` can exercise locks without a VM.
 
-**Key Features:**
-- Implements complete x86_64 privileged instruction requirements
-- Hardware initialization and detection
-- Basic device driver model (driver-specific, not abstracted)
-- ACPI and power management hooks
+## Layer 2 — Memory (`zenus-mem`)
 
-#### Layer 2: Memory Management
-**Crate: `zenus-mem`**
+| Component | Notes |
+|---|---|
+| Frame allocator | Free-stack allocator, 16384 frames; regions come from Limine |
+| Paging | 4-level, per-process address spaces via CR3, HHDM for physical access |
+| Heap | Free-list allocator over an 8 MiB static arena |
+| VMA table | 64 regions per process, mmap/munmap/mprotect bookkeeping |
 
-| Component | Purpose |
-|-----------|---------|
-| Frame Allocator | Physical memory allocation, buddy algorithm (internal) |
-| Virtual Memory | 4-level page tables, address space management |
-| Kernel Heap | Free-list allocator with 16MB fixed size |
-| Paging | Page mapping, user/kernel space isolation |
+The VMA table is the single copy of that logic (`zenus_mem::vma`); it used to
+exist twice, and `mmap` used the copy in `zenus-sched`, so every fix existed in
+two places. `find_free` is iterative with a bounded scan: the previous
+recursive version looped forever on `size == 0` and could hand back a range that
+straddled an existing mapping.
 
-**Current State:**
-- **Physical Memory**: Bump allocator with free stack (4096 frames capacity)
-- **Virtual Memory**: 4-level paging with PDE/PTE separation
-- **User Space**: Separate address spaces via CR3 switching
-- **Limitations**: No page reclaim, swapping, or huge pages
+## Layer 3 — Scheduling (`zenus-sched`)
 
-#### Layer 3: Process Scheduling
-**Crate: `zenus-sched`**
+| Component | Notes |
+|---|---|
+| Scheduler | Preemptive round-robin, `TIME_SLICE` = 5 ticks (~50 ms at 100 Hz) |
+| Tasks | 128 max, 8 CPUs, 64 zombies |
+| SMP | Work stealing; a task runs on the CPU that created it |
+| Signals | 64 signals, dispositions, handler frames |
+| Init | PID 1: service registry, supervision, restart policies |
 
-| Component | Purpose |
-|-----------|---------|
-| Task Management | Process control block, state management |
-| Scheduler | Preemptive round-robin with 50-tick quantum |
-| SMP Support | Per-CPU data, basic multi-core support |
-| Context Switching | Register save/restore, stack validation |
+Stack layout is an invariant, not a detail. `TSS.RSP0` is `kernel_rsp_top`, so
+the timer ISR pushes at the top of the task stack and descends ~160 bytes. Task
+frames therefore live at `frame_base(stack_top)` = `stack_top - STACK_GUARD`
+(32 KiB below the top); every constructor uses that helper, and
+`stack_size_is_valid()` rejects stacks too small for it (below the guard the
+subtraction underflows).
 
-**Current State:**
-- **Tasks**: Max 128 concurrent tasks
-- **Scheduler**: Simple round-robin, no priorities
-- **SMP**: No load balancing, tasks born on CPU 0
-- **Context Switch**: ~100 APIC ticks per switch
+Tick path (`schedule_tick`): BSP-only PIC EOI → LAPIC EOI → `SYS_TICKS++`,
+`pit::tick()`, `sysctl::sysctl_tick()` → early-out for APs and for single-task
+systems → context switch. The timer source is the LAPIC timer; the PIT is kept
+running because `get_ticks()` feeds uptime.
 
-#### Layer 4: Filesystem
-**Crate: `zenus-fs`**
+## Layer 4 — Filesystem (`zenus-fs`)
 
-| Component | Purpose |
-|-----------|---------|
-| Virtual Filesystem | Mount table, path resolution, permissions |
-| ext2 | Read-write ext2 filesystem with journaling |
-| tmpfs | In-memory filesystem (128 nodes, 4KB max file) |
-| devfs | Device filesystem interface |
-| tarfs | Initrd extraction |
+| Component | Notes |
+|---|---|
+| VFS | Mount table (per mount namespace), path resolution, Unix permission bits |
+| ext2 | Read/write, journalling (123 entries), fsck |
+| Block cache | 512 sectors, 4-way associative, write-back |
+| tmpfs | 128 nodes, 1 KiB per file, `reset()` |
+| devfs | Device nodes + block devices behind a `fn`-pointer vtable |
+| tarfs | initrd (CPIO-style tar), procfs, cgroup2 view, sysctl, `.zpk` packages |
 
-**Current State:**
-- **ext2**: Complete implementation with journaling and fsck
-- **Journal**: Write-ahead journaling (16 blocks = 8KB)
-- **Block Cache**: 64-entry LRU write-back cache
-- **Permissions**: Unix mode bits with UID/GID checking
+The block layer is exercised in host tests through a fake block device
+registered in devfs, which covers the cache, the I/O scheduler and the journal
+without any hardware.
 
-#### Layer 5: Networking
-**Crate: `zenus-net`**
+The journal writes its header **through** the block cache (a direct device
+write leaves the previous image cached, and the next `journal_begin` then
+revives a stale header), and `journal_replay` flushes the redo data before
+retiring the header — otherwise a crash in that window loses the transaction
+with no journal left.
 
-| Component | Purpose |
-|-----------|---------|
-| Network Stack | TCP, UDP, IP, ICMP, routing, DHCP |
-| Hardware Drivers | RTL8139 PIO driver, VirtIO drivers |
-| Application Protocols | SSH, DNS, DHCP client/server |
-| Socket API | BSD socket interface |
+`cgroup.rs` is a read-only view of the cgroup v2 layout: create, unlink and
+write all fail, because no controller is enforced behind it.
 
-**Current State:**
-- **TCP**: Full RFC 793 implementation (11 states), 16-connection limit
-- **UDP**: Datagram handling with basic socket API
-- **ICMP**: Echo reply support
-- **DHCP**: Client and server implementations
-- **Routing**: Static routing with longest-prefix match
-- **Drivers**: Single RTL8139 PIO driver, VirtIO implementation
+## Layer 5 — Networking (`zenus-net`)
 
-#### Layer 6: System Calls
-**Crate: `zenus-syscall`**
+| Component | Notes |
+|---|---|
+| Protocols | ARP, IPv4, ICMP, TCP, UDP, DHCP client + server, DNS |
+| Sockets | BSD-style, 256 TCP connections |
+| Routing | Static, longest-prefix match, 8 entries |
+| Firewall | 32 rules, 64 connection-tracking entries, protocol/port/established matching |
+| Driver | RTL8139 (PIO) |
 
-| Component | Purpose |
-|-----------|---------|
-| Syscall Dispatch | 128-slot interrupt-based dispatch |
-| System Call Interface | User mode interaction via SYSCALL/SYSRET |
-| ELF Loader | User program loading and memory mapping |
-| File Descriptors | POSIX file descriptor management |
+TCP does its own congestion control and retransmission; the firewall's
+`firewall_clear_connections` is an *age-based* evictor despite the name.
 
-**Current State:**
-- **Implemented**: 22 system calls (out of ~300 typical Linux)
-- **Missing**: `fork`, `exec`, `pipe`, `signal` handling
-- **Security**: User pointer validation, ASLR support
+The NIC interrupt is routed to a fixed vector (`interrupts::NIC_VECTOR`).
+Computing it as `32 + irq_line` put QEMU's rtl8139 (IRQ 10 → vector 42) on a
+slot with no handler, so every RX interrupt was acknowledged and dropped.
 
-#### Layer 7: Synchronization
-**Crate: `zenus-sync`**
+## Layer 6 — System calls (`zenus-syscall`)
 
-| Component | Purpose |
-|-----------|---------|
-| Spinlock | IRQ-safe atomic operations with exponential backoff |
-| IRQ Guard | Interrupt context protection |
-| Lockdep | Deadlock detection and prevention |
-| Priority Inversion | Basic protection mechanisms |
+256 dispatch slots, 109 implemented: file I/O and descriptors, process
+(creation/exec/exit/wait/clone), signals, memory (mmap/mprotect/munmap/brk),
+time, sockets, filesystem extras, scheduling, IPC (shm/futex), namespaces
+(`uname_ns`, `getpid_ns`) and resource limits.
 
-#### Layer 8: Console & Logging
-**Crate: `zenus-console`**
+The numbers were renumbered twice to remove collisions (pipe 22 → 111, dup 32 →
+113, nanosleep 35 → 114, dup2 37 → 33, …). `userspace/` hard-codes some of
+them; a host test pins those numbers against the kernel's list. It does not
+read `userspace/`, so it catches kernel-side renumbering, not drift in the
+userspace workspace.
 
-| Component | Purpose |
-|-----------|---------|
-| Serial Port | NS16550A UART driver (COM1)
-| VGA Console | Text mode display |
-| Syslog | Structured logging with 4096-entry buffer |
-| DMESG | Circular debug log (256 entries × 128 bytes) |
+`prctl` accepts most options and returns success without doing anything —
+including `PR_SET_SECCOMP` and `PR_SET_NO_NEW_PRIVS`. That is a security gap,
+not a bug to be papered over.
 
-## Development Model
+## Layer 7 — Console and diagnostics (`zenus-console`)
 
-### Code Quality
-- **Memory Safety**: Rust's ownership system with targeted unsafe blocks
-- **Testing**: Unit tests (25 total) with testing feature flag
-- **Build**: Custom Makefile over Cargo
-- **Documentation**: Minimal inline comments only
+Serial (interrupt-driven), VGA text, framebuffer, a 256-entry dmesg ring, a
+1024-entry syslog, and a catalog of 21 structured error codes (`ZN-XXX-NNNN`)
+with severity, cause, actions and suggestion. Counters are per (module, number):
+hashing only the digits merged every module's `*-0001` into one slot.
 
-### Key Design Decisions
+## Layer 8 — Namespaces (`zenus-ns`)
 
-#### 1. Single Address Space Kernel
-All kernel code runs at CPL0 (Ring 0). User/kernel isolation exists at the page table level but not at the privilege level. This simplifies the architecture while providing basic separation.
+PID (local↔global mapping, 64 entries per namespace), UTS (hostname), mount
+(mount table per namespace), net (interface bitmap), user (uid maps, one per
+inner uid), IPC. 16 namespaces per kind. `mnt`, `net`, `user` and `ipc` can be
+destroyed and refuse to destroy the root; `uts` and `pid` have no destroy path
+at all.
 
-#### 2. User Space via SYSCALL/SYSRET
-Rather than using traditional sysret-based user mode, Zenus uses explicit `SYSCALL`/`SYSRET` instructions via MSR interface. This allows fine-grained control but requires careful user/exceptions handling.
+## Layer 9 — Virtio (`zenus-virtio`)
 
-#### 3. Bare-Metal Approach
-Minimal dependencies: only `x86_64` crate for architecture primitives. This maximizes control but increases development complexity.
+virtio-net (up to 2 queue pairs, 64 buffers each), virtio-blk (with a real
+FLUSH barrier, which the journal requires for durability), virtio-console,
+virtio-balloon. 256-entry split virtqueues.
 
-### Current Limitations
+## Testing architecture
 
-#### Architecture
-- No KPTI (Kernel Page Table Isolation)
-- Fixed 16MB kernel heap
-- No huge pages for performance
-- Single-core scheduler (no load balancing)
+| Layer | Where | Runs |
+|---|---|---|
+| Host unit tests | `#[cfg(test)] mod host_tests` in each crate | `make test-host` |
+| In-kernel tests | `#[cfg(feature = "testing")] mod tests`, registered in `apps/src/test_runner.rs` | `make test` (QEMU) |
 
-#### Security
-- No SMAP/SMEP (memory access control)
-- Limited privilege separation
-- No address space layouts (KASLR)
-- Basic filesystem permissions only
+| Fuzzing | `zenus-fuzz`, fault containment via `zenus_arch::fuzz_guard` | `make fuzz-*` |
 
-#### Performance
-- PIO-only storage driver (ATA, RTL8139)
-- Small block cache (32KB total)
-- Round-robin scheduling (5-second quantum)
-- Limited concurrency (128 tasks, 16 TCP connections)
+Host tests are the ones that grow with new features: they run in milliseconds
+and they can assert on things a QEMU run cannot (a syscall table has no
+duplicate numbers; a path with 33 components is refused). The in-kernel suite
+is for hardware paths.
 
-## Development Guidelines
+## Where the invariants live
 
-### Coding Standards
-1. **Memory Safety**: Prefer safe Rust, audit all unsafe blocks
-2. **Error Handling**: Minimal error types, focus on kernel correctness
-3. **Separation**: Strict module boundaries, no cross-contamination
-4. **Testing**: Comprehensive unit tests for critical paths
+The bugs this kernel has had were mostly in three places, and each now has the
+invariant documented next to the code that enforces it:
 
-### Adding New Features
-1. **Modular Design**: New functionality in dedicated modules
-2. **Layer Adherence**: Respect existing abstraction layers
-3. **Integration**: Minimal changes to core systems
-4. **Testing**: Unit tests before integration
-
-## Future Architecture Improvements
-
-### Phase 1: Foundation
-- User/kernel privilege separation (SMAP/SMEP)
-- Proper user-mode syscall handling
-- Dynamic memory management (swap, OOM)
-- Advanced filesystem journaling (ext4-style)
-
-### Phase 2: Networking & Security
-- Full TLS/SSL support
-- Firewall and packet filtering
-- Secure RPC mechanisms
-- Memory protection keys (MPK)
-
-### Phase 3: Production
-- Container runtime support
-- Live migration capabilities
-- Fault tolerance and recovery
-- Performance monitoring and optimization
-
-## Contributing to Architecture
-
-This architecture serves as a living document. Contributors are encouraged to:
-- Update this document with new components
-- Document design decisions and trade-offs
-- Track implementation progress against architecture
-- Maintain consistency across all layers
+1. **Stack/frame layout** — `scheduler::frame_base`, `STACK_GUARD`.
+2. **Interrupt vectors** — `zenus_arch::interrupts::{TIMER,SERIAL,NIC,SPURIOUS}_VECTOR`
+   and `RESERVED_VECTORS`, used by the IDT and by the drivers — though
+   `apps::entry` still passes the timer vector to `enable_tick_source` as a
+   literal `32`, which is worth fixing.
+3. **Bounds on parsed input** — every packet/structure decoder returns `None`
+   rather than indexing past the buffer.

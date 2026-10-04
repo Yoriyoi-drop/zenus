@@ -1,3 +1,9 @@
+<!--
+DESIGN DOCUMENT — a proposal for the `.zns` executable format and `.znl`
+libraries. None of this is implemented: the kernel loads ELF, not `.zns`. Keep
+this as a design record, not as a description of the system.
+-->
+
 Kalau `.zns` menjadi **format executable resmi Zenus OS**, maka jangan hanya dianggap sebagai "file yang bisa dijalankan". Ia sebaiknya menjadi fondasi seluruh ekosistem aplikasi Zenus, setara dengan **PE (.exe)** di Windows atau **ELF** di Linux. Manusia memang gemar membuat format baru, lalu menghabiskan bertahun-tahun memastikan format itu tidak meledak saat membaca satu byte yang salah.
 
 # 1. `.zns` (Zenus Native Executable)

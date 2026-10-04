@@ -1,5 +1,91 @@
 # Zenus OS Changelog
 
+## Unreleased
+
+### Testing
+- Added a host unit-test layer: `#[cfg(test)] mod host_tests` inside the
+  kernel crates, run with `make test-host` / `cargo test --workspace`. 151
+  tests across 11 crates, covering VMA arithmetic, packet parsing, permission
+  bits, syscall numbering, the journal, the fuzzer's bookkeeping, namespaces
+  and the error-code catalog.
+- Removed the workspace-wide default cargo target. `cargo test` could not run
+  against `x86_64-unknown-none` (no `std`, therefore no test harness); kernel
+  builds now always pass `--target x86_64-unknown-none` explicitly. CI runs
+  the host suite and lints the kernel target separately.
+- `make build` now exists (the README documented it; the target did not).
+
+### Fixed
+- Task frames were built at the top of the stack in `create_user_task`, inside
+  the area `TSS.RSP0` points at, so the first timer tick overwrote the saved
+  user context. All constructors share `frame_base()` now, and
+  `stack_size_is_valid()` rejects stacks too small for it (below the guard the
+  subtraction underflowed to ~2^64).
+- NIC interrupts were routed to `32 + irq_line` while the handler is installed
+  at a fixed vector, so every RX interrupt was acknowledged and dropped.
+  Vectors are now shared constants used by both the IDT and the drivers.
+- `VmaTable::find_free` recursed forever on `size == 0`, overflowed on large
+  inputs, and could return a range overlapping an existing mapping.
+- ext2 structure decoders read past short buffers.
+- `.zpk` entry paths could escape the install prefix via `..`, and a rejected
+  image still created a package directory. Records were also read by casting
+  byte offsets to `#[repr(C)]` pointers, which is undefined behaviour when a
+  payload length is not a multiple of 4.
+- VFS silently truncated paths longer than 32 components, resolving a
+  *different* file than requested.
+- `access_check` did not require the execute bit for "other" on directories.
+- `dns::parse_response` read one byte past the buffer on a truncated
+  compression pointer; `ipv4::parse` accepted other protocol versions and
+  ignored header options when validating the checksum.
+- `lockdep` gave class id 0 to the first lock, which is also the "unregistered"
+  sentinel, so it never checked it.
+- Error-code counters merged every module's `*-0001` into one slot, and the
+  code parser dropped all two-letter `ZN-FS-*` codes.
+- `journal_replay` retired the header before flushing the redo data; a crash in
+  that window lost the transaction with no journal left.
+- `journal_init`/`journal_replay` wrote the header straight to the device,
+  leaving a stale cached copy that the next `journal_begin` wrote back.
+- `virtio-blk`'s flush reported failure when no virtio-blk was present, which
+  wedged `journal_commit` and every later `journal_begin`; its completion poll
+  used a bare `hlt`, which never wakes with interrupts disabled.
+- The fuzzer's corpus cursor advanced twice per call, so a campaign replayed
+  the first input forever; the minimiser looped forever on inputs containing a
+  zero byte.
+- `idle_until` could never return to its caller's frame, making the fuzzing
+  watchdog's abort unreachable — a timeout could not be reported.
+- `sysctl_init` appended a duplicate copy of every default on each call;
+  `kernel.uptime` divided 100 Hz ticks by 1000 and was never incremented.
+- `tmpfs` removed non-empty directories, orphaning their children, and handed
+  out `&'static mut` for its node table.
+- PIC EOI was issued from application processors, re-aiming the interrupt line.
+- `userspace/{syscall_core,pipe_test}` called `SYS_PIPE = 22`, which is
+  `SYS_ACCESS` after the syscall renumbering.
+- The cgroup2 filesystem reported success for create/unlink/write on a
+  read-only view.
+
+### Changed
+- Unsynchronised globals are now atomics or locked: journal state, the route
+  table, tmpfs nodes, error counters.
+- `block_cache::evict_one` no longer overwrites the hash slot when a window is
+  full; it prefers an empty slot, then a clean one.
+- Removed dead code: the duplicated VMA table in `zenus-sched`, and
+  `zenus-fs/{cred,initrd}.rs` plus `zenus-net/checksum.rs`, none of which were
+  ever compiled.
+
+### Docs
+- Rewritten against the tree: `README.md`, `AGENTS.md`, `ARCHITECTURE.md`,
+  `SECURITY.md`, `ROADMAP.md`, `CONTRIBUTING.md`, `SUMMARY.md`,
+  `doc/fuzzing.md`, plus status banners on `audit.md`, `DESIGN.md` and
+  `AETHER.md`.
+- The previous `ROADMAP.md` claimed Phases 2 and 3 were 100 % complete,
+  including a capability system, KPTI, encryption, NAT and incremental
+  backups — none of which exist in this tree — and counted the 25 in-kernel
+  tests as the whole suite.
+- `ROADMAP.md` now separates what is done, what is partial, and what is a view
+  rather than an implementation (the cgroup2 tree, ZENUS_SSH, the container
+  story), and lists the next six items in priority order.
+- `audit.md`, `DESIGN.md` and `AETHER.md` are now labelled as what they are: a
+  dated audit snapshot, and two design proposals for things that do not exist.
+
 ## Version 0.1.0 - Pre-Alpha (2026-06-25)
 
 ### Overview

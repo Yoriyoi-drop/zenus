@@ -13,7 +13,7 @@ make run-gui        # QEMU with a window
 make run-serial     # QEMU headless, serial on stdio
 make run-tcp        # serial over TCP, then: nc localhost 45678
 
-make test-host      # host unit tests (fast, no VM) — see "Testing"
+make test-host      # cargo test --workspace --target x86_64-unknown-linux-gnu
 make test           # in-kernel test suite inside QEMU
 ```
 
@@ -33,14 +33,15 @@ make test           # in-kernel test suite inside QEMU
 | `crates/zenus-virtio/` | virtio-net / -blk / -console / -balloon |
 | `crates/zenus-ns/` | PID, UTS, mount, net, user and IPC namespaces |
 | `crates/zenus-fuzz/` | In-kernel fuzzing campaigns (mutation, corpus, coverage, minimiser) |
-| `zutils/crates/` | 43 `coreutils`-style shell builtins (`ls`, `grep`, `df`, …) |
-| `userspace/` | Ring-3 test programs (`hello`, `args`, `pipe_test`, …) |
+| `zutils/crates/` | 41 `coreutils`-style shell builtins (`ls`, `grep`, `df`, …) |
+| `userspace/` | Ring-3 test programs — a **separate** cargo workspace, not covered by `cargo test --workspace` |
 
 ## Feature Status
 
 Implemented and exercised:
 
-- Boot via Limine, SMP (AP bring-up, per-CPU data), ACPI, PCI enumeration
+- Boot via Limine, SMP (AP bring-up, per-CPU data), PCI enumeration
+  (ACPI shutdown/power-off exists; `acpi::init()` is never called)
 - 4-level paging with per-process address spaces; preemption via LAPIC timer
 - 109-syscall interface with ELF loading and ring-3 execution
 - ext2 read/write with journalling, fsck, and a write-back block cache
@@ -61,7 +62,7 @@ capability system, no driver isolation or hotplug, and storage is PIO-only.
 Two layers, both runnable:
 
 ```bash
-make test-host   # or: cargo test --workspace
+make test-host   # == cargo test --workspace --target x86_64-unknown-linux-gnu
 ```
 
 Host unit tests are `#[cfg(test)]` modules inside the kernel crates. They cover
@@ -73,8 +74,11 @@ across 11 crates.
 make test        # QEMU: the in-kernel suite (apps/src/test_runner.rs)
 ```
 
-The in-kernel suite is the only way to test real MMIO, the IDT and the APIC.
-It runs as a kernel task and reports over the serial line.
+The in-kernel suite is the only layer that *can* test real MMIO, the IDT and the
+APIC. Today its 25 cases are still pure assertions (block-cache fields, VFS
+path helpers, ext2 struct sizes, paging constants) — a second host-test layer
+that happens to run inside QEMU. It is invoked directly from `entry()` on the
+boot CPU, before any task is created, and reports over the serial line.
 
 **Targets matter.** `cargo test` defaults to the *host* triple on purpose:
 `x86_64-unknown-none` has no `std`, so a bare `cargo test` there fails with
@@ -88,8 +92,12 @@ this: cargo ignores an alias that shadows a built-in command.
 ```bash
 make fuzz-smoke        # 2 000 cases, every commit
 make fuzz-coverage     # 50 000 cases, hunting for new paths
-make fuzz-regression   # replay recorded crashes
+make fuzz-regression   # replay recorded crashes (see the caveat)
 ```
+
+`fuzz-regression` currently replays nothing: the crash log lives only in kernel
+memory and `zenus_fuzz::init()` clears it, so it is always empty at boot and the
+run reports success. It needs an on-disk crash corpus first.
 
 The campaign runs *inside* the kernel: it replaces the shell, contains each
 fault through `zenus_arch::fuzz_guard`, and prints a machine-readable report
@@ -97,9 +105,10 @@ fault through `zenus_arch::fuzz_guard`, and prints a machine-readable report
 
 ## Shell
 
-Roughly 90 builtins, from `zutils/crates/` (`ls`, `cat`, `cp`, `grep`, `df`,
-`top`, …) plus kernel-side commands (`tcp-*`, `udp-*`, `dhcp`, `fsck`,
-`journal-*`, `zbench`, `zdiag`, `zdoctor`, `ztrace`, `ns-*`, `firewall-*`, …).
+86 builtins: 41 from `zutils/crates/` (`ls`, `cat`, `cp`, `grep`, `df`, `top`,
+plus the `z*` diagnostics in `zutils/crates/native/`) and 45 kernel-side commands
+(`tcp-*`, `udp-*`, `dhcp`, `resolve`, `fsck`, `journal-*`, `bcache`, `ns-*`,
+`firewall-*`, `pkg-*`, `syslog`, `watchdog-*`, `lockdep-status`, …).
 
 ## License
 

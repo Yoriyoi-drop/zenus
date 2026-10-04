@@ -34,7 +34,7 @@ command.
 Two layers:
 
 ```bash
-make test-host      # host unit tests: cargo test --workspace
+make test-host      # cargo test --workspace --target x86_64-unknown-linux-gnu
 make test           # in-kernel suite inside QEMU (apps/src/test_runner.rs)
 make fuzz-smoke     # in-kernel fuzzing campaign
 ```
@@ -46,7 +46,9 @@ make fuzz-smoke     # in-kernel fuzzing campaign
   is `#[cfg(target_os = "none")]`-gated with a host twin.
 - **In-kernel tests** are `#[cfg(feature = "testing")] pub mod tests` modules
   returning `Result<(), &'static str>`, registered in
-  `apps/src/test_runner.rs`. Only this layer can test MMIO/IDT/APIC.
+  `apps/src/test_runner.rs`. Only this layer *can* test MMIO/IDT/APIC — though
+  all 25 cases are still pure assertions, so treat it as a second host-test
+  layer that happens to run in QEMU. New hardware tests belong here.
 
 Conventions:
 
@@ -64,13 +66,15 @@ Conventions:
 ## Architecture
 
 Layered crates, bottom to top: `zenus-sync` → `zenus-console`/`zenus-mem` →
-`zenus-arch` → `zenus-fs`/`zenus-net` → `zenus-sched` → `zenus-syscall`, with
-`apps` as the entry point and `zenus-fuzz` as an alternate entry point.
+`zenus-arch` → `zenus-fs`/`zenus-net` → `zenus-sched` → `zenus-syscall`. `apps` is the only entry point;
+`zenus-fuzz` is the fuzzing engine it calls when built with
+`--features fuzz-<mode>`.
 
 Boot order in `apps::entry`: Limine/HHDM → frame allocator → paging → IDT →
 APIC (timer) → keyboard + serial IRQ → scheduler → VFS mounts → namespaces →
-PCI → virtio → ATA → ext2 (`/mnt`, `/virtio`) → journal replay → network →
-SMP bring-up → init system → shell task → `loop { scheduler::idle() }`.
+PCI → virtio → ATA → ext2 (`/mnt`, `/virtio`) → network → lockdep/watchdog →
+journal replay → SMP bring-up → init system → shell task →
+`loop { scheduler::idle() }`.
 
 Three things worth knowing before touching the scheduler:
 

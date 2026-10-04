@@ -15,16 +15,14 @@ Zenus OS is a pre-alpha kernel project designed to teach modern kernel developme
 
 ## Project Status
 
-Current Production Readiness: **18.5%**
-- **Phase 1 (Foundation)**: 100% complete
-- **Phase 2 (Networking & Security)**: 100% complete  
-- **Phase 3 (Production)**: 10% complete (virtio + namespaces)
+Pre-alpha. The previous number here (18.5 %) came with a claim that Phases 2
+and 3 were complete — including a capability system, KPTI and encryption, none
+of which exist. See `ROADMAP.md` for what is actually built.
 
-**Critical Remaining Work**:
-- User/kernel isolation (security)
-- Complete syscall set (fork, exec, pipe, signals)
-- Dynamic memory management
-- Container runtime support
+**Critical remaining work**, in order:
+- SMAP/SMEP: implemented, disabled at boot, blocking on a PML4 U/S bug
+- Privilege model: no capabilities, `prctl` is a no-op
+- Container runtime: namespaces exist, cgroups are a read-only view
 
 ## How to Contribute
 
@@ -33,7 +31,7 @@ Current Production Readiness: **18.5%**
 #### Key Characteristics
 - **Educational Focus**: Code is intentionally simple and understandable
 - **Minimal Dependencies**: Only `x86_64` crate as external dependency
-- **Rust-Based**: Full memory safety via Rust's ownership system
+- **Rust-Based**: memory safety by ownership where possible — 465 `unsafe` blocks remain (see `SECURITY.md`)
 - **Pre-Alpha**: Not production-ready, expect frequent changes
 
 #### Development Philosophy
@@ -52,25 +50,46 @@ rustup target add x86_64-unknown-none
 
 #### Building Tests
 ```bash
-# Build with testing feature
-cargo build --features testing
-
-# Run unit tests
-make test
-
-# Run in QEMU with test overlay
-make test
+make test-host      # cargo test --workspace --target x86_64-unknown-linux-gnu
+make test           # in-kernel suite inside QEMU
+make fuzz-smoke     # in-kernel fuzzing campaign
 ```
 
-#### Test Structure
-Tests use Rust's built-in test framework. Most tests run automatically during boot.
+#### Targets
+There is deliberately **no default cargo target**. `cargo build` and
+`cargo test` build for the host; anything producing kernel code passes
+`--target x86_64-unknown-none` (the Makefile does).
 
-**Current Test Coverage**:
-- Block cache LRU logic: ✅
-- VFS path resolution: ✅
-- ext2 filesystem constants: ✅
-- Paging operations: ✅
-- **25 total unit tests**
+`cargo test` therefore works out of the box. Running it against the bare-metal
+triple cannot work: that target has no `std`, so there is no test harness to
+link ("can't find crate for `test`", plus a missing `#[panic_handler]`).
+
+#### Test Structure
+Two layers, and they are not interchangeable:
+
+- **Host unit tests** — `#[cfg(test)] mod host_tests` inside the kernel
+  crates. Pure logic: VMA arithmetic, packet parsing, permission bits, syscall
+  numbering, journal replay, fuzzing bookkeeping. They must never touch
+  `cli`/`sti`, port I/O, CR0/CR3/CR8, MSRs or MMIO — all of those fault in
+  ring 3. Where a bare-metal path needs one, it is
+  `#[cfg(target_os = "none")]`-gated with a host twin.
+- **In-kernel tests** — `#[cfg(feature = "testing")] pub mod tests` returning
+  `Result<(), &'static str>`, registered in `apps/src/test_runner.rs`. The only
+  way to test MMIO, the IDT and the APIC. 25 tests today.
+
+**Current coverage**: 151 host tests across 11 crates, 25 in-kernel tests.
+
+#### Writing Tests
+- Global kernel state is shared by every test in the process (block cache,
+  devfs, VFS, sysctl, procfs, journal, route table, firewall, corpus,
+  coverage, lockdep). Guard those tests with a `static SERIAL: SpinLock<()>`
+  guard.
+- If state leaks between tests, add a reset API (`TmpFs::reset`,
+  `procfs::reset_sources`, `bc_invalidate_all`, …) instead of writing a test
+  that depends on ordering.
+- Assert the requirement, not the implementation. A test that asserts the
+  current value of something wrong passes until someone fixes the bug.
+- If a test finds a bug, fix the bug and keep the test as the regression.
 
 ### 3. Development Workflow
 
@@ -126,11 +145,14 @@ cd /path/to/zenus
 # Quick test build
 cargo build --target x86_64-unknown-none
 
-# Run tests
+# Run the host unit tests
+make test-host
+
+# Run the in-kernel suite (needs QEMU)
 make test
 
 # Build and run in QEMU
-make run
+make run-gui
 ```
 
 #### Cross-Compilation
@@ -145,7 +167,9 @@ cargo build --target x86_64-unknown-none --features testing
 ### 6. Testing Your Changes
 
 #### Unit Tests
-Add tests in `tests/` directory or within modules using `#[cfg(test)]`.
+Add them next to the code as `#[cfg(test)] mod host_tests` (pure logic) or
+`#[cfg(feature = "testing")] pub mod tests` (needs the kernel), and register
+kernel tests in `apps/src/test_runner.rs`.
 
 #### Integration Tests
 Build your changes into the kernel and test in QEMU:
@@ -176,8 +200,14 @@ make run
 # Run in QEMU (UEFI)
 make run-uefi
 
-# Run unit tests in QEMU
+# Run the in-kernel suite in QEMU
 make test
+
+# Run the host unit tests
+make test-host
+
+# Run a fuzzing campaign
+make fuzz-smoke
 
 # Clean everything
 make clean
@@ -195,11 +225,13 @@ make clean
 
 ##### Kernel Panic Recovery
 ```rust
-// In panic handler (apps/src/lib.rs)
-use zenus_arch::crash::panic_dump;
+// The panic handler lives in apps/src/lib.rs and already dumps via
+// zenus_console::kpanic_code!. The crash-dump API it uses is:
+use zenus_arch::crash::{crash_dump_init, crash_dump_save, crash_dump_print};
 
-// Add better panic handling
-syscall_dispatch() should catch panics and dump to serial
+crash_dump_init();   // called once from apps::entry
+crash_dump_save();   // on a fatal fault
+crash_dump_print();  // to the serial console
 ```
 
 ##### User Mode Crashes
@@ -237,35 +269,24 @@ syscall_dispatch() should catch panics and dump to serial
 
 ## Development Roadmap
 
-### Short Term (0-6 months)
-- Complete missing syscalls (fork, exec, pipe, signals)
-- Implement dynamic memory management
-- Add proper user/kernel isolation
-- Improve filesystem performance
-
-### Medium Term (6-18 months)
-- Implement cgroups and resource controls
-- Add container runtime support
-- Implement live migration
-- Add performance monitoring
-
-### Long Term (18+ months)
-- Full virtualization support
-- Cloud orchestration integration
-- Production-grade networking
-- Comprehensive security hardening
+Do not keep a second roadmap here. `ROADMAP.md` is the one, and it is checked
+against the tree: what is done, what is partial, what is a view rather than an
+implementation, and the next six things in priority order. The list that used
+to live in this file predated the work (it called fork/exec/pipe/signals and
+dynamic memory management missing — all shipped — and promised live migration
+and cloud orchestration, which `ROADMAP.md` now lists as explicitly not
+planned).
 
 ## Code of Conduct
 
-This project follows:
-- **Respectful Communication**: No harassment or intimidation
-- **Constructive Feedback**: Technical, not personal
-- **Inclusion**: Welcome diverse perspectives
-- **Learning**: Everyone learns together
+There is no `CODE_OF_CONDUCT.md` in the tree yet. Until one exists, the short
+version: technical critique of the code is welcome and expected, personal
+attacks are not.
 
 ## License
 
-Apache License 2.0 - See LICENSE file for details
+MIT — see the `license` field in `Cargo.toml`. There is no `LICENSE` file in
+the tree yet; adding one is a small open task.
 
 ## Acknowledgements
 
@@ -273,6 +294,7 @@ Thank you to all contributors, especially:
 - The Rust community for the language and tooling
 - Limine bootloader team for open-source Limine
 - QEMU team for excellent emulation
-- The documentation for inspiring this guide
+- everyone who filed a bug that turned out to be real
 
-*This contributing guide is a work in progress. Please suggest improvements!*
+*This guide is a work in progress. Corrections welcome — especially the parts
+that contradict the code.*
