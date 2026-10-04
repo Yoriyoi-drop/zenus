@@ -34,10 +34,39 @@ const DEFAULT_LEASE_SECS: u32 = 86400;
 struct Lease {
     ip: [u8; 4],
     mac: [u8; 6],
+    /// Absolute expiry in server seconds (RTC epoch, see [`now_secs`]).
+    ///
+    /// This used to be hard-coded to 0 and never consulted, so the server
+    /// handed out the same addresses forever: an expired lease was still
+    /// matched by `find_lease_by_ip`, which means a client whose lease had
+    /// run out could keep an address that had since been reassigned, and the
+    /// pool could never be reclaimed after a client vanished.
     expires: u32,
 }
 
 static mut LEASES: [Option<Lease>; LEASE_TABLE_SIZE] = [None; LEASE_TABLE_SIZE];
+
+/// Current time in seconds, from the RTC epoch cached at boot.
+///
+/// The RTC is read once during boot, so this is a monotonic-ish second counter
+/// good enough for lease expiry.
+fn now_secs() -> u32 {
+    (zenus_arch::rtc::boot_epoch() + zenus_arch::interrupts::pit::get_ticks() / 100) as u32
+}
+
+/// Drop leases whose expiry has passed, freeing their pool address.
+fn reap_expired() {
+    let now = now_secs();
+    unsafe {
+        for i in 0..LEASE_TABLE_SIZE {
+            if let Some(ref l) = LEASES[i] {
+                if l.expires != 0 && l.expires <= now {
+                    LEASES[i] = None;
+                }
+            }
+        }
+    }
+}
 
 fn ip_to_pool_offset(ip: [u8; 4]) -> Option<u8> {
     let base = u32::from_be_bytes(POOL_START_OCTETS);
@@ -59,6 +88,7 @@ fn ip_to_u32(ip: [u8; 4]) -> u32 {
 }
 
 fn find_lease_by_mac(mac: &[u8; 6]) -> Option<usize> {
+    reap_expired();
     unsafe {
         for i in 0..LEASE_TABLE_SIZE {
             if let Some(ref l) = LEASES[i] {
@@ -72,6 +102,7 @@ fn find_lease_by_mac(mac: &[u8; 6]) -> Option<usize> {
 }
 
 fn find_lease_by_ip(ip: [u8; 4]) -> Option<usize> {
+    reap_expired();
     unsafe {
         for i in 0..LEASE_TABLE_SIZE {
             if let Some(ref l) = LEASES[i] {
@@ -85,6 +116,7 @@ fn find_lease_by_ip(ip: [u8; 4]) -> Option<usize> {
 }
 
 fn alloc_lease() -> Option<usize> {
+    reap_expired();
     unsafe {
         for i in 0..LEASE_TABLE_SIZE {
             if LEASES[i].is_none() {
@@ -316,7 +348,7 @@ pub fn handle_receive(iface_idx: usize, _src_ip: [u8; 4], packet: &[u8]) -> bool
                 LEASES[lease_idx] = Some(Lease {
                     ip,
                     mac,
-                    expires: 0,
+                    expires: now_secs().wrapping_add(lease_secs),
                 });
             }
 
@@ -366,7 +398,7 @@ pub fn handle_receive(iface_idx: usize, _src_ip: [u8; 4], packet: &[u8]) -> bool
                     LEASES[lease_idx] = Some(Lease {
                         ip: req_ip,
                         mac,
-                        expires: 0,
+                        expires: now_secs().wrapping_add(lease_secs),
                     });
                 }
 

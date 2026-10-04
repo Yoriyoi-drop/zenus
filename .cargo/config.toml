@@ -1,5 +1,19 @@
-[build]
-target = "x86_64-unknown-none"
+# NOTE: there is deliberately **no** `[build] target` here.
+#
+# A default `target = "x86_64-unknown-none"` makes every bare `cargo test`
+# and `cargo clippy --all-targets` build the test harness for a target that
+# has no `std`, which fails with:
+#     error[E0463]: can't find crate for `test`
+#     error: `#[panic_handler]` function required, but not found
+# (and cargo silently ignores a `[alias] test = ...` trying to paper over it:
+# "user-defined alias `test` is ignored, because it is shadowed by a built-in
+# command").
+#
+# So: host is the default target. Everything that produces kernel code passes
+# the triple explicitly.
+#     cargo test --workspace                        # host unit tests
+#     make build                                   # -> cargo build --target x86_64-unknown-none
+#     cargo build --target x86_64-unknown-none      # kernel, same thing
 
 [target.x86_64-unknown-none]
 rustflags = ["-C", "target-cpu=x86-64", "-C", "panic=abort"]

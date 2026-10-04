@@ -133,13 +133,20 @@ impl BlockCache {
                 if !self.flush_entry(idx) {
                     return false;
                 }
+                // Probe the device before caching the sector. Without this a
+                // write to a sector the device rejects (past end of device) is
+                // accepted into the cache and can never be flushed, so every
+                // later `bc_flush()`/`bc_read()` that has to evict that entry
+                // fails too — one bad LBA takes the whole cache down.
+                let mut sector_buf = [0u8; SECTOR_SIZE];
+                if !block_device_read(dev_id as usize, block, &mut sector_buf) {
+                    return false;
+                }
                 if buf.len() < SECTOR_SIZE {
-                    // Read-modify-write: baca sektor lama dulu
-                    let mut sector_buf = [0u8; SECTOR_SIZE];
-                    block_device_read(dev_id as usize, block, &mut sector_buf);
+                    // Read-modify-write: keep the rest of the sector
                     self.entries[idx].data = sector_buf;
                 } else {
-                    self.entries[idx].data = [0; SECTOR_SIZE];
+                    self.entries[idx].data = sector_buf;
                 }
                 self.entries[idx].dev_id = dev_id;
                 self.entries[idx].block = block;

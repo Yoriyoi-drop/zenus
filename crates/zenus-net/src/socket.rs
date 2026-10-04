@@ -28,7 +28,6 @@ struct UdpBuffer {
 #[derive(Clone, Copy)]
 struct UdpSocket {
     local_port: u16,
-    local_ip: [u8; 4],
     dst_ip: [u8; 4],
     dst_port: u16,
     connected: bool,
@@ -113,7 +112,6 @@ pub fn socket(domain: u8, type_: u8, _protocol: u8) -> Option<usize> {
             SOCK_STREAM => SocketKind::Tcp { conn: 0 },
             SOCK_DGRAM => SocketKind::Udp(UdpSocket {
                 local_port: 0,
-                local_ip: [0; 4],
                 dst_ip: [0; 4],
                 dst_port: 0,
                 connected: false,

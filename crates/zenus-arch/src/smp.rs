@@ -36,22 +36,20 @@ pub fn init() {
     let count = resp.cpu_count as u32;
     CPU_COUNT.store(count, Ordering::Relaxed);
 
+    // Limine hands back VIRTUAL addresses (already in the HHDM) for
+    // `mp_response.cpus` and the entries it points at. Do NOT add
+    // hhdm_offset(): the old saturating_add overflowed to u64::MAX,
+    // tripped the guard below, and smp::init bailed out — so the CPU
+    // table stayed empty and wake_aps never launched the APs (boot log:
+    // "MP response cpus ... invalid 0xffffffffffffffff" with -smp 4).
     let info_ptrs_phys = resp.cpus.0;
-    let hhdm = limine::hhdm_offset();
 
     if info_ptrs_phys == 0 || info_ptrs_phys == 0xFFFFFFFFFFFFFFFF {
         zenus_console::kwarn!("MP response cpus pointer invalid: {:#x}", info_ptrs_phys);
         return;
     }
 
-    let info_ptrs_virt = info_ptrs_phys.saturating_add(hhdm);
-    if info_ptrs_virt == 0 || info_ptrs_virt == 0xFFFFFFFFFFFFFFFF {
-        zenus_console::kwarn!(
-            "MP response cpus virtual pointer invalid: {:#x}",
-            info_ptrs_virt
-        );
-        return;
-    }
+    let info_ptrs_virt = info_ptrs_phys;
 
     let info_ptrs = info_ptrs_virt as *mut *mut LimineMpInfo;
     unsafe {
@@ -61,7 +59,7 @@ pub fn init() {
             if info_ptr_phys_val == 0 || info_ptr_phys_val == 0xFFFFFFFFFFFFFFFF {
                 continue;
             }
-            let info_virt = info_ptr_phys_val.saturating_add(hhdm);
+            let info_virt = info_ptr_phys_val;
             if info_virt == 0 || info_virt == 0xFFFFFFFFFFFFFFFF {
                 continue;
             }
@@ -87,13 +85,15 @@ pub fn wake_aps() {
     }
 
     let bsp_lapic_id = resp.bsp_lapic_id;
+    // Virtual address straight from Limine — see comment in smp::init().
+    // The previous +hhdm_offset() overflowed here too, so wake_aps
+    // returned early and every AP stayed parked (goto_address never set).
     let info_ptrs_phys = resp.cpus.0;
-    let hhdm = limine::hhdm_offset();
-    let info_ptrs_virt = info_ptrs_phys.saturating_add(hhdm);
+    let info_ptrs_virt = info_ptrs_phys;
 
     if info_ptrs_virt == 0 || info_ptrs_virt == 0xFFFFFFFFFFFFFFFF {
         zenus_console::kwarn!(
-            "MP response cpus virtual pointer invalid in wake_aps: {:#x}",
+            "MP response cpus pointer invalid in wake_aps: {:#x}",
             info_ptrs_virt
         );
         return;
@@ -108,7 +108,7 @@ pub fn wake_aps() {
         if info_ptr_phys_val == 0 || info_ptr_phys_val == 0xFFFFFFFFFFFFFFFF {
             continue;
         }
-        let info_virt = info_ptr_phys_val.saturating_add(hhdm);
+        let info_virt = info_ptr_phys_val;
         if info_virt == 0 || info_virt == 0xFFFFFFFFFFFFFFFF {
             continue;
         }
@@ -132,6 +132,10 @@ pub fn wake_aps() {
 pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
     crate::cpu::enable_sse();
     crate::gdt::init_ap();
+    // IDTR is per-CPU: load the kernel IDT built by interrupts::init() on
+    // the BSP before anything can fault on this AP (else #DF → triple
+    // fault kills the whole VM).
+    crate::interrupts::idt::load_ap();
     let cpu_id = cpu_number_for_apic(info.lapic_id);
     crate::cpu::init_syscall_ap(cpu_id);
 

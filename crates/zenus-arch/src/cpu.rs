@@ -4,6 +4,17 @@ use x86_64::registers::model_specific::Msr;
 
 extern "C" {
     pub fn syscall_dispatch(num: u64, arg1: u64, arg2: u64, arg3: u64) -> u64;
+    /// Full 6-argument dispatcher used by `syscall_entry`. Args 4/5/6 come
+    /// from r10/r8/r9 (Linux ABI) and must be forwarded intact.
+    pub fn syscall_dispatch6(
+        num: u64,
+        arg1: u64,
+        arg2: u64,
+        arg3: u64,
+        arg4: u64,
+        arg5: u64,
+        arg6: u64,
+    ) -> u64;
 }
 
 pub const MAX_CPUS: usize = 8;
@@ -64,19 +75,28 @@ pub unsafe fn percpu_ptr() -> u64 {
 // ---------------------------------------------------------------------------
 // SYSCALL entry/exit assembly
 // ---------------------------------------------------------------------------
-// RCX = user RIP, R11 = user RFLAGS on SYSCALL.  Saved at KSP-8/KSP-16,
+// RCX = user RIP, R11 = user RFLAGS on SYSCALL.  Saved at KSP-40/KSP-32,
 // but those may be overwritten by heap allocator MAGIC_FREE writes.
-// FIX: Push deep copies at KSP-24/KSP-32 and restore from those.
+// FIX: Push deep copies at KSP-48/KSP-56 and restore from those.
 //
-// Push order: rcx-orig, r11-orig, r11-deep, rcx-deep
-// After call syscall_dispatch + ret:
-//   RSP = KSP - 32
-//   [RSP+0]  = rcx-deep (RIP at KSP-32) ← PUSHED LAST
-//   [RSP+8]  = r11-deep (RFLAGS at KSP-24)
-//   [RSP+16] = r11-orig possibly corrupted (KSP-16)
-//   [RSP+24] = rcx-orig possibly corrupted (KSP-8)
+// Syscall args 4/5/6 arrive in r10/r8/r9 (Linux ABI).  They MUST be
+// spilled before any register shuffling, otherwise the shuffling below
+// (mov rcx,rdx / mov rdx,rsi / mov rsi,rdi) destroys them and the handler
+// silently receives 0 for every argument past the third.
 //
-// Restore: pop rcx(RIP-deep), pop r11(RFLAGS-deep), add rsp,16(skip corr)
+// Push order: r10, r8, r9, rcx-orig, r11-orig, r11-deep, rcx-deep
+// After call syscall_dispatch6 + ret:
+//   RSP = KSP - 56
+//   [RSP+0]  = rcx-deep (RIP at KSP-56)      ← PUSHED LAST
+//   [RSP+8]  = r11-deep (RFLAGS at KSP-48)
+//   [RSP+16] = r11-orig possibly corrupted (KSP-40)
+//   [RSP+24] = rcx-orig possibly corrupted (KSP-32)
+//   [RSP+32] = r9-orig  = arg6 (KSP-24)
+//   [RSP+40] = r8-orig  = arg5 (KSP-16)
+//   [RSP+48] = r10-orig = arg4 (KSP-8)
+//
+// Restore: pop rcx(RIP-deep), pop r11(RFLAGS-deep), restore r8/r9/r10,
+//          add rsp,40(skip arg slots + corrupted originals)
 // ---------------------------------------------------------------------------
 core::arch::global_asm!(
     ".intel_syntax noprefix",
@@ -87,24 +107,35 @@ core::arch::global_asm!(
     "  mov gs:[0], rsp",
     "  mov rsp, gs:[8]",
     // Save originals (may be corrupted by heap operations during handler)
-    "  push rcx", // KSP-8: user RIP (original, may be corrupted)
-    "  push r11", // KSP-16: user RFLAGS (original, may be corrupted)
+    // Spill syscall args 4/5/6 (r10/r8/r9) FIRST — the rotation below
+    // overwrites exactly those registers.
+    "  push r10", // KSP-8:  arg4 (orig r10)
+    "  push r8",  // KSP-16: arg5 (orig r8)
+    "  push r9",  // KSP-24: arg6 (orig r9)
+    "  push rcx", // KSP-32: user RIP (original, may be corrupted)
+    "  push r11", // KSP-40: user RFLAGS (original, may be corrupted)
     // Deep copies (preserved below corrupted area)
-    "  push r11", // KSP-24: user RFLAGS (deep copy, safe)
-    "  push rcx", // KSP-32: user RIP (deep copy, safe) ← PUSHED LAST
+    "  push r11", // KSP-48: user RFLAGS (deep copy, safe)
+    "  push rcx", // KSP-56: user RIP (deep copy, safe) ← PUSHED LAST
+    // Reload arg4/5/6 from the stack slots, before they are clobbered.
+    "  mov r8, [rsp + 16]", // r8  = arg4 (orig r10 @ KSP-8)
+    "  mov r9, [rsp + 8]",  // r9  = arg5 (orig r8  @ KSP-16)
+    "  mov r10, [rsp]",     // r10 = arg6 (orig r9  @ KSP-24)
+    // Rotate arg1..arg3 into position: a3=rdx, a2=rsi, a1=rdi, num=rax
     "  mov rcx, rdx",
-    "  mov r8, rsi",
-    "  mov r9, rdi",
+    "  mov rdx, rsi",
+    "  mov rsi, rdi",
     "  mov rdi, rax",
-    "  mov rsi, r9",
-    "  mov rdx, r8",
-    "  call syscall_dispatch",
-    // After call+ret: RSP = KSP - 32 (ret_addr consumed by ret inside dispatch)
-    // Stack: [rcx-deep(RIP)][r11-deep(RFLAGS)][r11-orig(corr)][rcx-orig(corr)]
-    // Pop deep copies, then skip the corrupted originals:
-    "  pop rcx",     // RCX = saved RIP from DEEP COPY (safe), RSP = KSP - 24
-    "  pop r11",     // R11 = saved RFLAGS from DEEP COPY (safe), RSP = KSP - 16
-    "  add rsp, 16", // Skip corrupted originals at KSP-8/KSP-16, RSP = KSP
+    "  call syscall_dispatch6",
+    // After call+ret: RSP = KSP - 56 (ret_addr consumed by ret inside dispatch)
+    // Pop deep copies, then skip the arg slots + corrupted originals:
+    "  pop rcx",     // RCX = saved RIP from DEEP COPY (safe), RSP = KSP - 48
+    "  pop r11",     // R11 = saved RFLAGS from DEEP COPY (safe), RSP = KSP - 40
+    // Restore the user-visible arg registers clobbered above.
+    "  mov r10, [rsp]",      // orig r10 (arg4)
+    "  mov r8, [rsp + 8]",   // orig r8  (arg5)
+    "  mov r9, [rsp + 16]",  // orig r9  (arg6)
+    "  add rsp, 40", // Skip arg slots + corrupted originals, RSP = KSP
     // Validate saved RCX before SYSRET.
     // Kernel-space RCX or NULL RCX indicates corruption; route to debug loop.
     "  mov rax, rcx",

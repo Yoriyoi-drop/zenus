@@ -1,5 +1,37 @@
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::block_cache::{bc_flush, bc_read, bc_write};
 use crate::devfs::block_device_write;
+
+/// Device-level write barrier, installed by the platform layer.
+///
+/// `bc_flush()` only drains *our* block cache into the device driver; on a
+/// volatile-backed device (virtio-blk, and any host that reorders writes) that
+/// is not durability. Before the journal marks a transaction COMMITTED it must
+/// know the data blocks reached stable storage, otherwise a crash can leave a
+/// committed journal pointing at data that was never written.
+///
+/// Stored as a `usize` function pointer in an atomic so the hook can be
+/// registered after this module is initialised, without a lock on the commit
+/// path.
+static DEVICE_FLUSH: AtomicUsize = AtomicUsize::new(0);
+
+/// Register the platform's write-barrier implementation.
+pub fn set_device_flush(f: fn() -> bool) {
+    DEVICE_FLUSH.store(f as usize, Ordering::Release);
+}
+
+/// Issue the device write barrier, if one was registered.
+pub fn device_flush() -> bool {
+    let f = DEVICE_FLUSH.load(Ordering::Acquire);
+    if f == 0 {
+        return true;
+    }
+    // SAFETY: `f` was published by `set_device_flush` as a plain `fn() -> bool`
+    // and the module lives for the rest of the kernel's life.
+    let func: fn() -> bool = unsafe { core::mem::transmute(f) };
+    func()
+}
 
 const JOURNAL_MAGIC: u32 = 0x4A524E4C; // "JRNL"
 const MAX_ENTRIES: usize = 123;
@@ -57,8 +89,26 @@ pub fn journal_begin() -> bool {
         }
         JNL_ACTIVE = true;
         JNL_SEQUENCE += 1;
-        true
     }
+
+    // Mark the header ACTIVE and make it durable *before* the caller starts
+    // writing data blocks. If the header kept saying EMPTY/committed, a crash
+    // mid-transaction would leave orphan data blocks that `journal_replay`
+    // cannot attribute to anything, and `JNL_STATE_ACTIVE` was never actually
+    // written anywhere.
+    let mut hdr = match read_header() {
+        Some(h) => h,
+        None => {
+            unsafe { JNL_ACTIVE = false };
+            return false;
+        }
+    };
+    hdr.state = JNL_STATE_ACTIVE;
+    if !write_header(&hdr) || !bc_flush() {
+        unsafe { JNL_ACTIVE = false };
+        return false;
+    }
+    true
 }
 
 pub fn is_journal_active() -> bool {
@@ -142,7 +192,13 @@ pub fn journal_commit() -> bool {
     }
     bc_flush();
 
-    // Phase 2: Mark committed in header (after data is written)
+    // Phase 2: Mark committed in header — but only after the device says the
+    // data blocks are durable. Skipping the barrier here is what lets a crash
+    // produce a COMMITTED journal whose data was never written.
+    if !device_flush() {
+        return false;
+    }
+
     match read_header() {
         Some(mut h) => {
             h.state = JNL_STATE_COMMITTED;
@@ -155,6 +211,9 @@ pub fn journal_commit() -> bool {
     bc_flush();
 
     // Phase 3: Clear journal (after commit is durable)
+    if !device_flush() {
+        return false;
+    }
     let hdr = read_header();
     let hdr = match hdr {
         Some(mut h) => {
@@ -211,6 +270,12 @@ pub fn journal_replay(dev_id: u8, start_block: u64) -> bool {
 
         let _ = bc_write(dev_id, target as u64, &data);
     }
+
+    // Push the replayed blocks out before the header is retired below. Without
+    // this the redo data can sit dirty in the block cache while the device-side
+    // header is already marked EMPTY — a crash in that window loses the
+    // transaction with no journal left to replay it.
+    bc_flush();
 
     buf[12..16].copy_from_slice(&JNL_STATE_EMPTY.to_ne_bytes());
     let _ = block_device_write(dev_id as usize, start_block, &buf);

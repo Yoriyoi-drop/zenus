@@ -89,7 +89,6 @@ impl ZombieList {
 static ZOMBIE_LIST: SpinLock<ZombieList> = SpinLock::new(ZombieList::new());
 
 static IDLE_RSP: AtomicU64 = AtomicU64::new(0);
-static NEXT_CPU: AtomicU32 = AtomicU32::new(0);
 
 pub const TIME_SLICE: u64 = 5;
 const MAX_CPUS: usize = 8;
@@ -120,6 +119,77 @@ static CPU_TASK_COUNT: [AtomicU32; MAX_CPUS] = [
 static TASK_COUNT: AtomicU32 = AtomicU32::new(0);
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 static SYS_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// CPU that owns the scheduler and the PIC.
+const BSP_CPU_ID: u32 = 0;
+
+/// Untouchable zone at the top of every task stack.
+///
+/// The timer ISR runs on `TSS.RSP0`, which points at the *top* of the
+/// interrupted task's stack, and everything `schedule_tick()` calls runs
+/// further down from there. A suspended task's saved context also lives on
+/// that stack, so as soon as the task was suspended near its stack top -
+/// exactly what `idle()` does, it calls `yield_now()` almost immediately -
+/// a deep enough ISR descended straight through the saved frame and
+/// overwrote it. Restoring it later produced frames whose CS slot held a CR3
+/// value or a heap pointer: the "corrupt frame" reports and the jumps into
+/// garbage we chased for hours.
+///
+/// The zone at the top of every task stack reserved for interrupt handling.
+///
+/// `TSS.RSP0` points at `kernel_rsp_top`, so the CPU pushes the interrupt
+/// frame there and `schedule_tick()` keeps descending from it. Task frames
+/// must therefore live strictly *below* this zone.
+///
+/// Layout per task stack (top → bottom):
+///   [ GUARD: interrupt area | kernel frames (live + saved) | bottom ]
+///
+/// With frames at the top of the stack the first timer tick walked straight
+/// through them: the ISR pushed its frame over the task's saved context and
+/// the next restore picked up a frame whose CS slot held a CR3 value (or, for
+/// the idle task, heap pointers instead of a CS selector).
+pub const STACK_GUARD: u64 = 32 * 1024;
+
+/// Smallest stack a task may be created with.
+///
+/// Every constructor computes its frame base as `frame_base(stack_top)` and
+/// then writes a `FRAME_BYTES` context frame there, so the stack has to be
+/// meaningfully larger than the guard. Below that the subtraction wraps
+/// (`u64`) and the frame lands at ~`0xFFFF_FFFF_FFFF_FFF0`.
+/// `init::service_register` forwards an arbitrary `stack_size` straight into
+/// `create_task_named`, so this cannot be assumed away.
+pub const MIN_TASK_STACK: u64 = STACK_GUARD + 4 * 1024;
+
+/// Bytes of context frame per task (15 GPRs + RIP/CS/RFLAGS/RSP/SS).
+pub const FRAME_BYTES: u64 = 160;
+
+/// Worst-case distance the timer ISR descends from `TSS.RSP0`: the CPU pushes
+/// its 40-byte interrupt frame and `apic_timer_isr_stub` saves 15 GP registers
+/// on top of that.
+pub const ISR_DESCENT: u64 = 40 + 15 * 8;
+
+/// Would a task created with this `stack_size` get a usable frame?
+///
+/// Pure predicate, deliberately separated from the constructors so the
+/// invariant is testable off-target. The upper bound matters as much as the
+/// lower one: an absurd size passes the lower checks, then
+/// `stack_base + stack_size` wraps and `frame_base()` becomes a wild address.
+pub const fn stack_size_is_valid(stack_size: u64) -> bool {
+    stack_size >= MIN_TASK_STACK
+        && stack_size <= isize::MAX as u64
+        && stack_size - STACK_GUARD >= FRAME_BYTES
+}
+
+/// Address of a task's context frame, given the top of its kernel stack.
+///
+/// EVERY task constructor must build its frame here, and the frame must end at
+/// least `ISR_DESCENT` bytes below the top so the timer ISR cannot walk into
+/// it. `create_user_task` used to start at `stack_top` — right where
+/// `TSS.RSP0` points — so the first tick pushed the CPU frame straight over the
+/// task's saved user context.
+pub const fn frame_base(stack_top: u64) -> u64 {
+    stack_top - STACK_GUARD
+}
 
 /// Atomic flag for child exit notification.
 /// Format: bit 63 = valid flag, bits 47:0 = exit_code, bits 31:0 = child_pid (OR'd)
@@ -168,11 +238,15 @@ impl TaskArray {
 // Unified frame format for all Ring 0 context switches:
 // Stack layout (from RSP upward):
 //   15 GP registers (R15..RAX)
-//   interrupt frame (RFLAGS, CS, RIP)
-// Exit via pop rax; add rsp, 8; popfq; jmp rax
-// Ring 3 (user) tasks use 5-item frame (SS, RSP, RFLAGS, CS, RIP) + iretq.
+//   5-slot interrupt frame (RIP, CS, RFLAGS, RSP, SS)
+// Every producer writes exactly that (timer ISR, context_switch_yield,
+// create_task, clone_task) and every consumer finishes with `cli; iretq`,
+// which unwinds all 5 slots and restores RFLAGS in one atomic step — so a
+// task's RSP is reproduced exactly, with no window in which the timer can
+// interrupt a half-unwound frame. Ring 3 frames are the same 5 slots with
+// CS=0x23 / SS=0x1b and the user RSP, returned by the same iretq.
 
-// Called from yield_now() — pops return addr, saves 15 regs + 3-item frame
+// Called from yield_now() — pops return addr, saves 15 regs + 5-slot frame
 extern "C" {
     fn context_switch_yield(save_rsp: *mut u64, new_rsp: u64);
 }
@@ -181,25 +255,38 @@ core::arch::global_asm!(
     ".intel_syntax noprefix",
     ".globl context_switch_yield",
     // Entry: rdi = &save_rsp (destination), rsi = new_rsp (target stack)
-    // Saves 15 GP registers + 3-item interrupt frame (RFLAGS, CS, RIP)
+    // Saves 15 GP registers + a 5-item interrupt frame
     // Stack layout at switch point (top→bottom):
-    //   RFLAGS, CS, RIP      ← 3-item frame (Ring 0→Ring 0)
-    //   R15..RAX             ← 15 GP registers (ALL preserved)
-    // Total frame: 18 × 8 = 144 bytes
+    //   RSP, SS, RFLAGS, CS, RIP  ← 5-item frame (matches the CPU's own
+    //                               interrupt frame, so every restore path
+    //                               consumes exactly 40 frame bytes)
+    //   R15..RAX                 ← 15 GP registers (ALL preserved)
     //
     // Fix: push all 15 GP registers FIRST (preserving RAX),
-    // then write the 3-item frame above them using RAX as temp
+    // then write the 5-item frame above them using RAX as temp
     // (RAX is already saved at [rsp+112], so using it as temp is safe).
     //
-    // Restore: pops 15 GP regs, then checks CS.RPL:
-    //   RPL=0 → kernel frame (3 items): pop rax(add rsp,8) popfq jmp rax
-    //   RPL=3 → user frame (5 items): fix SS, iretq
+    // Restore: pops 15 GP regs, then `cli` + `iretq`.
+    // iretq consumes all 5 frame slots atomically and restores RFLAGS (with
+    // IF) as part of the SAME instruction — no window in which a timer
+    // interrupt can be delivered on a half-unwound stack. The old
+    // `pop rax / add rsp,8 / popfq / lea rsp,[rsp+16] / jmp rax` sequence
+    // enabled IF at `popfq`, i.e. with RSP still mid-unwind: the timer
+    // fired inside that 4-instruction window, the ISR saved that
+    // half-unwound state as the task's context, and every preemption
+    // walked the task's RSP down by 8-16 bytes (stack exhaustion after a
+    // few hundred ticks) — see the apic_timer_isr_stub header.
     "context_switch_yield:",
     "  cli",
-    // Reserve 16 bytes so the 3-item frame (24 bytes at [RSP+120..143])
-    // does NOT overwrite the caller's stack frame above the return address.
-    // Net: after restore, RSP = caller's RSP (no +16 displacement).
-    "  sub rsp, 16",
+    // Reserve 32 bytes so the 5-slot frame ([RSP+120..159]) does NOT
+    // overwrite the caller's stack above the return address.
+    // Entry: RSP = R (points at the return address into the caller).
+    // After `sub rsp,32` + 15 pushes, S = R-152, so the frame slots land
+    // on R-32..R and the return address is read from [S+152] = [R].
+    // The RSP slot gets R+8 (exactly what `ret` would leave behind) and
+    // the SS slot gets the current kernel SS (0x10), so iretq returns
+    // with the caller's stack pointer and a valid selector.
+    "  sub rsp, 32",
     // Save all 15 GP registers first (preserves original RAX, RCX, etc.)
     "  push rax",
     "  push rcx",
@@ -216,19 +303,27 @@ core::arch::global_asm!(
     "  push r13",
     "  push r14",
     "  push r15",
-    // Stack: [R15..RAX][16 reserved][return_addr]
-    // return_addr is at [rsp + 136] (15 items × 8 + 16 reserved)
+    // Stack: [R15..RAX][32 reserved][return_addr]
+    // return_addr is at [rsp + 152] (15 items × 8 + 32 reserved)
     // Read return_addr into rax (RAX is safe — saved at [rsp+112])
-    "  mov rax, [rsp + 136]",
-    // Write 3-item interrupt frame ABOVE the 15 regs,
-    // overwriting return_addr and two caller-slots (no longer needed)
-    // Layout: [rsp+120]=RIP, [rsp+128]=CS, [rsp+136]=RFLAGS
+    "  mov rax, [rsp + 152]",
+    // Write the 5-slot frame ABOVE the 15 regs, overwriting the reserved
+    // slots and the return_addr slot itself (already copied into rax).
+    // Layout: [rsp+120]=RIP, +128=CS, +136=RFLAGS, +144=RSP, +152=SS.
     "  mov [rsp + 120], rax",
-    "  mov qword ptr [rsp + 128], 0x08",
+    // Store the REAL CS/SS. Hardcoding 0x08/0x10 stamped ring-0 selectors
+    // onto a ring-3 task that called yield_now(), so its next resume ran
+    // user code in ring 0 and its user RSP got consumed as a kernel frame.
+    "  mov rax, cs",
+    "  mov [rsp + 128], rax",
     "  pushfq",
     "  pop rax",
     "  mov [rsp + 136], rax",
     "  or qword ptr [rsp + 136], 0x200",
+    "  lea rax, [rsp + 160]", // = R + 8: caller's RSP after `ret`
+    "  mov [rsp + 144], rax",
+    "  mov rax, ss",
+    "  mov [rsp + 152], rax",
     // Save RSP (points to R15) into *save_rsp, then load new RSP
     "  mov [rdi], rsp",
     "  mov rsp, rsi",
@@ -248,31 +343,33 @@ core::arch::global_asm!(
     "  pop rdx",
     "  pop rcx",
     "  pop rax",
-    // Frame type detection via CS.RPL
-    // [rsp] = RIP, [rsp+8] = CS, [rsp+16] = RFLAGS
-    // For user: [rsp+24] = user_RSP, [rsp+32] = SS
-    // NOTE: use memory TEST to avoid corrupting restored RCX
-    "  test byte ptr [rsp + 8], 3",
-    "  jnz 3f",
-    // Kernel task (3-item frame: RIP, CS, RFLAGS)
-    // Use popfq+jmp rax instead of iretq for Ring 0→Ring 0 returns.
-    // KVM with x2APIC treats iretq differently — it may validate the CS
-    // descriptor in ways that cause spurious #GP on valid segments.
-    // popfq+jmp rax keeps the current CS (no reload), avoiding the issue.
-    "  pop rax",
-    "  add rsp, 8",
-    "  popfq",
-    "  jmp rax",
-    // User task (5-item frame: RIP, CS, RFLAGS, RSP, SS)
-    // KERNEL_GS_BASE was set to PerCpu by Rust caller.
-    // Zero GS_BASE so user mode can't access kernel memory via GS segment.
-    "3:",
+    // Strict CS dispatch, then ONE atomic `iretq` (same reasoning as the
+    // timer ISR: a multi-instruction unwind leaves a window in which an
+    // interrupt can be taken after the frame is gone, and the frame's RSP
+    // slot is the only exact source of the task's stack pointer — the CPU
+    // aligns the stack before pushing an interrupt frame, so
+    // frame_base+160 is 8 bytes off whenever the interrupted RSP was
+    // 8 mod 16).
+    "  cmp qword ptr [rsp + 8], 0x08",
+    "  je 2f",
+    "  cmp qword ptr [rsp + 8], 0x23",
+    "  jne 4f",
+    // Ring 3: KERNEL_GS_BASE points at this CPU's PerCpu struct. Zero
+    // GS_BASE so user mode can't reach kernel memory through GS.
     "  xor eax, eax",
     "  xor edx, edx",
     "  mov ecx, 0xC0000101",
     "  wrmsr",
-    "  mov qword ptr [rsp + 32], 0x1b",
+    "2:",
+    "  cli",
     "  iretq",
+    // Frame with a CS that is neither 0x08 nor 0x23.
+    // RSP points at the frame's RIP slot here — hand it to the reporter,
+    // otherwise it reads its own prologue/locals and prints nonsense.
+    "4:",
+    "  xor edi, edi",
+    "  mov rsi, rsp",
+    "  call frame_error_report",
     ".att_syntax prefix",
 );
 
@@ -322,28 +419,32 @@ core::arch::global_asm!(
     ".intel_syntax noprefix",
     ".globl apic_timer_isr_stub",
     "apic_timer_isr_stub:",
-    // Timer ISR — preserves the 128-byte red zone gap (sub rsp,128)
-    // to avoid corrupting the interrupted code's ABI red zone.
-    // The 3-item CPU frame is copied from the post-gap position
-    // to the standard position at [RSP+120], matching
-    // context_switch_yield's format for context-switch compatibility.
+    // Timer ISR — NO red-zone gap. The `x86_64-unknown-none` target has
+    // `disable-redzone: true`, so nothing below the interrupted RSP needs
+    // protecting. The old `sub rsp, 128` put the save area 288 bytes below
+    // the interrupted RSP while the restore consumed only 144: every
+    // preemption leaked 144 bytes of stack. Task stacks live in the kernel
+    // heap, so after a few dozen ticks the saved RSP walked below the stack
+    // bottom into neighbouring heap blocks and the resumed task jumped into
+    // heap data (`#PF RIP=0xffffffff80814f58`, instruction fetch on a
+    // BlockHeader holding MAGIC_USED / 0xdeadbeefcafEBABE canaries).
     //
-    // Frame layout after sub + 15 pushes:
-    //   [RSP+0]   = R15  (last push)
-    //   [RSP+112] = RAX  (first push)
-    //   [RSP+120] = ── copied 3-item frame ──
-    //              = RIP* (copied from [RSP+248])
-    //   [RSP+128] = CS*  (copied from [RSP+256])
-    //   [RSP+136] = RFLAGS* (copied from [RSP+264])
-    //   [RSP+248] = RIP  (original CPU frame)
-    //   [RSP+256] = CS
-    //   [RSP+264] = RFLAGS
+    // Every task frame is now the CPU's own 5-slot interrupt frame:
+    //   [S+0..119]  = R15..RAX (15 saved GP registers)
+    //   [S+120]     = RIP
+    //   [S+128]     = CS
+    //   [S+136]     = RFLAGS
+    //   [S+144]     = RSP
+    //   [S+152]     = SS
+    // The ISR pushes 15 regs so the untouched CPU frame lands exactly at
+    // [S+120] — the same layout context_switch_yield / create_task write.
     //
-    // Restore path (timer_restore): pops 15 regs, finds 3-item frame at
-    //   [RSP+120].  Matches context_switch_yield layout.
-    // No-switch path (timer_no_switch): pops 15 regs, add rsp,128 to
-    //   skip the gap, finds original CPU frame.  Also correct.
-    "  sub rsp, 128",
+    // Both exits converge on `pop x15..x15 / cli / iretq`. iretq unwinds all
+    // 5 slots and restores RFLAGS (IF included) as ONE atomic step: there
+    // is no window in which a timer interrupt can land on a half-unwound
+    // stack. The previous popfq+jmp sequence enabled IF before the frame was
+    // finished, so the timer ISR saved a half-unwound context as the task's
+    // state and every preemption shifted the task's RSP by 8-16 bytes.
     "  push rax",
     "  push rcx",
     "  push rdx",
@@ -359,54 +460,29 @@ core::arch::global_asm!(
     "  push r13",
     "  push r14",
     "  push r15",
-    // Copy the CPU interrupt frame (at [RSP+248..279]) into the standard
-    // position (at [RSP+120..151]) so timer_restore sees the same layout
-    // as context_switch_yield.
-    //
-    // For Ring 3 interrupts (5 items): copies RIP, CS, RFLAGS, user_RSP.
-    // For Ring 0 interrupts (3 items): copies RIP, CS, RFLAGS + CS again
-    //   (harmless — kernel path never reads [RSP+24]).
-    // SS is hardcoded to 0x1b by timer_user_ret when needed.
-    "  mov rax, [rsp + 248]",
-    "  mov [rsp + 120], rax",
-    "  mov rax, [rsp + 256]",
-    "  mov [rsp + 128], rax",
-    "  mov rax, [rsp + 264]",
-    "  mov [rsp + 136], rax",
-    // Copy user_RSP (Ring 3) or CS again (Ring 0, harmless)
-    "  mov rax, [rsp + 272]",
-    "  mov [rsp + 144], rax",
-    // RDI = saved RSP (points to R15 at bottom of 15-reg save area)
+    // The CPU frame (RIP, CS, RFLAGS, RSP, SS) is already at [RSP+120]
+    // — nothing to copy. RDI = saved RSP (points to R15 at the bottom of
+    // the 15-reg save area).
     "  mov rdi, rsp",
     "  call schedule_tick",
     "  test rax, rax",
     "  jz timer_no_switch",
-    // Context switch: rax = new task RSP (15 regs + 3/5-item frame)
+    // Context switch: rax = new task RSP (15 regs + 5-slot frame)
     "  mov rsp, rax",
     "  jmp timer_restore",
     "timer_no_switch:",
-    // Pop 15 regs, add rsp,128 to skip the gap, then return via
-    // timer_common_return using the original CPU frame at [RSP+248].
-    "  pop r15",
-    "  pop r14",
-    "  pop r13",
-    "  pop r12",
-    "  pop r11",
-    "  pop r10",
-    "  pop r9",
-    "  pop r8",
-    "  pop rdi",
-    "  pop rsi",
-    "  pop rbp",
-    "  pop rbx",
-    "  pop rdx",
-    "  pop rcx",
-    "  pop rax",
-    // After pops, RSP = R15_addr + 120 = gap start. Add 128 to reach CPU frame.
-    "  add rsp, 128",
-    "  jmp timer_common_return",
+    // Stay on the interrupted context. RSP already points at the task's
+    // 15-reg save area (the value `mov rdi, rsp` handed schedule_tick), so
+    // fall straight through to the pops — they restore R15..RAX from
+    // [RSP..RSP+119] and leave RSP at the CPU frame (base+120), exactly
+    // like the switch path. The old `lea rax, [rsp + 120]; mov rsp, rax`
+    // advanced RSP onto the CPU frame BEFORE the pops, so every no-switch
+    // tick popped the interrupt frame + the caller's stack into R15..RAX
+    // and then ran the CS check / iretq 120 bytes too high: the CS slot
+    // read stale stack garbage (`BADFRAME src=1` with CS=&TASKS+8,
+    // RSP=0) as soon as the scheduler had a tick with nothing to switch
+    // to (all other tasks blocked).
     "timer_restore:",
-    // Context switch restore: frame at [rsp+0]=RIP,+8=CS,+16=RFLAGS
     "  pop r15",
     "  pop r14",
     "  pop r13",
@@ -422,63 +498,108 @@ core::arch::global_asm!(
     "  pop rdx",
     "  pop rcx",
     "  pop rax",
-    "timer_common_return:",
-    // RSP points to CPU frame: [RSP]=RIP, [RSP+8]=CS, [RSP+16]=RFLAGS
-    "  test byte ptr [rsp + 8], 3",
-    "  jnz timer_user_ret",
-    "  pop rax",
-    "  add rsp, 8",
-    "  popfq",
-    "  jmp rax",
-    "timer_user_ret:",
+    // Strict CS dispatch: 0x08 = ring 0 (kernel tail), 0x23 = ring 3
+    // (iretq). Anything else means the saved frame is corrupt — report it
+    // with its five slots instead of jumping into it.
+    "  cmp qword ptr [rsp + 8], 0x08",
+    "  je timer_iret",
+    "  cmp qword ptr [rsp + 8], 0x23",
+    "  jne timer_bad_frame",
+    // Ring 3: KERNEL_GS_BASE points at this CPU's PerCpu struct, so zero
+    // GS_BASE before dropping to user mode.
     "  xor eax, eax",
     "  xor edx, edx",
     "  mov ecx, 0xC0000101",
     "  wrmsr",
-    "  mov qword ptr [rsp + 32], 0x1b",
+    "timer_iret:",
+    // One `iretq` for both rings. It loads RIP/CS/RFLAGS/RSP/SS and raises
+    // IF as a SINGLE atomic step, which is the only way to resume a task
+    // with no window: any multi-instruction unwind (popfq / mov rsp / jmp)
+    // can be interrupted after the frame has already been consumed, and the
+    // nested ISR then "restores" a frame that no longer exists — it jumped
+    // to stack garbage (#PF/#GP with a nonsense error code, seen as
+    // `#GP code=0x102 RIP=<ret inside hlt()>`).
+    // It also restores the task's EXACT RSP: the CPU aligns the stack
+    // before pushing an interrupt frame (`esp &= ~0xf`), so deriving the
+    // resume point as frame_base+160 is 8 bytes off whenever the
+    // interrupted RSP was 8 mod 16 — which used to hand the shell a stack
+    // 8 bytes too low and make its first `ret` jump to a RFLAGS word.
+    "  cli",
     "  iretq",
+    // Frame with a CS that is neither 0x08 nor 0x23: dump it and stop.
+    "timer_bad_frame:",
+    "  mov edi, 1",
+    "  mov rsi, rsp",
+    "  call frame_error_report",
     ".att_syntax prefix",
 );
 
 pub fn init() {
     let mut tasks = TASKS.lock();
 
-    // Idle task: allocate a 16K kernel stack and construct a 3-item kernel frame
+    // Idle task: allocate a 16K kernel stack and construct a 5-item kernel frame
     // so the scheduler can switch to idle() with a valid RSP.
-    let (idle_stack_base, _idle_layout) = unsafe { alloc_stack(16384) };
-    let idle_stack_top = idle_stack_base.wrapping_add(16384);
-    let mut idle_sp = idle_stack_top as *mut u64;
+    let (idle_stack_base, _idle_layout) = unsafe { alloc_stack(65536) };
+    let idle_stack_top = idle_stack_base.wrapping_add(65536);
+    // `idle()`'s asm switches RSP to IDLE_RSP, which sits at the *bottom* of
+    // the stack; the whole guard above it belongs to interrupt handling.
     unsafe {
-        idle_sp = idle_sp.sub(1);
-        idle_sp.write(0x202u64); // RFLAGS (IF set)
-        idle_sp = idle_sp.sub(1);
-        idle_sp.write(0x08u64); // CS (kernel)
-        idle_sp = idle_sp.sub(1);
-        idle_sp.write(idle as *const () as usize as u64);
-        for _ in 0..15 {
-            idle_sp = idle_sp.sub(1);
-            idle_sp.write(0u64); // zeroed GP registers
+        // Frame layout (memory order, matching every other task):
+        //   [rsp+0..119]  = 15 zeroed GP registers
+        //   [rsp+120]     = RIP        (idle)
+        //   [rsp+128]     = CS         (0x08, ring 0)
+        //   [rsp+136]     = RFLAGS     (IF set)
+        //   [rsp+144]     = RSP        (frame base = idle_stack_top - GUARD)
+        //   [rsp+152]     = SS         (0x10)
+        // written upwards from the frame base (writing top-down from the stack
+        // base underflowed into the heap block in front of the allocation).
+        let f = frame_base(idle_stack_top) as *mut u64;
+        for i in 0..15usize {
+            f.add(i).write(0);
         }
-        // Zero the rest of the stack to prevent stale data from being
-        // misinterpreted as interrupt frames or return addresses.
-        let clear_start = idle_stack_base as *mut u64;
-        let clear_end = idle_sp;
-        let mut clear_ptr = clear_end;
-        while clear_ptr > clear_start {
-            clear_ptr = clear_ptr.sub(1);
-            clear_ptr.write(0u64);
+        f.add(15).write(idle as *const () as usize as u64);
+        f.add(16).write(0x08u64);
+        f.add(17).write(0x202u64);
+        f.add(18).write(frame_base(idle_stack_top));
+        f.add(19).write(0x10u64);
+        // Zero the interrupt area below the frame so stale heap data can
+        // never be mistaken for a frame or a return address.
+        let mut clear = idle_stack_base as *mut u64;
+        while clear < f {
+            clear.write(0);
+            clear = clear.add(1);
         }
     }
-    let idle_initial_rsp = idle_sp as u64;
+    let idle_initial_rsp = frame_base(idle_stack_top);
+
+    // TEMP DEBUG: print every stack region so overlaps are visible.
+    {
+        let boot_rsp: u64;
+        unsafe { core::arch::asm!("mov {}, rsp", out(reg) boot_rsp, options(nostack, preserves_flags)) };
+        zenus_console::kinfo!(
+            "DBG stacks: boot_rsp={:#x} idle={:#x}..{:#x} idlersp={:#x}",
+            boot_rsp,
+            idle_stack_base,
+            idle_stack_top,
+            idle_initial_rsp
+        );
+    }
 
     let kernel_cr3 = zenus_mem::paging::get_level4_addr().as_u64();
     let mut idle_task = Task::new(0, idle_initial_rsp, "idle");
     idle_task.rsp = idle_initial_rsp;
     idle_task.cr3 = kernel_cr3;
     idle_task.stack_alloc = idle_stack_base;
-    idle_task.stack_size = 16384;
+    idle_task.stack_size = 65536;
+    // MUST be set: schedule_tick/yield_now program the TSS RSP0 from
+    // `kernel_rsp_top` before switching. Leaving it 0 skipped the update, so
+    // the TSS still pointed at the *previous* task's stack top and the timer
+    // ISR pushed its frame onto a live task's stack — clobbering the frames
+    // and locals of a task that was running (the corrupted frames that the
+    // restore path later rejected came from here).
+    idle_task.kernel_rsp_top = idle_stack_top;
     tasks.tasks[0] = Some(idle_task);
-    IDLE_RSP.store(idle_stack_top, Ordering::Release);
+    IDLE_RSP.store(frame_base(idle_stack_top), Ordering::Release);
     TASK_COUNT.store(1, Ordering::Release);
 
     zenus_console::kinfo!("Scheduler initialized");
@@ -486,15 +607,6 @@ pub fn init() {
 
 fn current_cpu() -> u32 {
     zenus_arch::smp::current_cpu()
-}
-
-fn current_cpu_id() -> u32 {
-    let cpu = current_cpu() as usize % MAX_CPUS;
-    CURRENT_TASK[cpu].load(Ordering::Acquire)
-}
-
-fn set_current_cpu_id(cpu: u32, idx: u32) {
-    CURRENT_TASK[cpu as usize % MAX_CPUS].store(idx, Ordering::Release);
 }
 
 /// Clone the current task, optionally creating new namespaces.
@@ -509,6 +621,14 @@ pub fn clone_task(
     user_rsp: u64,
     heap_brk: u64,
 ) -> u64 {
+    if !stack_size_is_valid(stack_size as u64) {
+        zenus_console::kwarn!(
+            "scheduler: rejecting {} byte task stack (minimum is {})",
+            stack_size,
+            MIN_TASK_STACK
+        );
+        return 0;
+    }
     let cpu = current_cpu();
     let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let tasks = TASKS.lock();
@@ -580,7 +700,7 @@ pub fn clone_task(
     }
 
     unsafe {
-        let mut sp = stack_top as *mut u64;
+        let mut sp = frame_base(stack_top) as *mut u64;
         sp = sp.sub(1);
         sp.write(0x1bu64);
         sp = sp.sub(1);
@@ -657,13 +777,31 @@ pub fn create_user_task(
     if entry < 0x1000 || entry >= 0x0000_8000_0000_0000 {
         return 0;
     }
+    if !stack_size_is_valid(stack_size as u64) {
+        zenus_console::kwarn!(
+            "scheduler: rejecting {} byte task stack (minimum is {})",
+            stack_size,
+            MIN_TASK_STACK
+        );
+        return 0;
+    }
     let (stack_base, _stack_layout) = unsafe { alloc_stack(stack_size) };
     if stack_base == 0 {
         return 0;
     }
     let id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
     let stack_top = stack_base + stack_size as u64;
-    let cpu = least_loaded_cpu();
+    // Run the new task on the CPU that created it. Handing it to
+    // `least_loaded_cpu()` placed the boot-time shell on an AP (cpu=1) that
+    // never runs the scheduler, so the BSP could only reach it through the
+    // work-steal path.
+    let cpu = current_cpu();
+
+    // Frames live below the interrupt area. `create_user_task` used to start
+    // at `stack_top`, i.e. inside the zone `TSS.RSP0` points at, so the very
+    // first timer tick pushed the CPU frame over the task's saved user
+    // context and `run <elf>` / `execve` died with garbage CS/RSP slots.
+    let frame_base = frame_base(stack_top);
 
     let aslr_user_rsp = if user_rsp == 0 {
         let slide = zenus_arch::random::get_random_page_aligned(0, 0x2000_0000u64);
@@ -684,7 +822,11 @@ pub fn create_user_task(
     };
 
     unsafe {
-        let mut sp = stack_top as *mut u64;
+        // Zero the interrupt area so stale heap bytes can never be mistaken
+        // for a frame (same treatment as `create_task_named`).
+        core::ptr::write_bytes(frame_base as *mut u8, 0, STACK_GUARD as usize);
+
+        let mut sp = frame_base as *mut u64;
         sp = sp.sub(1);
         sp.write(0x1bu64);
         sp = sp.sub(1);
@@ -710,7 +852,22 @@ pub fn create_user_task(
         task.cpu = cpu;
         task.cr3 = cr3;
         task.heap_brk = heap_brk;
-        task.parent_pid = current_task_id();
+        // Capture the parent BEFORE taking TASKS — `current_task_id()`
+        // locks TASKS itself, so calling it here deadlocked the CPU.
+        task.parent_pid = {
+            let cpu = current_cpu();
+            let idx = if cpu as usize >= MAX_CPUS {
+                0
+            } else {
+                CURRENT_TASK[cpu as usize].load(Ordering::Acquire)
+            } as usize;
+            // Read without the lock: the array slot is stable memory and a
+            // stale id is harmless here.
+            TASKS
+                .try_lock()
+                .and_then(|g| g.tasks[idx].as_ref().map(|t| t.id))
+                .unwrap_or(0)
+        };
 
         let mut tasks = TASKS.lock();
         match tasks.find_free() {
@@ -729,25 +886,19 @@ pub fn create_user_task(
     id
 }
 
-fn least_loaded_cpu() -> u32 {
-    let total_cpus = zenus_arch::smp::cpu_count().max(1);
-    let mut best = 0u32;
-    let mut best_count = u32::MAX;
-    for cpu in 0..total_cpus.min(8) {
-        let count = CPU_TASK_COUNT[cpu as usize].load(Ordering::Acquire);
-        if count < best_count {
-            best_count = count;
-            best = cpu;
-        }
-    }
-    best
-}
-
 pub fn create_task(entry: fn(), stack_size: usize) -> u64 {
     create_task_named(entry, stack_size, "")
 }
 
 pub fn create_task_named(entry: fn(), stack_size: usize, name: &str) -> u64 {
+    if !stack_size_is_valid(stack_size as u64) {
+        zenus_console::kwarn!(
+            "scheduler: rejecting {} byte task stack (minimum is {})",
+            stack_size,
+            MIN_TASK_STACK
+        );
+        return 0;
+    }
     let (stack_base, _stack_layout) = unsafe { alloc_stack(stack_size) };
     if stack_base == 0 {
         return 0;
@@ -755,22 +906,35 @@ pub fn create_task_named(entry: fn(), stack_size: usize, name: &str) -> u64 {
     let id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
     let stack_top = stack_base + stack_size as u64;
 
-    let cpu = least_loaded_cpu();
+    // Run the new task on the CPU that created it. An earlier load-balancing
+    // helper placed the boot-time shell on an AP (cpu=1), which never runs the
+    // scheduler, so the BSP could only reach it via the work-steal path.
+    let cpu = current_cpu();
+
+    // Task frames live at the top of the usable area; the bottom
+    // STACK_GUARD bytes belong to the interrupt stack (see STACK_GUARD).
+    let frame_base = frame_base(stack_top);
 
     unsafe {
-        let mut sp = stack_top as *mut u64;
-        // 3-item kernel frame: RFLAGS, CS, RIP
-        sp = sp.sub(1);
-        sp.write(0x202u64);
-        sp = sp.sub(1);
-        sp.write(0x08u64);
-        sp = sp.sub(1);
-        sp.write(entry as u64);
-        for _ in 0..15 {
-            sp = sp.sub(1);
-            sp.write(0u64);
+        // Frame written upwards from the frame base — see the identical
+        // layout comment in `init()`.
+        let f = frame_base as *mut u64;
+        for i in 0..15usize {
+            f.add(i).write(0);
         }
-        let initial_rsp = sp as u64;
+        f.add(15).write(entry as u64);
+        f.add(16).write(0x08u64);
+        f.add(17).write(0x202u64);
+        f.add(18).write(frame_base);
+        f.add(19).write(0x10u64);
+        // Zero the interrupt area so stale heap data can never be mistaken
+        // for a frame or return address.
+        let mut clear = stack_base as *mut u64;
+        while clear < f {
+            clear.write(0);
+            clear = clear.add(1);
+        }
+        let initial_rsp = frame_base;
 
         let mut task = Task::new(id, initial_rsp, name);
         task.rsp = initial_rsp;
@@ -821,15 +985,41 @@ unsafe fn alloc_stack(size: usize) -> (u64, core::alloc::Layout) {
     (ptr as u64, layout)
 }
 
+/// `hlt` that is safe regardless of the caller's IF state.
+///
+/// The shell calls `yield_now()` right after `read_line()`, which leaves
+/// interrupts DISABLED (it does `sti; hlt; cli` per poll). A bare `hlt`
+/// with IF=0 can never wake — no IRQ can be delivered — so the kernel
+/// hung permanently after every shell command (gdb showed RFLAGS=0x92 at
+/// scheduler.rs hlt sites). Enable interrupts only for the wait, then
+/// restore the caller's original state.
+fn hlt_wait() {
+    let was_enabled = x86_64::instructions::interrupts::are_enabled();
+    if !was_enabled {
+        x86_64::instructions::interrupts::enable();
+    }
+    x86_64::instructions::hlt();
+    if !was_enabled {
+        x86_64::instructions::interrupts::disable();
+    }
+}
+
 pub fn yield_now() {
+    // Saved at entry and restored before returning: yield_now must be
+    // interrupt-state-neutral. `context_switch_yield` leaves IF=0 on the
+    // resumed side, so a caller that entered with IF=1 (e.g. the idle
+    // loop's `sti; hlt`) would otherwise come back with IF=0 and sleep
+    // forever, and a caller with IF=0 must not wake up "enabled".
+    let irq_was_enabled = x86_64::instructions::interrupts::are_enabled();
+
     let cpu = current_cpu();
     if (cpu as usize) >= MAX_CPUS {
-        x86_64::instructions::hlt();
+        hlt_wait();
         return;
     }
     let count = TASK_COUNT.load(Ordering::Acquire);
     if count <= 1 {
-        x86_64::instructions::hlt();
+        hlt_wait();
         return;
     }
 
@@ -850,7 +1040,7 @@ pub fn yield_now() {
     let next = find_next_ready(&tasks, current, cpu);
     if next == current {
         drop(tasks);
-        x86_64::instructions::hlt();
+        hlt_wait();
         return;
     }
 
@@ -955,8 +1145,24 @@ pub fn yield_now() {
         zenus_arch::cpu::write_msr(0xC0000102, percpu_addr);
     }
 
+    {
+        let f = next_rsp;
+        if f != 0 {
+            let cs = unsafe { *(f as *const u64).add(16) };
+            if cs != 0x08 && cs != 0x23 {
+                emergency_bad_frame("yield", next, f);
+            }
+        }
+    }
     unsafe {
         context_switch_yield(save_rsp, next_rsp);
+    }
+
+    // Resumed after another task yielded back to us. The switch path
+    // disabled interrupts (cli before context_switch_yield); restore the
+    // state the caller entered with (see `irq_was_enabled` at fn top).
+    if irq_was_enabled {
+        x86_64::instructions::interrupts::enable();
     }
 }
 
@@ -986,8 +1192,15 @@ fn find_next_ready(tasks: &TaskArray, current: u32, cpu: u32) -> u32 {
         }
     }
     // Steal from other CPUs BEFORE checking idle (prevents scheduler deadlock
-    // when tasks are assigned to other CPUs but BSP idles forever)
+    // when tasks are assigned to other CPUs but BSP idles forever).
+    // Skip `current`: without this the steal loop finds `current` itself
+    // (it scans from index 1) and always returns it, so the caller hits
+    // `next == current` and idle (index 0) is never reached — round-robin
+    // never parks the current task.
     for idx in 1..MAX_TASKS as u32 {
+        if idx == current {
+            continue;
+        }
         if let Some(ref task) = tasks.tasks[idx as usize] {
             if task.is_active() {
                 return idx;
@@ -1018,6 +1231,21 @@ pub fn uptime_ticks() -> u64 {
 
 pub fn task_count() -> u64 {
     TASK_COUNT.load(Ordering::Acquire) as u64
+}
+
+/// Task *index* currently running on this CPU — lock free.
+///
+/// `current_task_id()` below locks TASKS, and calling it from code that
+/// already holds that lock (the idle bridge's frame check, task creation
+/// inside a locked region) spins forever with interrupts disabled: the whole
+/// machine hangs with the scheduler idle. Use this whenever the caller may
+/// already hold TASKS.
+pub fn current_task_index() -> u32 {
+    let cpu = current_cpu();
+    if cpu as usize >= MAX_CPUS {
+        return 0;
+    }
+    CURRENT_TASK[cpu as usize].load(Ordering::Acquire)
 }
 
 pub fn current_task_id() -> u64 {
@@ -1273,11 +1501,40 @@ pub fn get_task(id: u64) -> Option<super::task::Task> {
 
 #[no_mangle]
 pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
+    // EOI FIRST, before any early return below. Vector 32 arrives via
+    // IOAPIC → LAPIC; the LAPIC keeps its in-service (ISR) bit set for
+    // vector 32 until EOI. Without it the LAPIC refuses the NEXT timer
+    // interrupt → ticks freeze after the first one (SYS_TICKS stuck),
+    // preemption dies, and every `hlt` waiting on a tick hangs forever.
+    // PIC EOI too: PIT can arrive via the PIC path (IRQ0), and a pending
+    // PIC ISR bit would block IRQ0/1 forever. BSP only — an EOI issued from
+    // an AP re-aims the line at the wrong CPU, which is precisely how an AP
+    // ended up running a task frame the BSP was already using.
+    if current_cpu() == BSP_CPU_ID {
+        unsafe {
+            core::arch::asm!("out 0x20, al", in("al") 0x20u8, options(nostack, preserves_flags));
+        }
+    }
+    zenus_arch::interrupts::apic::eoi();
+
     SYS_TICKS.fetch_add(1, Ordering::Relaxed);
     zenus_arch::interrupts::pit::tick();
+    // Keep the sysctl uptime counter in step with the scheduler tick; without
+    // this call `kernel.uptime` never left 0.
+    zenus_fs::sysctl::sysctl_tick();
 
     let cpu = current_cpu();
     if (cpu as usize) >= MAX_CPUS {
+        return 0;
+    }
+    // Only the BSP owns the scheduler and the task set. An AP that takes a
+    // stray IRQ0 (the PIT line is unmasked in the PIC for the BSP's LINT0
+    // ExtINT route, and a PIC EOI from the wrong CPU re-aims the line) must
+    // NOT enter a task frame: it would resume a task the BSP is running
+    // right now, publish that half-finished frame as the task's saved
+    // context and leave the AP executing garbage (observed: APs parked at
+    // 0xfd0a9 while the shell stalled).
+    if cpu != BSP_CPU_ID {
         return 0;
     }
     let count = TASK_COUNT.load(Ordering::Acquire);
@@ -1336,6 +1593,39 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
 
     let current_cr3_raw = zenus_mem::paging::get_level4_addr().as_u64();
 
+    {
+        // TEMP DEBUG: compact switch trace (emergency UART waits for THR now).
+        // Const-gated: this runs INSIDE the timer ISR with interrupts off and
+        // writes ~100 bytes per tick over the polled UART — at the observed
+        // tick rate that alone starved both tasks (neither could make any
+        // progress between preemptions, so the shell never printed its
+        // prompt). Set to true only while debugging the scheduler.
+        const SCHED_TRACE: bool = false;
+        if SCHED_TRACE {
+        let n_rsp = tasks.tasks[next as usize].as_ref().map(|t| t.rsp).unwrap_or(0);
+        emergency_str(b"\r\nT");
+        emergency_hex(SYS_TICKS.load(Ordering::Relaxed));
+        emergency_str(b" ");
+        emergency_hex(current as u64);
+        emergency_str(b"->");
+        emergency_hex(next as u64);
+        emergency_str(b" S=");
+        emergency_hex(current_rsp);
+        emergency_str(b" N=");
+        emergency_hex(n_rsp);
+        let cs = if n_rsp != 0 { unsafe { *(n_rsp as *const u64).add(16) } } else { 0 };
+        emergency_str(b" cs=");
+        emergency_hex(cs);
+        emergency_str(b" ktop=");
+        emergency_hex(
+            tasks.tasks[next as usize]
+                .as_ref()
+                .map(|t| t.kernel_rsp_top)
+                .unwrap_or(0),
+        );
+        }
+    }
+
     // Save current task state
     if let Some(current_task) = tasks.tasks[current as usize].as_mut() {
         // Don't overwrite Terminated — task is exiting, skip scheduling it
@@ -1344,6 +1634,32 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         }
         current_task.rsp = current_rsp;
         current_task.cr3 = current_cr3_raw;
+        // Stack-underflow tripwire. Task stacks are heap allocations, so a
+        // task that blows past its stack bottom silently corrupts the heap
+        // block in front of it and only surfaces much later as a mysterious
+        // BADFRAME (observed: `dmesg` underflowed the shell stack by ~69 KB
+        // and zeroed idle's saved frame). Say it out loud the moment the
+        // saved RSP enters the bottom margin. Emergency UART only — we are
+        // in the timer ISR with TASKS held.
+        const STACK_UNDERFLOW_MARGIN: u64 = 512;
+        // Task 0 is the idle task: it runs on the boot stack, which is not a
+        // heap allocation, so `stack_alloc` does not describe its real bottom.
+        // Comparing the two produced a tripwire hit on *every* tick of an idle
+        // loop, and each hit writes ~80 bytes through the polled emergency
+        // UART from inside the timer ISR — enough to starve the tasks the
+        // scheduler is supposed to be running.
+        if current != 0
+            && current_task.stack_alloc != 0
+            && current_rsp < current_task.stack_alloc + STACK_UNDERFLOW_MARGIN
+        {
+            emergency_str(b"\r\nSTACK UNDERFLOW task=");
+            emergency_hex(current as u64);
+            emergency_str(b" rsp=");
+            emergency_hex(current_rsp);
+            emergency_str(b" bottom=");
+            emergency_hex(current_task.stack_alloc);
+            emergency_str(b"\r\n");
+        }
     }
 
     let (next_rsp, next_cr3) = match tasks.tasks[next as usize].as_mut() {
@@ -1400,23 +1716,248 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     next_rsp
 }
 
+/// Called from the restore asm when a saved frame's CS is neither the ring 0
+/// (0x08) nor the ring 3 (0x23) selector: the frame is corrupt, so dump it
+/// and park the CPU instead of jumping into garbage.
+#[no_mangle]
+extern "C" fn frame_error_report(which: u32, frame: u64) -> ! {
+    // Lock-free on purpose: this runs from the restore path with the
+    // scheduler lock possibly still held by an interrupted `yield_now()`
+    // (its TASKS guard lives on the stack we are switching away from), so
+    // taking TASKS or the log lock here deadlocked the whole machine and
+    // hid the very frame we need to see. Everything goes straight to the
+    // UART.
+    //
+    // `frame` is passed in from the asm caller (RSP at the restore site,
+    // pointing at the frame's RIP slot). Reading our own RSP instead used
+    // to dump this function's prologue/locals — every RIP/CS/RSP value it
+    // printed was garbage and hid the real corrupt word.
+    let f = frame;
+    let p = f as *const u64;
+    let (rip, cs, rflags, frsp, ss) = unsafe {
+        (
+            p.read(),
+            p.add(1).read(),
+            p.add(2).read(),
+            p.add(3).read(),
+            p.add(4).read(),
+        )
+    };
+    emergency_str(b"\r\nBADFRAME src=");
+    emergency_hex(which as u64);
+    emergency_str(b" frame=");
+    emergency_hex(f);
+    emergency_str(b" task=");
+    emergency_hex(current_task_index() as u64);
+    emergency_str(b" ticks=");
+    emergency_hex(SYS_TICKS.load(Ordering::Relaxed));
+    emergency_str(b"\r\n  RIP=");
+    emergency_hex(rip);
+    emergency_str(b" CS=");
+    emergency_hex(cs);
+    emergency_str(b" F=");
+    emergency_hex(rflags);
+    emergency_str(b" RSP=");
+    emergency_hex(frsp);
+    emergency_str(b" SS=");
+    emergency_hex(ss);
+    emergency_str(b"DUMP:\r\n");
+    // Dump memory around the frame: tells us WHO wrote those words.
+    // Dump the frame AND the words just below it: a timer_no_switch frame
+    // is the CPU's own frame, so a wrong base shows up as the CS slot holding
+    // something that is not 0x08/0x23 and the neighbouring slots as garbage.
+    for i in -8isize..8 {
+        let addr = (f as isize + i * 8) as u64;
+        let word = unsafe { *(addr as *const u64) };
+        emergency_str(b" ");
+        if i == 0 {
+            emergency_str(b">");
+        } else {
+            emergency_str(b" ");
+        }
+        emergency_hex(addr);
+        emergency_str(b"=");
+        emergency_hex(word);
+        emergency_str(b"\r\n");
+    }
+    // Refuse to run the corrupt frame: park this CPU.
+    x86_64::instructions::interrupts::disable();
+    loop {
+        x86_64::instructions::hlt()
+    }
+}
+
+/// Emergency (lock-free) report of a frame whose CS is not a ring 0/3
+/// selector, emitted *before* the switch that would restore it.
+fn emergency_bad_frame(tag: &str, task: u32, rsp: u64) {
+    let p = rsp as *const u64;
+    let (rip, cs, fl, frsp, ss) = unsafe {
+        (
+            p.add(15).read(),
+            p.add(16).read(),
+            p.add(17).read(),
+            p.add(18).read(),
+            p.add(19).read(),
+        )
+    };
+    emergency_str(b"\r\nBADFRAME(");
+    emergency_str(tag.as_bytes());
+    emergency_str(b") task=");
+    emergency_hex(task as u64);
+    emergency_str(b" rsp=");
+    emergency_hex(rsp);
+    emergency_str(b" ticks=");
+    emergency_hex(SYS_TICKS.load(Ordering::Relaxed));
+    emergency_str(b"\r\n  RIP=");
+    emergency_hex(rip);
+    emergency_str(b" CS=");
+    emergency_hex(cs);
+    emergency_str(b" F=");
+    emergency_hex(fl);
+    emergency_str(b" RSP=");
+    emergency_hex(frsp);
+    emergency_str(b" SS=");
+    emergency_hex(ss);
+    emergency_str(b"\r\n");
+}
+
+fn emergency_str(s: &[u8]) {
+    for &b in s {
+        zenus_console::serial::uart_write_byte_emergency(b);
+    }
+}
+
+fn emergency_hex(mut v: u64) {
+    // Exactly the 16 digits — the old code stamped a NUL terminator at
+    // tmp[16] and then wrote the whole 17-byte buffer to the UART, so every
+    // hex field in the emergency log was followed by a stray 0x00 byte
+    // (serial logs came out as `T0000000000000001<NUL> ...`).
+    let mut tmp = [0u8; 16];
+    let mut i = 16;
+    while i > 0 {
+        i -= 1;
+        tmp[i] = b"0123456789abcdef"[(v & 0xf) as usize];
+        v >>= 4;
+    }
+    emergency_str(&tmp);
+}
+
+/// Dump the task table over the emergency UART (no locks held).
+///
+/// Diagnostic only — the boot path used to call this on every boot, which
+/// pushed a raw task dump into the console log on every single start. Kept as
+/// an API because it is the only way to inspect tasks while the CPU is wedged.
+#[allow(dead_code)]
+pub fn debug_dump_tasks_emergency() {
+    let tasks = TASKS.lock();
+    {
+        emergency_str(b"TASKS:\r\n");
+        for idx in 0..4usize {
+            match tasks.tasks[idx].as_ref() {
+                Some(t) => {
+                    emergency_str(b"  t");
+                    emergency_hex(idx as u64);
+                    emergency_str(b" id=");
+                    emergency_hex(t.id);
+                    emergency_str(b" st=");
+                    emergency_hex(t.state as u64);
+                    emergency_str(b" cpu=");
+                    emergency_hex(t.cpu as u64);
+                    emergency_str(b" rsp=");
+                    emergency_hex(t.rsp);
+                    emergency_str(b" stk=");
+                    emergency_hex(t.stack_alloc);
+                    emergency_str(b" sz=");
+                    emergency_hex(t.stack_size);
+                    emergency_str(b" ur=");
+                    emergency_hex(t.user_rsp);
+                    emergency_str(b" ktop=");
+                    emergency_hex(t.kernel_rsp_top);
+                    emergency_str(b"\r\n");
+                }
+                None => {
+                    emergency_str(b"  t");
+                    emergency_hex(idx as u64);
+                    emergency_str(b" none\r\n");
+                }
+            }
+        }
+    }
+}
+
 pub fn idle() -> ! {
     // Switch to the idle task's dedicated stack FIRST, then yield to the shell task.
     // This ensures the idle task's context is saved on its own stack.
+    //
+    // The yield goes through `idle_yield_bridge` instead of calling
+    // `yield_now` directly: the bridge validates the target task's saved
+    // frame before every switch, so a corrupted frame is reported with its
+    // five slots instead of being jumped into (which showed up as a jump to
+    // 0x202 — a RFLAGS word — and a bogus instruction fetch).
     unsafe {
         core::arch::asm!(
             "cli",
             "mov rsp, {idle_rsp}",
             "sti",
-            "call {yield_now}",
-            // After yield_now returns (when shell task yields back), enter HLT loop
+            "call {bridge}",
+            // After the bridge returns (when the shell task yields back),
+            // enter the HLT loop.
+            // `sti` BEFORE every hlt: the switch path leaves IF=0 on the
+            // resumed side, and an idle hlt with IF=0 never wakes →
+            // nothing (not even the timer) could ever run this CPU again.
             "2:",
+            "sti",
             "hlt",
             "jmp 2b",
             idle_rsp = sym IDLE_RSP,
-            yield_now = sym yield_now,
+            bridge = sym idle_yield_bridge,
             options(noreturn)
         );
+    }
+}
+
+/// Idle loop with a watchdog predicate, mirroring [`idle()`] but able to
+/// return.
+///
+/// `cond` runs on the idle task's own stack with interrupts enabled. While it
+/// returns `false` the loop yields to the other tasks through
+/// [`yield_now`]; the first `true` returns control to the caller.
+///
+/// The fuzzing harness needs this: a bare `yield_now()` from the boot task
+/// keeps the boot task's frame on the boot stack instead of `IDLE_RSP`, and
+/// the context switch never completes — the boot task simply spins and the
+/// campaign task is never entered.
+pub fn idle_until(cond: fn() -> bool) {
+    let check: fn() -> bool = cond;
+    unsafe {
+        core::arch::asm!(
+            "cli",
+            "mov rsp, {idle_rsp}",
+            "sti",
+            "3:",
+            "call {check}",
+            "test al, al",
+            "jnz 4f",
+            // `sti` before every hlt: the switch path leaves IF=0 on the
+            // resumed side, and an hlt with IF=0 never wakes.
+            "sti",
+            "hlt",
+            "jmp 3b",
+            "4:",
+            "sti",
+            idle_rsp = sym IDLE_RSP,
+            check = in(reg) check,
+            // The predicate is an ordinary Rust `fn` pointer; the `call` above
+            // goes through it, so nothing else needs to know it is Rust-ABI.
+        );
+    }
+}
+
+/// Called from `idle()`'s asm, already running on `IDLE_RSP`.
+#[no_mangle]
+extern "C" fn idle_yield_bridge() -> ! {
+    loop {
+        yield_now();
     }
 }
 

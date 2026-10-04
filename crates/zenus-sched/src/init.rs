@@ -370,13 +370,12 @@ pub fn init_shutdown() -> ! {
         }
     }
 
+    // `kpanic_code!` ends in an `hlt` loop, so nothing may follow it: any
+    // statement here would be unreachable.
     zenus_console::kpanic_code!(
         zenus_console::error::codes::KRN_STACK_OVERFLOW,
         "System halted"
     );
-    loop {
-        x86_64::instructions::hlt();
-    }
 }
 
 fn find_service(table: &ServiceTable, name: &str) -> Option<usize> {

@@ -1,5 +1,9 @@
 #![no_std]
 #![allow(static_mut_refs)]
+// The host test harness needs std; the bare-metal build must not pull it in.
+#[cfg(test)]
+extern crate std;
+
 extern crate alloc;
 
 pub mod balloon;

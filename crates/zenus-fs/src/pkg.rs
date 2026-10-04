@@ -93,6 +93,31 @@ fn str_from_bytes(bytes: &[u8]) -> &str {
     core::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
+/// Resolve a `.zpk` entry path to its absolute install path.
+///
+/// Returns `None` for anything that could escape [`PKG_INSTALL_DIR`] or that is
+/// not a plain relative/absolute path. The package format is attacker-supplied
+/// data: `path = "../../../etc/x"` used to be prefixed with `/usr/local` and
+/// then resolved *through* `..` by `vfs::open_in_ns`, so `pkg_install` could
+/// write anywhere the filesystem could reach, and `pkg_remove` deleted it
+/// again on uninstall.
+fn install_path_for(path_str: &str) -> Option<String> {
+    if path_str.is_empty() || path_str.contains('\0') {
+        return None;
+    }
+    // Reject any `..` component, wherever it appears.
+    for segment in path_str.split('/') {
+        if segment == ".." {
+            return None;
+        }
+    }
+    if path_str.starts_with('/') {
+        Some(alloc::format!("{}{}", PKG_INSTALL_DIR, path_str))
+    } else {
+        Some(alloc::format!("{}/{}", PKG_INSTALL_DIR, path_str))
+    }
+}
+
 fn manifest_path(name: &str) -> String {
     alloc::format!("{}/{}/manifest", PKG_DB_DIR, name)
 }
@@ -140,79 +165,108 @@ pub fn pkg_init() -> bool {
     ok
 }
 
-pub fn pkg_install(data: &[u8], _dev_id: usize) -> bool {
+/// One validated file entry of a `.zpk` image.
+struct PlannedEntry {
+    /// Absolute path under [`PKG_INSTALL_DIR`].
+    path: String,
+    /// Byte offset of the payload inside the image.
+    offset: usize,
+    len: usize,
+    is_dir: bool,
+}
+
+/// Validate the whole image before touching the filesystem.
+///
+/// The old code created `/var/db/zpk/<name>` and then validated entries one at
+/// a time, so a rejected image (bad magic aside) still left an empty package
+/// directory behind: `pkg_installed_count` counted it, `pkg_list` skipped it
+/// because it had no manifest, and the two disagreed. Validating up front also
+/// means a traversal attempt cannot create anything at all.
+fn plan_install(data: &[u8]) -> Option<(String, String, u32, u32, Vec<PlannedEntry>)> {
     if data.len() < core::mem::size_of::<ZpkHeader>() {
-        return false;
+        return None;
     }
 
     let header = unsafe { &*(data.as_ptr() as *const ZpkHeader) };
     if &header.magic != b"ZPK1" {
-        return false;
+        return None;
     }
 
     let pkg_name = str_from_bytes(&header.name).to_string();
     let pkg_version = str_from_bytes(&header.version).to_string();
-    let file_count = header.file_count;
-    let _total_size = header.total_size;
+    if pkg_name.is_empty() || pkg_name.contains('/') || pkg_name.contains("..") {
+        return None;
+    }
+
+    let mut offset = core::mem::size_of::<ZpkHeader>();
+    let mut planned = Vec::new();
+
+    for _ in 0..header.file_count {
+        if offset.checked_add(core::mem::size_of::<ZpkFileEntry>())? > data.len() {
+            return None;
+        }
+        let entry = unsafe { &*(data.as_ptr().add(offset) as *const ZpkFileEntry) };
+        offset += core::mem::size_of::<ZpkFileEntry>();
+
+        let path = install_path_for(str_from_bytes(&entry.path))?;
+        let len = entry.size as usize;
+        let data_end = offset.checked_add(len)?;
+        if data_end > data.len() {
+            return None;
+        }
+
+        planned.push(PlannedEntry {
+            path,
+            offset,
+            len,
+            is_dir: entry.file_type == 1,
+        });
+        offset = data_end;
+    }
+
+    Some((
+        pkg_name,
+        pkg_version,
+        header.file_count,
+        header.total_size,
+        planned,
+    ))
+}
+
+pub fn pkg_install(data: &[u8], _dev_id: usize) -> bool {
+    let (pkg_name, pkg_version, file_count, total_size, planned) = match plan_install(data) {
+        Some(p) => p,
+        None => return false,
+    };
 
     let pkg_dir = pkg_dir_path(&pkg_name);
     if !ensure_dir(&pkg_dir) {
         return false;
     }
 
-    let mut offset = core::mem::size_of::<ZpkHeader>();
     let mut installed_files: Vec<String> = Vec::new();
 
-    for _i in 0..file_count {
-        if offset + core::mem::size_of::<ZpkFileEntry>() > data.len() {
+    for entry in &planned {
+        let parent = crate::vfs::parent_dir(&entry.path).unwrap_or(PKG_INSTALL_DIR);
+        if !ensure_dir(parent) {
             return false;
         }
-
-        let entry = unsafe { &*(data.as_ptr().add(offset) as *const ZpkFileEntry) };
-        offset += core::mem::size_of::<ZpkFileEntry>();
-
-        let path_str = str_from_bytes(&entry.path);
-        let install_path = if path_str.starts_with('/') {
-            alloc::format!("{}{}", PKG_INSTALL_DIR, path_str)
-        } else {
-            alloc::format!("{}/{}", PKG_INSTALL_DIR, path_str)
-        };
-
-        let data_size = entry.size as usize;
-        if offset + data_size > data.len() {
-            return false;
-        }
-
-        let file_data = &data[offset..offset + data_size];
-        offset += data_size;
-
-        if entry.file_type == 1 {
-            let parent = crate::vfs::parent_dir(&install_path).unwrap_or(PKG_INSTALL_DIR);
-            if !ensure_dir(parent) {
-                return false;
-            }
-            if !vfs::create_dir(&install_path) {
+        if entry.is_dir {
+            if !vfs::create_dir(&entry.path) {
                 return false;
             }
         } else {
-            let parent = crate::vfs::parent_dir(&install_path).unwrap_or(PKG_INSTALL_DIR);
-            if !ensure_dir(parent) {
-                return false;
-            }
-            if !write_file(&install_path, file_data) {
+            let file_data = &data[entry.offset..entry.offset + entry.len];
+            if !write_file(&entry.path, file_data) {
                 return false;
             }
         }
-
-        installed_files.push(install_path);
+        installed_files.push(entry.path.clone());
     }
 
     let mut manifest = alloc::format!(
         "{}\n{}\n{}\n{}\n",
-        pkg_name,
-        pkg_version,
-        file_count,
-        _total_size
+        pkg_name, pkg_version, file_count, total_size
     );
     for f in &installed_files {
         manifest.push_str(f);

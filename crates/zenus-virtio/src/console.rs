@@ -103,4 +103,58 @@ impl VirtioConsole {
             true
         }
     }
+
+    /// Drain up to `buf.len()` bytes the host has written to the receive queue.
+    ///
+    /// Returns the number of bytes copied out. The receive queue is never
+    /// primed with buffers, so a host write lands in the device's internal
+    /// buffer and only becomes visible here once the device has pushed a used
+    /// descriptor.
+    pub fn read(&mut self, buf: &mut [u8]) -> usize {
+        if buf.is_empty() {
+            return 0;
+        }
+        let mut copied = 0usize;
+        unsafe {
+            while let Some((desc_idx, len)) = self.rx_queue.collect_used() {
+                let start = desc_idx as usize % 4096;
+                let n = core::cmp::min(len as usize, 4096 - start);
+                let n = core::cmp::min(n, buf.len() - copied);
+                buf[copied..copied + n].copy_from_slice(&CONSOLE_BUF[start..start + n]);
+                copied += n;
+                if copied >= buf.len() {
+                    break;
+                }
+            }
+        }
+        copied
+    }
+
+    /// Queue a receive buffer so the device has somewhere to put input.
+    pub fn post_rx_buffer(&mut self) -> bool {
+        unsafe {
+            let cr3 = paging::kernel_cr3();
+            let desc_idx = match self.rx_queue.alloc_desc() {
+                Some(d) => d,
+                None => return false,
+            };
+            let buf_virt = &CONSOLE_BUF as *const u8 as u64;
+            let buf_phys = paging::virt_to_phys_raw(cr3, buf_virt).unwrap_or(0);
+            self.rx_queue.mem.desc[desc_idx as usize] = VirtioDesc {
+                addr: buf_phys,
+                len: 4096,
+                // Device-writable: this is a receive buffer.
+                flags: crate::queue::VRING_DESC_F_WRITE,
+                next: 0,
+            };
+            self.rx_queue.submit(desc_idx);
+            self.rx_queue.kick();
+            true
+        }
+    }
+
+    /// Interrupts the device has raised since the last check.
+    pub fn pending_interrupts(&self) -> u32 {
+        unsafe { self.transport.read_isr() as u32 }
+    }
 }

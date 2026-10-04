@@ -437,17 +437,50 @@ fn rdtsc() -> u64 {
 }
 
 // ── Error Counter Helpers ──
-static mut ERROR_COUNTS: [u64; 32] = [0; 32];
+//
+// One counter slot per (module, code number) pair. The old mapping hashed only
+// the trailing digits into 32 slots, so ZN-KRN-0001, ZN-FS-0001, ZN-MEM-0001
+// and the rest of the `0001` family all shared slot 1: every module's "first"
+// error was counted under every other module's name too.
+const COUNTER_SLOTS: usize = 32;
+const ERROR_COUNTS_LEN: usize = 7 * COUNTER_SLOTS + 1;
+/// Slot for codes that do not parse as `ZN-XXX-NNNN`.
+const UNKNOWN_SLOT: usize = 7 * COUNTER_SLOTS;
+
+static mut ERROR_COUNTS: [u64; ERROR_COUNTS_LEN] = [0; ERROR_COUNTS_LEN];
+
+/// Map the `XXX` of `ZN-XXX-NNNN` to a 0..=6 group index.
+fn module_group(prefix: &str) -> usize {
+    match prefix {
+        "KRN" => 0,
+        "MEM" => 1,
+        "FS" => 2,
+        "PRC" => 3,
+        "DRV" => 4,
+        "NET" => 5,
+        "SEC" => 6,
+        _ => 7,
+    }
+}
 
 fn error_code_index(code: &str) -> usize {
-    // Map "ZN-XXX-NNNN" to a numeric index
-    // Extract the last 4 digits
-    if code.len() >= 11 {
-        if let Ok(n) = code[code.len() - 4..].parse::<usize>() {
-            return n % 32;
+    // "ZN-<PREFIX>-NNNN" where PREFIX is 2-3 letters (FS, KRN, MEM, ...).
+    // A fixed-length parse used to assume 3 letters, which silently dumped
+    // every 2-letter code (all ZN-FS-*) into the unknown slot.
+    if let Some(rest) = code.strip_prefix("ZN-") {
+        if let Some(dash) = rest.find('-') {
+            let (prefix, suffix) = (&rest[..dash], &rest[dash + 1..]);
+            if (2..=4).contains(&prefix.len()) && suffix.len() == 4 {
+                if let Ok(n) = suffix.parse::<usize>() {
+                    let group = module_group(prefix);
+                    if group < 7 {
+                        return group * COUNTER_SLOTS + (n % COUNTER_SLOTS);
+                    }
+                }
+            }
         }
     }
-    0
+    UNKNOWN_SLOT
 }
 
 fn bump_error_count(code: &str) {
@@ -641,9 +674,13 @@ fn write_field(s: &mut SerialPort, label: &str, value: &str) {
     }
 }
 
-/// Write error code reference: list all known error codes
-pub fn dump_error_catalog(s: &mut SerialPort) {
-    let all: &[&ErrorDef] = &[
+/// Every error code the kernel knows about, in catalog order.
+///
+/// Public so the host test suite can check the catalog for duplicates and
+/// inconsistencies (code string vs. module, empty fields) instead of only
+/// checking what `zerrors` happens to print.
+pub fn catalog() -> &'static [&'static ErrorDef] {
+    &[
         &codes::KRN_PANIC_INVALID_MEM,
         &codes::KRN_NULL_PTR,
         &codes::KRN_STACK_OVERFLOW,
@@ -665,7 +702,12 @@ pub fn dump_error_catalog(s: &mut SerialPort) {
         &codes::NET_CHECKSUM_FAILED,
         &codes::SEC_UNAUTHORIZED,
         &codes::SEC_POLICY_VIOLATION,
-    ];
+    ]
+}
+
+/// Write error code reference: list all known error codes
+pub fn dump_error_catalog(s: &mut SerialPort) {
+    let all: &[&ErrorDef] = catalog();
     s.write_str("\n");
     s.write_str("  ╔══════════════════════════════════════════════╗\n");
     s.write_str("  ║        Zenus$ Error Code Reference           ║\n");

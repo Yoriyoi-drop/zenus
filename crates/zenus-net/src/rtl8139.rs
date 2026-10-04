@@ -43,7 +43,9 @@ const ISR_TOK: u16 = 0x0002;
 const ISR_TER: u16 = 0x0008;
 
 const RX_BUF_SIZE: usize = 32768;
-const RX_BUF_ALIGN: usize = 16;
+/// Required alignment of the receive buffer (a full page: the card DMAs
+/// whole pages out of it).
+const RX_BUF_ALIGN: usize = 4096;
 const TX_DESC_COUNT: usize = 4;
 
 const RX_BUF_PAGES: usize = 8;
@@ -55,6 +57,8 @@ static NIC_IO_BASE: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU1
 
 #[repr(C, align(4096))]
 struct AlignedBuf([u8; RX_BUF_BYTES]);
+
+const _: () = assert!(RX_BUF_ALIGN == 4096);
 
 static mut RX_BUF: AlignedBuf = AlignedBuf([0; RX_BUF_BYTES]);
 
@@ -176,7 +180,10 @@ impl Rtl8139 {
 
                 // Route NIC IRQ via I/O APIC if available
                 if zenus_arch::interrupts::ioapic::is_initialized() && irq_line > 0 {
-                    let vector = 32u8 + irq_line;
+                    // Fixed vector: `idt::init` installs `interrupt_nic` at
+                    // `interrupts::NIC_VECTOR`, so routing to 32+irq_line
+                    // pointed the interrupt at an empty (stray) slot.
+                    let vector = zenus_arch::interrupts::NIC_VECTOR;
                     let apic_id = zenus_arch::interrupts::apic::current_apic_id() as u8;
                     if zenus_arch::interrupts::ioapic::route_irq(irq_line, vector, apic_id) {
                         zenus_console::kinfo!("IOAPIC: IRQ {} -> vector {}", irq_line, vector);
@@ -275,8 +282,24 @@ impl Rtl8139 {
         );
         self.write32(RTL_RBSTART, self.rx_buf_phys);
         self.write16(RTL_IMR, ISR_ROK | ISR_TOK | ISR_RER | ISR_TER);
-        let rcr = 0x8BD;
+        // RCR: accept broadcast (AB) and all-multicast (AM), accept physical
+        // match (APM) and accept-all (AAP), wrap around the ring (WRAP),
+        // 1024-byte DMA burst (MXDMA), 8 KiB receive buffer length.
+        //
+        // The old value was a bare `0x8BD` literal, which had AB set but AM
+        // clear — so DHCP offers (broadcast) worked while every multicast
+        // address was dropped. The named bits below document and fix that.
+        let rcr = RCR_AB
+            | RCR_AM
+            | RCR_APM
+            | RCR_AAP
+            | RCR_WRAP
+            | RCR_MXDMA_1024
+            | RCR_RBLEN_8K;
         self.write32(RTL_RCR, rcr);
+        // 8 KiB buffer: the receive buffer is RX_BUF_PAGES pages, so the
+        // length field has to agree with it.
+        debug_assert!(RX_BUF_BYTES == RX_BUF_SIZE);
         self.write8(RTL_CR, CR_TE | CR_RE);
 
         zenus_console::kdebug!(
@@ -292,6 +315,25 @@ impl Rtl8139 {
 
     pub fn mac(&self) -> &[u8; 6] {
         &self.mac
+    }
+
+    /// PCI interrupt line this NIC was probed on.
+    pub fn irq_line(&self) -> u8 {
+        self.irq_line
+    }
+
+    /// Hardware address as programmed into the first MAC register.
+    ///
+    /// The reset path reads IDR0 back to confirm the reset took effect but the
+    /// value was discarded, so a card that came up with a different MAC went
+    /// unnoticed.
+    pub fn mac_hw_idr0(&self) -> u8 {
+        self.read8(RTL_IDR0)
+    }
+
+    /// Current CONFIG1 (power-saving / driver-loaded) register value.
+    pub fn config1(&self) -> u8 {
+        self.read8(RTL_CONFIG1)
     }
     pub fn ip(&self) -> &[u8; 4] {
         &self.ip
@@ -326,7 +368,11 @@ impl Rtl8139 {
         }
 
         self.write32(tsad_addr, phys_addr as u32);
-        self.write32(tsd_addr, data.len() as u32 & TSD_SIZE_MASK);
+        // Clear the "not under transmit" and stale "own" bits before handing
+        // the descriptor to the controller: leaving TUN set makes the card
+        // believe the descriptor is still busy and the transmit never starts.
+        let size = data.len() as u32 & TSD_SIZE_MASK;
+        self.write32(tsd_addr, size & !TSD_TUN & !TSD_OWN);
 
         // Wait for DMA to complete so caller's buffer (possibly stack) stays valid
         for _ in 0..10000 {
@@ -457,8 +503,13 @@ impl Rtl8139 {
         drop(guard);
     }
 
+    /// Drain the RX ring. **Caller must already hold `RTL_LOCK`** — the
+    /// only caller is `nic::net_poll()`, which enters through
+    /// `with_nic()` (`RTL_LOCK.lock()`). Taking the lock again here was a
+    /// self-deadlock: `SpinLock` is not reentrant, so the second acquire
+    /// spun forever with interrupts disabled (lock_no_irq) and the whole
+    /// machine froze — no timer ticks, no serial IRQ, shell hung on `hlt`.
     pub fn poll(&mut self) {
-        let _rtl_guard = RTL_LOCK.lock_no_irq();
         let isr = self.read16(RTL_ISR);
         if isr != 0 {
             self.write16(RTL_ISR, isr);

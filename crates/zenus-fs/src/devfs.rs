@@ -78,6 +78,12 @@ pub fn block_device_count() -> usize {
     with_block_devs(|state| state.count)
 }
 
+/// Number of registered block devices (helper for iterating them without
+/// holding the lock across a loop).
+fn state_count() -> usize {
+    block_device_count()
+}
+
 pub struct DevFs;
 
 impl DevFs {
@@ -208,20 +214,16 @@ impl FileSystem for DevFs {
                 inode: DEVFS_INODES[i],
             });
         }
-        with_block_devs(|state| {
-            for i in 0..state.count {
-                if entries.len() >= 12 {
-                    return;
-                }
-                if let Some((name, _)) = &state.devs[i] {
-                    entries.push(DirEntry {
-                        name: alloc::string::String::from(*name),
-                        file_type: FileType::BlockDevice,
-                        inode: BLOCK_INODE_BASE + i as u64,
-                    });
-                }
+        // `block_entry_at` owns the "does slot i exist and what is it called"
+        // logic, shared with `read_dir` so the two cannot drift apart.
+        for i in 0..state_count() {
+            if entries.len() >= 12 {
+                break;
             }
-        });
+            if let Some(entry) = self.block_entry_at(i) {
+                entries.push(entry);
+            }
+        }
         entries
     }
 

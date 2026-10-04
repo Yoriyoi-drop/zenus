@@ -4,8 +4,11 @@ use crate::QUEUE_SIZE;
 use zenus_mem::paging;
 
 const VIRTIO_BALLOON_F_MUST_TELL_HOST: u64 = 0;
+/// Kept for the feature-bit table; the driver never requests it (see below).
+#[allow(dead_code)]
 const VIRTIO_BALLOON_F_STATS_VQ: u64 = 1;
 const VIRTIO_BALLOON_F_DEFLATE_ON_OOM: u64 = 2;
+const VIRTIO_BALLOON_F_PAGE_STEALING: u64 = 5;
 
 static mut PAGE_BUF: [u8; 4096] = [0u8; 4096];
 static mut INFLATE_QUEUE_MEM: VirtioQueueMem = VirtioQueueMem::new();
@@ -29,8 +32,11 @@ impl VirtioBalloon {
         transport.set_device_status(transport.device_status() | 1);
         transport.set_device_status(transport.device_status() | 2);
 
-        let our_features =
-            (1 << VIRTIO_BALLOON_F_MUST_TELL_HOST) | (1 << VIRTIO_BALLOON_F_DEFLATE_ON_OOM);
+        // `VIRTIO_BALLOON_F_STATS_VQ` is deliberately not requested: it needs
+        // a third (stats) queue that this driver does not set up.
+        let our_features = (1 << VIRTIO_BALLOON_F_MUST_TELL_HOST)
+            | (1 << VIRTIO_BALLOON_F_DEFLATE_ON_OOM)
+            | (1 << VIRTIO_BALLOON_F_PAGE_STEALING);
         transport.negotiate_features(our_features);
         transport.set_device_status(transport.device_status() | 8);
         if transport.device_status() & 8 == 0 {

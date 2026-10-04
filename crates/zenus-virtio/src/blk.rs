@@ -205,7 +205,19 @@ impl VirtioBlk {
             }
             core::hint::spin_loop();
             if i & 0xFF == 0 {
+                // Not a bare `hlt`: this poll is reachable with interrupts
+                // disabled (journal_commit runs from contexts holding
+                // `lock_no_irq()`), and `hlt` with IF=0 never wakes again.
+                // Saving IF, enabling it for the wait and restoring is what
+                // `scheduler::hlt_wait()` does for the scheduler.
+                let irq_was_enabled = x86_64::instructions::interrupts::are_enabled();
+                if !irq_was_enabled {
+                    x86_64::instructions::interrupts::enable();
+                }
                 x86_64::instructions::hlt();
+                if !irq_was_enabled {
+                    x86_64::instructions::interrupts::disable();
+                }
             }
         }
 
@@ -286,12 +298,121 @@ impl VirtioBlk {
             }
             core::hint::spin_loop();
             if i & 0xFF == 0 {
+                // Not a bare `hlt`: this poll is reachable with interrupts
+                // disabled (journal_commit runs from contexts holding
+                // `lock_no_irq()`), and `hlt` with IF=0 never wakes again.
+                // Saving IF, enabling it for the wait and restoring is what
+                // `scheduler::hlt_wait()` does for the scheduler.
+                let irq_was_enabled = x86_64::instructions::interrupts::are_enabled();
+                if !irq_was_enabled {
+                    x86_64::instructions::interrupts::enable();
+                }
                 x86_64::instructions::hlt();
+                if !irq_was_enabled {
+                    x86_64::instructions::interrupts::disable();
+                }
             }
         }
 
         BLK_BUF_BUSY[buf_idx as usize] = false;
         ptr::read_volatile(&resp.status as *const u8) == STATUS_OK
+    }
+
+    /// Issue a `VIRTIO_BLK_T_FLUSH` request: a write barrier telling the host
+    /// that everything written so far is on stable storage.
+    ///
+    /// The filesystem's journal calls this before it trusts a commit record,
+    /// so without it a power loss can leave the journal pointing at writes the
+    /// device never durably stored.
+    pub unsafe fn flush(&mut self) -> bool {
+        let cr3 = paging::kernel_cr3();
+
+        let mut hdr = VirtioBlkReqHdr {
+            type_: VIRTIO_BLK_T_FLUSH,
+            reserved: 0,
+            // Sector is ignored for FLUSH; 0 is what Linux sends.
+            sector: 0,
+        };
+        let mut resp = VirtioBlkResp {
+            status: 0xFF,
+            padding: [0; 15],
+        };
+
+        let hdr_phys = paging::virt_to_phys_raw(cr3, &mut hdr as *mut _ as u64).unwrap_or(0);
+        let resp_phys = paging::virt_to_phys_raw(cr3, &mut resp as *mut _ as u64).unwrap_or(0);
+
+        let d0 = match self.queue.alloc_desc() {
+            Some(d) => d,
+            None => return false,
+        };
+        let d1 = match self.queue.alloc_desc() {
+            Some(d) => d,
+            None => return false,
+        };
+
+        self.queue.mem.desc[d0 as usize] = VirtioDesc {
+            addr: hdr_phys,
+            len: 16,
+            flags: VRING_DESC_F_NEXT,
+            next: d1,
+        };
+        self.queue.mem.desc[d1 as usize] = VirtioDesc {
+            addr: resp_phys,
+            len: 1,
+            flags: VRING_DESC_F_WRITE,
+            next: 0,
+        };
+
+        self.queue.submit(d0);
+        self.queue.kick();
+
+        let mut done = false;
+        for i in 0..10000 {
+            if self.queue.collect_used().is_some() {
+                done = true;
+                break;
+            }
+            core::hint::spin_loop();
+            if i & 0xFF == 0 {
+                // Not a bare `hlt`: this poll is reachable with interrupts
+                // disabled (journal_commit runs from contexts holding
+                // `lock_no_irq()`), and `hlt` with IF=0 never wakes again.
+                // Saving IF, enabling it for the wait and restoring is what
+                // `scheduler::hlt_wait()` does for the scheduler.
+                let irq_was_enabled = x86_64::instructions::interrupts::are_enabled();
+                if !irq_was_enabled {
+                    x86_64::instructions::interrupts::enable();
+                }
+                x86_64::instructions::hlt();
+                if !irq_was_enabled {
+                    x86_64::instructions::interrupts::disable();
+                }
+            }
+        }
+        if !done {
+            return false;
+        }
+        ptr::read_volatile(&resp.status as *const u8) == STATUS_OK
+    }
+
+    /// Device index this block device was registered as (`vd0`, `vd1`, ...).
+    pub fn dev_idx(&self) -> usize {
+        self.dev_idx
+    }
+
+    /// Size of the submission queue this driver was given.
+    pub fn queue_size(&self) -> u16 {
+        self.queue.size
+    }
+
+    /// Device status register as the driver last wrote it.
+    pub fn device_status(&self) -> u8 {
+        unsafe { self.transport.device_status() }
+    }
+
+    /// Capacity the device reported at probe time, in 512-byte sectors.
+    pub fn capacity_sectors(&self) -> u64 {
+        self.capacity
     }
 }
 
@@ -314,6 +435,23 @@ fn blk_write0(lba: u64, buf: &[u8]) -> bool {
             None => return false,
         };
         blk.write_sectors(lba, (buf.len() / 512) as u16, buf)
+    }
+}
+
+/// Write barrier for the virtio-blk device. Takes the same lock as the read and
+/// write paths so the flush cannot be reordered against an in-flight transfer.
+pub fn blk_flush() -> bool {
+    let _lock = BLK_LOCK.lock();
+    unsafe {
+        match VIRTIO_BLK.as_mut() {
+            Some(b) => b.flush(),
+            // No virtio-blk on this machine: there is nothing in flight to
+            // wait for, so this is a successful no-op. Reporting `false` here
+            // made `journal_commit()` bail *before* clearing JNL_ACTIVE, and
+            // every later `journal_begin()` then failed for the rest of the
+            // session (the `journal` shell command showed [FAIL] forever).
+            None => true,
+        }
     }
 }
 

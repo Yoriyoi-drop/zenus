@@ -3,6 +3,12 @@ name = "zenus-net"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = []
+# Embed a real password instead of the development default. Requires
+# SSH_PASSWORD_PATH to point at the file holding it.
+ssh_password = []
+
 [dependencies]
 x86_64 = { workspace = true }
 zenus-console = { path = "../zenus-console" }

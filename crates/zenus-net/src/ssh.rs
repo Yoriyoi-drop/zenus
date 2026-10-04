@@ -358,6 +358,142 @@ impl SshServer {
     }
 }
 
+/// Host-side unit tests for the ZENUS_SSH framing helpers.
+///
+/// This protocol is *not* SSH: it is a line protocol with a hand-rolled
+/// keystream (`ssh_keystream_byte`). These tests pin the properties that make
+/// the toy protocol self-consistent — they are not a statement that it is
+/// cryptographically sound, because it is not.
+#[cfg(test)]
+mod host_tests {
+    use super::{constant_time_eq, derive_key, hex_byte, ssh_keystream_byte, SSH_PASSWORD};
+    use alloc::vec::Vec;
+
+    #[test]
+    fn constant_time_eq_matches_and_rejects() {
+        assert!(constant_time_eq(b"zenus", b"zenus"));
+        assert!(!constant_time_eq(b"zenus", b"zenu"));
+        assert!(!constant_time_eq(b"zenus", b"zenuss"));
+        assert!(!constant_time_eq(b"", b"zenus"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn default_password_is_the_documented_one() {
+        // Only true for the default build; the `ssh_password` feature embeds a
+        // real secret instead, which is why the assertion is cfg-split.
+        #[cfg(not(feature = "ssh_password"))]
+        assert_eq!(SSH_PASSWORD, b"zenus");
+        #[cfg(feature = "ssh_password")]
+        assert!(!SSH_PASSWORD.is_empty());
+    }
+
+    #[test]
+    fn keystream_is_deterministic_per_position() {
+        let seed = 0xDEAD_BEEF;
+        assert_eq!(ssh_keystream_byte(seed, 0), ssh_keystream_byte(seed, 0));
+        assert_eq!(ssh_keystream_byte(seed, 7), ssh_keystream_byte(seed, 7));
+    }
+
+    #[test]
+    fn keystream_differs_between_positions_and_seeds() {
+        // Stream-cipher property: the same plaintext byte must not encrypt to
+        // the same ciphertext byte at two offsets.
+        let mut seen = [false; 256];
+        let mut duplicates = 0;
+        for pos in 0..64u32 {
+            let b = ssh_keystream_byte(0x1234_5678, pos);
+            if seen[b as usize] {
+                duplicates += 1;
+            }
+            seen[b as usize] = true;
+        }
+        // 64 draws from 256 slots: a few collisions are expected, an
+        // all-constant stream is not.
+        assert!(
+            duplicates < 32,
+            "keystream looks degenerate ({duplicates} dups)"
+        );
+        assert_ne!(
+            ssh_keystream_byte(0x1234_5678, 0),
+            ssh_keystream_byte(0x8765_4321, 0),
+            "different seeds must not share the first byte"
+        );
+    }
+
+    #[test]
+    fn xor_round_trip_recovers_plaintext() {
+        // The client XORs with the same stream; this is what makes the session
+        // readable at all.
+        let seed = 0x0BAD_F00D;
+        let plain = b"zenus$ uname\r\n";
+        let cipher: Vec<u8> = plain
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| b ^ ssh_keystream_byte(seed, i as u32))
+            .collect();
+        let back: Vec<u8> = cipher
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| b ^ ssh_keystream_byte(seed, i as u32))
+            .collect();
+        assert_eq!(back, plain);
+        assert_ne!(cipher.as_slice(), plain.as_slice());
+    }
+
+    #[test]
+    fn derive_key_depends_on_nonce_and_password() {
+        let nonce_a = [0u8; 16];
+        let mut nonce_b = [0u8; 16];
+        nonce_b[15] = 1;
+
+        let base = derive_key(&nonce_a, b"zenus");
+        assert_eq!(base, derive_key(&nonce_a, b"zenus"), "deterministic");
+        assert_ne!(base, derive_key(&nonce_b, b"zenus"), "nonce is mixed in");
+        assert_ne!(base, derive_key(&nonce_a, b"other"), "password is mixed in");
+    }
+
+    #[test]
+    fn hex_byte_lowercases_nibbles() {
+        assert_eq!(hex_byte(0x00), (b'0', b'0'));
+        assert_eq!(hex_byte(0x0F), (b'0', b'f'));
+        assert_eq!(hex_byte(0xA5), (b'a', b'5'));
+        assert_eq!(hex_byte(0xFF), (b'f', b'f'));
+    }
+
+    #[test]
+    fn greeting_frame_matches_documented_layout() {
+        // Rebuilt here rather than through `poll`, which needs a live socket:
+        // the banner is 14 bytes of protocol string, 32 hex chars of nonce and
+        // a trailing newline.
+        let proto = b"ZENUS_SSH/1.0\n";
+        assert_eq!(proto.len(), 14);
+        let nonce = [0xABu8; 16];
+        let mut greeting = [0u8; 96];
+        let mut pos = 0;
+        greeting[pos..pos + proto.len()].copy_from_slice(proto);
+        pos += proto.len();
+        for &b in &nonce {
+            let (hi, lo) = hex_byte(b);
+            greeting[pos] = hi;
+            greeting[pos + 1] = lo;
+            pos += 2;
+        }
+        greeting[pos] = b'\n';
+        pos += 1;
+
+        assert_eq!(pos, 14 + 32 + 1);
+        assert_eq!(&greeting[..14], b"ZENUS_SSH/1.0\n");
+        let mut expected_nonce = [0u8; 32];
+        for i in 0..16 {
+            expected_nonce[2 * i] = b'a';
+            expected_nonce[2 * i + 1] = b'b';
+        }
+        assert_eq!(&greeting[14..46], &expected_nonce[..]);
+        assert_eq!(greeting[46], b'\n');
+    }
+}
+
 fn execute_command(line: &str, output: &mut [u8; MAX_OUTPUT], out_len: &mut usize) {
     let args = Args::parse(line);
     if args.cmd.is_empty() {

@@ -31,15 +31,6 @@ pub struct VirtioPciTransport {
     pub device_base: u64,
 }
 
-unsafe fn map_bar(bar_val: u32) -> u64 {
-    let hhdm = paging::hhdm_offset();
-    if bar_val & 1 == 1 {
-        (bar_val & 0xFFFC) as u64 + hhdm
-    } else {
-        (bar_val & 0xFFFFFFF0) as u64 + hhdm
-    }
-}
-
 unsafe fn read_bar_phys(dev: &PciDevice, bar_idx: u8) -> u64 {
     let raw = match bar_idx {
         0 => dev.bar0,
@@ -229,6 +220,9 @@ impl VirtioPciTransport {
         ptr::read_volatile((self.device_base + offset as u64) as *const u8)
     }
 
+    /// Legacy (BAR0) accessors. Kept for the virtio 0.9 transport, which
+    /// `init_device` does not currently drive; unused until then.
+    #[allow(dead_code)]
     pub(crate) unsafe fn device_read16(&self, offset: u16) -> u16 {
         if self.device_base == 0 {
             return 0;
@@ -236,6 +230,7 @@ impl VirtioPciTransport {
         ptr::read_volatile((self.device_base + offset as u64) as *const u16)
     }
 
+    #[allow(dead_code)]
     pub(crate) unsafe fn device_read32(&self, offset: u16) -> u32 {
         if self.device_base == 0 {
             return 0;
@@ -243,6 +238,7 @@ impl VirtioPciTransport {
         ptr::read_volatile((self.device_base + offset as u64) as *const u32)
     }
 
+    #[allow(dead_code)]
     pub(crate) unsafe fn device_write16(&self, offset: u16, val: u16) {
         if self.device_base == 0 {
             return;
@@ -250,6 +246,7 @@ impl VirtioPciTransport {
         ptr::write_volatile((self.device_base + offset as u64) as *mut u16, val);
     }
 
+    #[allow(dead_code)]
     pub(crate) unsafe fn device_write32(&self, offset: u16, val: u32) {
         if self.device_base == 0 {
             return;

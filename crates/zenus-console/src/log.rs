@@ -1,4 +1,3 @@
-use crate::serial::SerialPort;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use zenus_sync::spinlock::SpinLock;
@@ -243,9 +242,71 @@ pub fn dmesg_count() -> usize {
     DMESG_BUF.lock().count
 }
 
+/// Visit every buffered log entry (oldest first) while holding the ring
+/// buffer lock.
+///
+/// Prefer this over [`dmesg_snapshot`], which returns a `DmesgSnapshot` BY
+/// VALUE: 256 entries × ~130 bytes ≈ 33 KB, and a debug build materialises
+/// it more than once (call frame + return slot + caller local). The shell
+/// task has only ~32 KB of usable kernel stack, so `dmesg` on the shell
+/// underflowed its stack by ~69 KB, crossed the heap gap and zero-filled
+/// the idle task's saved interrupt frame — which the next `yield_now()`
+/// then rejected (`BADFRAME`, CPU parked).
+///
+/// Callers that need the entries after the lock drops should buffer on the
+/// HEAP (pre-reserve with [`dmesg_count`], which drops the lock before
+/// returning).
+pub fn dmesg_for_each<F: FnMut(LogLevel, &str)>(mut f: F) {
+    if !DMESG_INIT.load(Ordering::Acquire) {
+        return;
+    }
+    let buf = DMESG_BUF.lock();
+    for (level, msg) in buf.iter() {
+        f(level, msg);
+    }
+}
+
+/// Buffer for assembling one complete log line before it is handed to the
+/// serial output buffer. Sized for the longest possible line
+/// (`[CRITICAL][<full module path>] ` + a 512-byte message).
+struct LineBuf {
+    buf: [u8; 768],
+    pos: usize,
+}
+
+impl LineBuf {
+    const fn new() -> Self {
+        LineBuf {
+            buf: [0; 768],
+            pos: 0,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.pos]
+    }
+}
+
+impl core::fmt::Write for LineBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let remaining = self.buf.len().saturating_sub(self.pos);
+        let n = bytes.len().min(remaining);
+        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
+        self.pos += n;
+        Ok(())
+    }
+}
+
 pub fn log(level: LogLevel, module: &str, msg: &str) {
-    let mut serial = SerialPort::new(0x3F8);
-    let _ = writeln!(serial, "[{}][{}] {}", level.prefix(), module, msg);
+    // Format the ENTIRE line into a local buffer and hand it to the serial
+    // layer in one call. Writing through `SerialPort` directly took the
+    // output-buffer lock once per format chunk, so another CPU could
+    // interleave its line between two chunks of this one (garbled SMP boot
+    // logs like `[[WARN INFO ][][zenus_arch::interrupts::apic] ...`).
+    let mut line = LineBuf::new();
+    let _ = writeln!(&mut line, "[{}][{}] {}", level.prefix(), module, msg);
+    crate::serial::push_output_line(line.as_bytes());
     dmesg_push(level, msg);
     // During early boot (interrupts disabled), flush immediately so output
     // is visible even if a crash/hang occurs before the next scheduled flush.

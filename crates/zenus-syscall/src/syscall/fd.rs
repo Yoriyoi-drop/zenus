@@ -476,7 +476,7 @@ pub fn fd_get(fd: u64) -> Option<FdEntry> {
 }
 
 pub fn fd_dup2(task_id: u64, oldfd: u64, newfd: u64) -> Option<u64> {
-    let mut table = FD_TABLE.lock();
+    let table = FD_TABLE.lock();
     let entry = table.get(oldfd)?;
     let entry_copy = *entry;
     drop(table);

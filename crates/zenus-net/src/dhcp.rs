@@ -146,9 +146,17 @@ pub fn handle_receive(_iface_idx: usize, _src_ip: [u8; 4], packet: &[u8]) -> boo
         return false;
     }
 
-    let resp_len = core::cmp::min(packet.len(), DHCP.lock().resp_buf.len());
+    // Store the UDP payload, not the whole IP packet. `dhcp_handle_response`
+    // re-parses `resp_buf` with `udp::parse()` and indexes the DHCP header at
+    // offset 236 — copying the raw packet instead put the IP+UDP headers in
+    // front, so the option parse started 28 bytes early (inside `sname`) and
+    // the magic cookie / xid checks disagreed with the ones above.
+    let resp_len = core::cmp::min(payload.len(), DHCP.lock().resp_buf.len());
+    if resp_len < 240 {
+        return false;
+    }
     let mut dhcp = DHCP.lock();
-    dhcp.resp_buf[..resp_len].copy_from_slice(&packet[..resp_len]);
+    dhcp.resp_buf[..resp_len].copy_from_slice(&payload[..resp_len]);
     dhcp.resp_len = resp_len;
     dhcp.resp_ready = true;
 
@@ -162,8 +170,13 @@ fn parse_dhcp_options(payload: &[u8]) -> (u8, [u8; 4], [u8; 4], [u8; 4], u32) {
     let mut gateway = [0u8; 4];
     let mut lease_time = 0u32;
 
+    // Options start right after the 240-byte fixed header. A DHCP message
+    // cannot carry more than 312 option bytes once the 548-byte packet is
+    // padded out, so the scan is bounded instead of running to the end of a
+    // buffer an attacker (or a corrupt NIC) controls the length of.
     let mut off = 240usize;
-    while off + 1 < payload.len() {
+    let end = core::cmp::min(payload.len(), 240 + MAX_OPTIONS);
+    while off + 1 < end {
         let opt = payload[off];
         if opt == OPT_END {
             break;
@@ -172,11 +185,11 @@ fn parse_dhcp_options(payload: &[u8]) -> (u8, [u8; 4], [u8; 4], [u8; 4], u32) {
             off += 1;
             continue;
         }
-        if off + 1 >= payload.len() {
+        if off + 1 >= end {
             break;
         }
         let len = payload[off + 1] as usize;
-        if off + 2 + len > payload.len() {
+        if off + 2 + len > end {
             break;
         }
         let val = &payload[off + 2..off + 2 + len];
@@ -334,15 +347,9 @@ fn dhcp_handle_response(our_mac: [u8; 6]) -> bool {
     }
     dhcp.resp_ready = false;
 
-    let payload = &dhcp.resp_buf[..dhcp.resp_len];
-    let (hdr, udp_data) = match udp::parse(payload) {
-        Some(h) => h,
-        None => return false,
-    };
-
-    if hdr.src_port != DHCP_SERVER_PORT || hdr.dst_port != DHCP_CLIENT_PORT {
-        return false;
-    }
+    // `resp_buf` already holds the UDP payload (see `handle_receive`), so
+    // there is nothing left to strip here.
+    let udp_data = &dhcp.resp_buf[..dhcp.resp_len];
 
     if udp_data.len() < 240 {
         return false;

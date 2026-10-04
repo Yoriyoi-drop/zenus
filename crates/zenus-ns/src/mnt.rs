@@ -51,6 +51,12 @@ pub fn create() -> Option<NsId> {
 }
 
 pub fn destroy(id: NsId) {
+    // The root namespace is the one every process implicitly belongs to;
+    // tearing it down would leave later lookups without a fallback.
+    if id == NS_ROOT {
+        return;
+    }
+
     let mut table = MNT_TABLE.lock();
     let idx = match find_idx(&table, id) {
         Some(i) => i,

@@ -9,6 +9,20 @@ extern "C" {
     static __text_end: u8;
 }
 
+/// EOI for the 8259 pair — only the BSP may send it.
+///
+/// A PIC EOI issued by an AP re-aims the next delivery of an unacked IRQ line
+/// to that AP. IRQ0 (the PIT) is deliberately unmasked so the BSP can pick
+/// it up through LINT0/ExtINT; an AP EOI therefore made the AP receive IRQ0
+/// and enter the scheduler on a task the BSP was running.
+fn pic_eoi_if_bsp() {
+    if crate::smp::current_cpu() == 0 {
+        unsafe {
+            core::arch::asm!("out 0x20, al", in("al") 0x20u8, options(nostack, preserves_flags));
+        }
+    }
+}
+
 fn ptr_in_text(ptr: usize) -> bool {
     let start = unsafe { &__text_start as *const u8 as usize };
     let end = unsafe { &__text_end as *const u8 as usize };
@@ -21,10 +35,7 @@ pub fn set_nic_irq_handler(handler: fn()) {
 
 #[no_mangle]
 pub extern "x86-interrupt" fn interrupt_timer(_frame: InterruptStackFrame) {
-    // PIC EOI (master)
-    unsafe {
-        core::arch::asm!("out 0x20, al", in("al") 0x20u8);
-    }
+    pic_eoi_if_bsp();
     // APIC EOI (for ExtINT via LINT0)
     crate::interrupts::apic::eoi();
     crate::interrupts::pit::tick();
@@ -35,10 +46,7 @@ pub extern "x86-interrupt" fn interrupt_timer(_frame: InterruptStackFrame) {
 #[no_mangle]
 pub extern "x86-interrupt" fn interrupt_keyboard(_frame: InterruptStackFrame) {
     crate::keyboard::handle_irq1();
-    // PIC EOI (master) — required if IRQ1 ever touches the PIC path
-    unsafe {
-        core::arch::asm!("out 0x20, al", in("al") 0x20u8);
-    }
+    pic_eoi_if_bsp();
     crate::interrupts::apic::eoi();
 }
 
@@ -81,4 +89,16 @@ pub extern "x86-interrupt" fn interrupt_nic(_frame: InterruptStackFrame) {
 
 pub fn init() {
     zenus_console::kinfo!("Interrupt handlers installed");
+}
+
+/// Catch-all for vectors nobody claimed (34..=255 minus the ones above).
+///
+/// Leaving an IDT slot zeroed is not harmless: the CPU jumps to address 0 on
+/// the first stray interrupt (QEMU raises IRQ7 spuriously, the cascade line
+/// can be re-aimed, an APIC can deliver a bogus vector) and the machine dies
+/// in a #PF/#DF cascade. Ack the interrupt (so it cannot storm) and return.
+#[no_mangle]
+pub extern "x86-interrupt" fn interrupt_stray(_frame: InterruptStackFrame) {
+    pic_eoi_if_bsp();
+    crate::interrupts::apic::eoi();
 }

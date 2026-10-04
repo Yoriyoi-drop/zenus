@@ -190,6 +190,41 @@ impl FileSystem for TarFs {
         None
     }
 
+    fn lookup(&self, parent_inode: u64, name: &str) -> Option<u64> {
+        // Resolve `name` under `parent_inode` by rebuilding the absolute tar
+        // path and reusing `find_inode`. Without this every lookup fell through
+        // to the VFS default, which only probes the root, so `/initrd/usr/bin/x`
+        // was unreachable even though `read_dir` listed it.
+        if name.is_empty() || name.contains('/') {
+            return None;
+        }
+
+        let parent_path: alloc::string::String = {
+            let tar = TAR_DATA.lock();
+            if parent_inode == 0 {
+                alloc::string::String::new()
+            } else {
+                match tar.entries[..tar.count]
+                    .iter()
+                    .find(|e| e.inode == parent_inode)
+                {
+                    Some(e) => alloc::string::String::from(e.name),
+                    None => return None,
+                }
+            }
+        };
+
+        let full = if parent_path.is_empty() {
+            alloc::string::String::from(name)
+        } else if parent_path.ends_with('/') {
+            alloc::format!("{}{}", parent_path, name)
+        } else {
+            alloc::format!("{}/{}", parent_path, name)
+        };
+
+        self.find_inode(&full)
+    }
+
     fn read_dir(&self, inode: u64) -> alloc::vec::Vec<DirEntry> {
         let mut entries = alloc::vec::Vec::with_capacity(MAX_DIR_ENTRIES);
         let tar = TAR_DATA.lock();

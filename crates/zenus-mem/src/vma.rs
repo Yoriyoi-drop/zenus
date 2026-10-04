@@ -2,6 +2,10 @@
 
 pub const MAX_VMAS: usize = 64;
 
+/// Highest user-space address a mapping may reach. `mmap` refuses anything
+/// above this, so `find_free` treats it as the ceiling too.
+pub const MAX_MAPPING_SIZE: u64 = 0x7F00_0000_0000;
+
 // mmap flags (Linux x86_64)
 pub const MAP_SHARED: u64 = 0x01;
 pub const MAP_PRIVATE: u64 = 0x02;
@@ -53,7 +57,10 @@ impl VmaRegion {
         self.start & !0xFFF
     }
     pub fn page_aligned_end(&self) -> u64 {
-        (self.end + 0xFFF) & !0xFFF
+        // `saturating_add`: `(end + 0xFFF)` panicked for `end == u64::MAX` in
+        // debug builds, and a debug/release behavioural split in a page-table
+        // helper is exactly the kind of bug that only shows up on one machine.
+        self.end.saturating_add(0xFFF) & !0xFFF
     }
 
     pub fn to_page_flags(&self) -> u64 {
@@ -85,6 +92,15 @@ impl VmaTable {
     }
 
     pub fn insert(&mut self, start: u64, end: u64, prot: u64, flags: u64) -> Option<usize> {
+        // An empty or inverted range is not a mapping. Accepting `end <= start`
+        // is what let a zero-length VMA in, which in turn made `find_free`
+        // recurse without ever making progress.
+        if end <= start {
+            return None;
+        }
+        if end > MAX_MAPPING_SIZE {
+            return None;
+        }
         if self.count >= MAX_VMAS {
             return None;
         }
@@ -140,25 +156,60 @@ impl VmaTable {
         true
     }
 
+    /// Find a free page-aligned range of `size` bytes at or after `hint`.
+    ///
+    /// Three bugs lived here; all three are now pinned by tests:
+    ///
+    /// * `size == 0` recursed forever (`end == start` re-triggered the "end is
+    ///   inside the region" branch with an unchanged hint), overflowing the
+    ///   stack and aborting the whole process.
+    /// * `start + size` and `(end + 0xFFF)` panicked on overflow in debug
+    ///   builds and wrapped silently in release, handing out addresses far
+    ///   outside the user range.
+    /// * The overlap test only asked whether the *start* or the *end* landed
+    ///   inside a region, so a range straddling one (`0x1000..0x9000` over a
+    ///   `0x5000..0x7000` mapping) was reported free — `mmap` then mapped on
+    ///   top of an existing VMA.
     pub fn find_free(&self, size: u64, hint: u64) -> Option<u64> {
-        let start = hint & !0xFFF;
-        let end = start + size;
-        if end > 0x7F00_0000_0000 {
+        if size == 0 || size > MAX_MAPPING_SIZE {
             return None;
         }
+        let mut candidate = hint & !0xFFF;
+        // Bounded by MAX_VMAS + 1: every iteration must move the candidate past
+        // one region, so this cannot spin.
+        for _ in 0..=MAX_VMAS {
+            match candidate.checked_add(size) {
+                Some(end) if end <= MAX_MAPPING_SIZE => {}
+                _ => return None,
+            }
 
-        for i in 0..self.count {
-            let r = &self.regions[i];
-            if !r.valid {
-                continue;
+            let mut bump: Option<u64> = None;
+            for region in self.regions.iter().take(self.count) {
+                if !region.valid {
+                    continue;
+                }
+                // Proper half-open overlap test.
+                if candidate < region.end
+                    && candidate.saturating_add(size) > region.start
+                {
+                    bump = Some(region.end);
+                    break;
+                }
             }
-            if start >= r.start && start < r.end {
-                return self.find_free(size, r.end);
-            }
-            if end > r.start && end <= r.end {
-                return self.find_free(size, r.end);
+
+            match bump {
+                None => return Some(candidate),
+                Some(next) => {
+                    let aligned = next & !0xFFF;
+                    if aligned <= candidate {
+                        // No forward progress (unaligned or pathological
+                        // region): refuse instead of looping.
+                        return None;
+                    }
+                    candidate = aligned;
+                }
             }
         }
-        Some(start)
+        None
     }
 }

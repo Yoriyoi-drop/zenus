@@ -53,6 +53,7 @@ dependencies = [
  "zenus-arch",
  "zenus-console",
  "zenus-fs",
+ "zenus-fuzz",
  "zenus-mem",
  "zenus-net",
  "zenus-ns",
@@ -131,6 +132,20 @@ dependencies = [
  "zenus-mem",
  "zenus-ns",
  "zenus-sync",
+]
+
+[[package]]
+name = "zenus-fuzz"
+version = "0.1.0"
+dependencies = [
+ "x86_64",
+ "zenus-arch",
+ "zenus-console",
+ "zenus-fs",
+ "zenus-mem",
+ "zenus-sched",
+ "zenus-sync",
+ "zenus-syscall",
 ]
 
 [[package]]

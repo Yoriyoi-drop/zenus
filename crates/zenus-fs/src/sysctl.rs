@@ -116,12 +116,34 @@ static SYSCTL_TABLE: SpinLock<SysctlTable> = SpinLock::new(SysctlTable::new());
 
 static UPTIME_TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// Tick rate of the scheduler tick that feeds [`sysctl_tick`].
+///
+/// `pit::init()` programs `PIT_FREQ / 100`, so the timer interrupt — and with
+/// it `SYS_TICKS` / `UPTIME_TICKS` — fires 100 times per second. Dividing by
+/// 1000 here (as this module used to) under-reported uptime by 10x.
+const TICK_HZ: u64 = 100;
+
+/// Advance the uptime counter by one scheduler tick.
+///
+/// Called from the scheduler tick path — without a caller `kernel.uptime`
+/// stayed pinned at 0 forever.
 pub fn sysctl_tick() {
     UPTIME_TICKS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Current uptime in whole seconds.
+fn uptime_seconds() -> u64 {
+    UPTIME_TICKS.load(Ordering::Relaxed) / TICK_HZ
+}
+
 pub fn sysctl_init() {
     let mut table = SYSCTL_TABLE.lock();
+    // Reset before registering. `register` has no duplicate check and nothing
+    // cleared the table, so every call appended a second copy of all eight
+    // defaults (measured: 8 -> 16 -> 24 entries), and `sysctl_set` on the first
+    // copy of a key no longer affected the value that `sysctl_get` returned
+    // from the last one.
+    table.count = 0;
     table.register(
         "kernel.hostname",
         "System hostname",
@@ -189,8 +211,7 @@ pub fn sysctl_get(idx: usize) -> Option<SysctlEntry> {
     let mut entry = table.entries[idx].clone();
 
     if entry.name == "kernel.uptime" {
-        let ticks = UPTIME_TICKS.load(Ordering::Relaxed);
-        entry.value = SysctlValue::UintVal(ticks / 1000);
+        entry.value = SysctlValue::UintVal(uptime_seconds());
     }
 
     Some(entry)
@@ -237,8 +258,7 @@ pub fn sysctl_list() -> Vec<SysctlEntry> {
     for i in 0..table.count {
         let mut entry = table.entries[i].clone();
         if entry.name == "kernel.uptime" {
-            let ticks = UPTIME_TICKS.load(Ordering::Relaxed);
-            entry.value = SysctlValue::UintVal(ticks / 1000);
+            entry.value = SysctlValue::UintVal(uptime_seconds());
         }
         result.push(entry);
     }

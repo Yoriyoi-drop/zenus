@@ -1,4 +1,8 @@
 #![no_std]
+// The host test harness needs std; the bare-metal build must not pull it in.
+#[cfg(test)]
+extern crate std;
+
 
 use zenus_arch::interrupts::handler;
 use zutils_common::{Args, Writer};

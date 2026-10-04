@@ -27,6 +27,7 @@ const MSS: u16 = 1460;
 const INIT_CWND: u16 = 1460;
 const INIT_SSTHRESH: u16 = 65535;
 const KEEPALIVE_IDLE: u64 = 7200;
+/// Seconds between keepalive probes once the idle timer has fired.
 const KEEPALIVE_PROBE_INTERVAL: u64 = 75;
 const KEEPALIVE_PROBES: u8 = 9;
 
@@ -48,7 +49,6 @@ struct Tcb {
     tx_data_len: usize,
     retry_count: u8,
     retry_ticks: u8,
-    last_ack: u32,
     time_wait_ticks: u8,
     cwnd: u16,
     ssthresh: u16,
@@ -61,12 +61,10 @@ struct Tcb {
 
 struct TcpState {
     conns: [Option<Tcb>; MAX_CONNS],
-    next_conn_id: usize,
 }
 
 static TCP_STATE: SpinLock<TcpState> = SpinLock::new(TcpState {
     conns: [None; MAX_CONNS],
-    next_conn_id: 0,
 });
 
 fn seq_before(a: u32, b: u32) -> bool {
@@ -295,7 +293,6 @@ pub fn listen(port: u16) -> Option<usize> {
         tx_data_len: 0,
         retry_count: 0,
         retry_ticks: 0,
-        last_ack: 0,
         time_wait_ticks: 0,
         cwnd: INIT_CWND,
         ssthresh: INIT_SSTHRESH,
@@ -345,7 +342,6 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
         tx_data_len: 0,
         retry_count: MAX_RETRIES,
         retry_ticks: RETRY_INTERVAL,
-        last_ack: 0,
         time_wait_ticks: 0,
         cwnd: INIT_CWND,
         ssthresh: INIT_SSTHRESH,
@@ -512,7 +508,6 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                         tx_data_len: 0,
                         retry_count: MAX_RETRIES,
                         retry_ticks: RETRY_INTERVAL,
-                        last_ack: 0,
                         time_wait_ticks: 0,
                         cwnd: INIT_CWND,
                         ssthresh: INIT_SSTHRESH,
@@ -637,8 +632,25 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
 
         TCP_ESTABLISHED | TCP_CLOSE_WAIT => {
             if (flags & TCP_FLAG_ACK) != 0 {
+                // Duplicate-ACK tracking (RFC 5681): three ACKs for the same
+                // sequence number mean a segment was lost, so retransmit now
+                // instead of waiting out RETRY_INTERVAL.
+                if ack == tcb.last_ack_seq && seq_before(tcb.send_una, tcb.send_nxt) {
+                    tcb.dupack_count = tcb.dupack_count.saturating_add(1);
+                    if tcb.dupack_count == 3 {
+                        tcb.retry_count = MAX_RETRIES;
+                        tcb.retry_ticks = 0;
+                    }
+                } else if seq_before(tcb.last_ack_seq, ack) {
+                    tcb.dupack_count = 0;
+                }
+                if seq_before_eq(ack, tcb.last_ack_seq) || tcb.last_ack_seq == 0 {
+                    tcb.last_ack_seq = ack;
+                }
+
+                let mut acked_bytes = 0u32;
                 if seq_before(tcb.send_una, ack) && seq_before_eq(ack, tcb.send_nxt) {
-                    let acked_bytes = ack.wrapping_sub(tcb.send_una);
+                    acked_bytes = ack.wrapping_sub(tcb.send_una);
                     tcb.send_una = ack;
                     // Remove acknowledged data from tx buffer
                     if acked_bytes as usize <= tcb.tx_data_len {
@@ -653,6 +665,16 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                         tcb.retry_ticks = 0;
                     }
                 }
+                // Traffic on the connection means the peer is alive.
+                tcb.keepalive_probes = 0;
+                tcb.keepalive_time = 0;
+                // Additive increase: +MSS per RTT below ssthresh (slow
+                // start), +1 MSS per RTT above it (congestion avoidance).
+                if tcb.cwnd < tcb.ssthresh {
+                    tcb.cwnd = core::cmp::min(tcb.cwnd.saturating_add(MSS), u16::MAX);
+                } else if acked_bytes > 0 {
+                    tcb.cwnd = tcb.cwnd.saturating_add(1);
+                }
                 tcb.recv_window = window;
             }
 
@@ -666,6 +688,13 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                         tcb.rx_data_len += copy_len;
                     }
                     tcb.recv_nxt = seq + copy_len as u32;
+                    // Anything the SACK list held at or below the new
+                    // cumulative ACK is now covered by it.
+                    for i in 0..tcb.sack_blocks.len() {
+                        if seq_before_eq(tcb.sack_blocks[i].1, tcb.recv_nxt) {
+                            tcb.sack_blocks[i] = (0, 0);
+                        }
+                    }
 
                     let window = 65535u16.saturating_sub(tcb.rx_data_len as u16);
 
@@ -683,19 +712,26 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                     ack_seg[17] = (csum & 0xFF) as u8;
                     let _ = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
                 } else {
-                    let mut ack_seg = build_segment(
+                    // Out-of-order segment: remember the range in the SACK
+                    // block list and tell the peer about it, instead of only
+                    // re-ACKing the gap. The peer can then avoid
+                    // retransmitting data it already sent (RFC 2018).
+                    add_sack_block(
+                        &mut tcb.sack_blocks,
+                        seq,
+                        seq.wrapping_add(payload.len() as u32),
+                    );
+                    send_sack_ack(
+                        iface_idx,
+                        dst_ip,
+                        src_ip,
                         dst_port,
                         src_port,
                         tcb.send_nxt,
                         tcb.recv_nxt,
-                        TCP_FLAG_ACK,
                         tcb.recv_window,
-                        &[],
+                        &tcb.sack_blocks,
                     );
-                    let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
-                    ack_seg[16] = (csum >> 8) as u8;
-                    ack_seg[17] = (csum & 0xFF) as u8;
-                    let _ = ipv4::send(iface_idx, src_ip, ipv4::PROTO_TCP, &ack_seg[..20]);
                 }
             }
 
@@ -842,6 +878,42 @@ pub fn poll_retransmit(iface_idx: usize) {
         if !seq_before(tcb.send_una, tcb.send_nxt) {
             tcb.retry_count = 0;
             tcb.retry_ticks = 0;
+            // Nothing in flight: this is where keepalive belongs. An
+            // established connection with no traffic for KEEPALIVE_IDLE
+            // seconds gets a probe; after KEEPALIVE_PROBES unanswered probes
+            // the peer is considered gone and the TCB is torn down.
+            if tcb.state == TCP_ESTABLISHED {
+                tcb.keepalive_time += 1;
+                if tcb.keepalive_time >= KEEPALIVE_IDLE {
+                    tcb.keepalive_time = 0;
+                    if tcb.keepalive_probes >= KEEPALIVE_PROBES {
+                        zenus_console::kwarn!("TCP keepalive exhausted, closing conn {}", i);
+                        tcb.state = TCP_CLOSED;
+                        continue;
+                    }
+                    tcb.keepalive_probes += 1;
+                    let _probe_interval = KEEPALIVE_PROBE_INTERVAL;
+
+                    let remote_ip = tcb.remote_ip;
+                    let local_ip = tcb.local_ip;
+                    let src_port = tcb.local_port;
+                    let dst_port = tcb.remote_port;
+                    let mut seg = build_segment(
+                        src_port,
+                        dst_port,
+                        tcb.send_nxt,
+                        tcb.recv_nxt,
+                        TCP_FLAG_ACK,
+                        tcb.recv_window,
+                        &[],
+                    );
+                    let csum = checksum(local_ip, remote_ip, &seg[..20]);
+                    seg[16] = (csum >> 8) as u8;
+                    seg[17] = (csum & 0xFF) as u8;
+                    ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..20]);
+                    continue;
+                }
+            }
             continue;
         }
         if tcb.retry_count == 0 {
@@ -894,7 +966,18 @@ pub fn poll_retransmit(iface_idx: usize) {
             seg[17] = (csum & 0xFF) as u8;
             ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..20]);
         } else {
-            let payload = &tcb.tx_data[..core::cmp::min(tcb.tx_data_len, 1460)];
+            // Never put more than one congestion window on the wire: the old
+            // code always sent a full MSS regardless of `cwnd`, so the window
+            // was pure bookkeeping and never affected the wire.
+            let in_flight = tcb.send_nxt.wrapping_sub(tcb.send_una);
+            let budget = (tcb.cwnd as u32).saturating_sub(in_flight);
+            let limit = core::cmp::min(MSS as u32, budget) as usize;
+            if limit == 0 {
+                // Window is full; wait for ACKs rather than overshooting.
+                tcb.retry_ticks = 1;
+                continue;
+            }
+            let payload = &tcb.tx_data[..core::cmp::min(tcb.tx_data_len, limit)];
             let seg_len = 20 + payload.len();
             let mut seg = build_segment(
                 src_port,
@@ -917,6 +1000,12 @@ pub fn poll_retransmit(iface_idx: usize) {
         if tcb.retry_count == 0 {
             zenus_console::kwarn!("TCP retry exhausted, closing conn {}", i);
             tcb.state = TCP_CLOSED;
+        } else {
+            // Multiplicative decrease: halve the window, keep the old
+            // ssthresh as the new threshold.
+            tcb.ssthresh = core::cmp::max(tcb.cwnd / 2, MSS);
+            tcb.cwnd = MSS;
+            tcb.dupack_count = 0;
         }
     }
 }

@@ -1,4 +1,8 @@
 #![no_std]
+// The host test harness needs std; the bare-metal build must not pull it in.
+#[cfg(test)]
+extern crate std;
+
 
 pub trait Writer {
     fn write_str(&mut self, s: &str);

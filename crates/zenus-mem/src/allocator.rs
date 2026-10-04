@@ -13,6 +13,19 @@ const MIN_BLOCK: usize = 32;
 const MAGIC_FREE: u64 = 0x46524545_424C4F43;
 const MAGIC_USED: u64 = 0x55534544_424C4F43;
 
+/// Every block header sits **immediately before** its payload, i.e. a
+/// payload pointer always satisfies `block = ptr - HEADER_SIZE`.
+///
+/// The previous layout kept the header at the *free region's* start and
+/// stored the alignment padding in the 8 bytes just below the payload. That
+/// padding word lives inside the header itself whenever `pad < 8`
+/// (`pad = aligned_data - data_addr` can be anything in 0..align-1), so the
+/// write clobbered the header canary. `dealloc` then failed to recognise
+/// the pad-less case, mis-derived `block = ptr - HEADER_SIZE - pad` from the
+/// corrupted value and freed an unrelated block — freeing live task stacks
+/// so their frames got recycled into heap metadata (observed: `MAGIC_FREE`
+/// headers and `0xdeadbeefcafebabe` canaries inside the shell's stack, then
+/// jumps to addresses like 0x100000000).
 #[repr(C)]
 struct BlockHeader {
     magic: u64,
@@ -66,7 +79,9 @@ impl FreeListAllocator {
         self.ensure_initialized();
 
         let size = layout.size().max(1);
-        let align = layout.align().max(HEADER_SIZE);
+        // 16 is the hard minimum: task stacks are context-switched with
+        // iretq-compatible frames, and the SysV ABI keeps RSP 16-aligned.
+        let align = layout.align().max(16);
 
         let mut prev: usize = 0;
         let mut curr = self.free_head.load(Ordering::Acquire);
@@ -75,25 +90,26 @@ impl FreeListAllocator {
             let block = curr as *mut BlockHeader;
             unsafe {
                 let block_size = (*block).size;
-                let data_addr = curr + HEADER_SIZE;
-                let aligned_data = (data_addr + align - 1) & !(align - 1);
-                let pad = aligned_data - data_addr;
-                let needed = pad + size;
+                let region_start = curr + HEADER_SIZE;
+                let region_end = curr + HEADER_SIZE + block_size;
+                let aligned_data = (region_start + align - 1) & !(align - 1);
 
-                if needed <= block_size {
-                    if pad > 0 {
-                        let pad_ptr = (aligned_data as *mut usize).sub(1);
-                        *pad_ptr = pad;
-                    }
+                if aligned_data + size <= region_end {
+                    // Payload goes at `aligned_data`, header immediately
+                    // before it — no padding bookkeeping needed.
+                    let used_hdr = (aligned_data - HEADER_SIZE) as *mut BlockHeader;
+                    // Bytes consumed from the *region start* (used payload +
+                    // its header + alignment gap), and what is left over.
+                    let consumed = (aligned_data + size - curr) as isize;
+                    let remaining = block_size as isize - consumed;
 
-                    let remaining = block_size - needed;
-                    if remaining >= HEADER_SIZE + MIN_BLOCK {
-                        let new_block = (data_addr + needed) as *mut BlockHeader;
+                    if remaining >= (HEADER_SIZE + MIN_BLOCK) as isize {
+                        let new_block = (aligned_data + size) as *mut BlockHeader;
                         ptr::write(
                             new_block,
                             BlockHeader {
                                 magic: MAGIC_FREE,
-                                size: remaining - HEADER_SIZE,
+                                size: (remaining as usize) - HEADER_SIZE,
                                 next: (*block).next,
                                 canary: CANARY_VALUE,
                             },
@@ -104,11 +120,6 @@ impl FreeListAllocator {
                         } else {
                             (*(prev as *mut BlockHeader)).next = new_block;
                         }
-
-                        (*block).magic = MAGIC_USED;
-                        (*block).size = needed;
-
-                        return aligned_data as *mut u8;
                     } else {
                         if prev == 0 {
                             self.free_head
@@ -116,12 +127,21 @@ impl FreeListAllocator {
                         } else {
                             (*(prev as *mut BlockHeader)).next = (*block).next;
                         }
-
-                        (*block).magic = MAGIC_USED;
-                        (*block).size = block_size;
-
-                        return aligned_data as *mut u8;
                     }
+
+                    // `size` is the payload size: dealloc derives
+                    // block_end = used_hdr + HEADER + size == aligned_data + size.
+                    ptr::write(
+                        used_hdr,
+                        BlockHeader {
+                            magic: MAGIC_USED,
+                            size,
+                            next: ptr::null_mut(),
+                            canary: CANARY_VALUE,
+                        },
+                    );
+
+                    return aligned_data as *mut u8;
                 }
 
                 prev = curr;
@@ -146,33 +166,33 @@ impl FreeListAllocator {
             return;
         }
 
-        let raw = unsafe { *((ptr as *const usize).sub(1)) as usize };
-        let pad = if raw == CANARY_VALUE as usize { 0 } else { raw };
-        let block = (ptr as usize - HEADER_SIZE - pad) as *mut BlockHeader;
-
-        unsafe {
-            if (*block).magic == MAGIC_FREE {
-                return;
-            }
-            if (*block).canary != CANARY_VALUE {
-                zenus_console::kerror_code!(
-                    zenus_console::error::codes::MEM_PROTECTION,
-                    "Heap canary corrupted! Block at {:#x}",
-                    block as usize
-                );
-                return;
-            }
-        }
+        // Header is immediately below the payload — no padding arithmetic.
+        let block = (ptr as usize - HEADER_SIZE) as *mut BlockHeader;
 
         let block_size;
         let block_start;
         let block_end;
         unsafe {
+            if (*block).magic == MAGIC_FREE {
+                return; // double free
+            }
+            if (*block).magic != MAGIC_USED || (*block).canary != CANARY_VALUE {
+                zenus_console::kerror_code!(
+                    zenus_console::error::codes::MEM_PROTECTION,
+                    "Heap header corrupted at {:#x} (magic={:#x} canary={:#x}) ptr={:#x}",
+                    block as usize,
+                    (*block).magic,
+                    (*block).canary,
+                    ptr as usize
+                );
+                return;
+            }
             block_size = (*block).size;
             (*block).magic = MAGIC_FREE;
             block_start = block as usize;
             block_end = block_start + HEADER_SIZE + block_size;
         }
+
 
         let mut prev: usize = 0;
         let mut curr = self.free_head.load(Ordering::Acquire);
@@ -265,7 +285,16 @@ unsafe impl GlobalAlloc for FreeListAllocator {
     }
 }
 
-#[global_allocator]
+/// The kernel's free-list allocator.
+///
+/// Installed as `#[global_allocator]` on bare metal only. The host test build
+/// keeps the static (explicit kernel allocations still go through it, e.g.
+/// task stacks in `zenus-sched`) but must not let the *test harness* allocate
+/// from it: the harness allocates before the arena is initialised, and the
+/// free list is built lazily from the 8 MiB static heap. That combination
+/// wedged the host test binary before this was gated — `cargo test -p zenus-mem`
+/// hung with no output at all, even for `--list`.
+#[cfg_attr(target_os = "none", global_allocator)]
 pub static ALLOCATOR: FreeListAllocator = FreeListAllocator::new();
 
 pub fn init_heap() {

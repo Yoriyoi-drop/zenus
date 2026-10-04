@@ -116,61 +116,41 @@ pub struct Ext2Fs {
     mounted: bool,
 }
 
-fn read_unaligned_sb(buf: &[u8]) -> RawSuperblock {
-    unsafe {
-        let ptr = buf.as_ptr() as *const u8;
-        let mut sb: RawSuperblock = core::mem::zeroed();
-        core::ptr::copy_nonoverlapping(
-            ptr,
-            &mut sb as *mut RawSuperblock as *mut u8,
-            core::mem::size_of::<RawSuperblock>(),
-        );
-        sb
+/// Decode a fixed-size on-disk structure out of `buf`.
+///
+/// These used to `copy_nonoverlapping` `size_of::<T>()` bytes without ever
+/// checking `buf.len()`, so a short read — a truncated superblock read, a
+/// 10-byte buffer, a fuzz case — walked off the end of the slice. On the
+/// kernel that is an unchecked read of whatever follows the buffer, and it is
+/// exactly the shape an attacker-controlled image takes. Returning `None`
+/// instead makes the caller treat a short buffer as a corrupt structure.
+pub fn read_unaligned<T: Copy>(buf: &[u8]) -> Option<T> {
+    if buf.len() < core::mem::size_of::<T>() {
+        return None;
     }
-}
-
-fn read_unaligned_bgdt(buf: &[u8]) -> RawBlockGroupDescriptor {
     unsafe {
-        let mut bgd: RawBlockGroupDescriptor = core::mem::zeroed();
+        let mut out: T = core::mem::zeroed();
         core::ptr::copy_nonoverlapping(
             buf.as_ptr(),
-            &mut bgd as *mut RawBlockGroupDescriptor as *mut u8,
-            core::mem::size_of::<RawBlockGroupDescriptor>(),
+            &mut out as *mut T as *mut u8,
+            core::mem::size_of::<T>(),
         );
-        bgd
+        Some(out)
     }
 }
 
-fn read_unaligned_inode(buf: &[u8]) -> RawInode {
-    unsafe {
-        let mut inode: RawInode = core::mem::zeroed();
-        core::ptr::copy_nonoverlapping(
-            buf.as_ptr(),
-            &mut inode as *mut RawInode as *mut u8,
-            core::mem::size_of::<RawInode>(),
-        );
-        inode
+pub fn write_unaligned<T: Copy>(buf: &mut [u8], value: &T) -> bool {
+    if buf.len() < core::mem::size_of::<T>() {
+        return false;
     }
-}
-
-fn write_unaligned_bgdt(buf: &mut [u8], bgd: &RawBlockGroupDescriptor) {
     unsafe {
         core::ptr::copy_nonoverlapping(
-            bgd as *const RawBlockGroupDescriptor as *const u8,
+            value as *const T as *const u8,
             buf.as_mut_ptr(),
-            core::mem::size_of::<RawBlockGroupDescriptor>(),
+            core::mem::size_of::<T>(),
         );
     }
-}
-
-fn write_unaligned_inode(buf: &mut [u8], inode: &RawInode) {
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            inode as *const RawInode as *const u8,
-            buf.as_mut_ptr(),
-            core::mem::size_of::<RawInode>(),
-        );
-    }
+    true
 }
 
 impl Ext2Fs {
@@ -184,13 +164,19 @@ impl Ext2Fs {
             }
         }
 
-        let raw_sb = read_unaligned_sb(&sb_buf[1024..1024 + core::mem::size_of::<RawSuperblock>()]);
+        let raw_sb = read_unaligned::<RawSuperblock>(&sb_buf[1024..])?;
 
         if raw_sb.magic != EXT2_MAGIC {
             return None;
         }
 
         let rev = raw_sb.rev_level;
+        // Only the two revisions ext2 defines are mountable. Without this the
+        // code accepted any `rev_level` and then treated it as GOOD_OLD, i.e. a
+        // corrupt superblock with an arbitrary revision mounted as ext2.
+        if rev != EXT2_GOOD_OLD_REV && rev != EXT2_DYNAMIC_REV {
+            return None;
+        }
         let inode_size = if rev >= EXT2_DYNAMIC_REV {
             if raw_sb.inode_size_raw < 128 || raw_sb.inode_size_raw > 256 {
                 return None;
@@ -233,11 +219,22 @@ impl Ext2Fs {
         None
     }
 
+    /// Instance id, unique per successful mount.
+    pub fn instance_id(&self) -> u64 {
+        self.id
+    }
+
+    /// True while this instance is in the pool and usable.
+    pub fn is_mounted(&self) -> bool {
+        self.mounted
+    }
+
     pub fn unmount(dev_id: u8) {
         let mut pool = EXT2_POOL.lock();
         for slot in pool.iter_mut() {
             if let Some(fs) = slot {
                 if fs.dev_id == dev_id {
+                    fs.mounted = false;
                     *slot = None;
                     return;
                 }
@@ -262,7 +259,7 @@ impl Ext2Fs {
             return None;
         }
 
-        Some(read_unaligned_bgdt(&buf[offset_in_sector as usize..]))
+        read_unaligned::<RawBlockGroupDescriptor>(&buf[offset_in_sector as usize..])
     }
 
     fn read_inode_raw(&self, inode: u64) -> Option<RawInode> {
@@ -288,7 +285,7 @@ impl Ext2Fs {
             }
         }
 
-        Some(read_unaligned_inode(&buf[offset_in_sector..]))
+        read_unaligned::<RawInode>(&buf[offset_in_sector..])
     }
 
     fn read_block_data(&self, block: u32, buf: &mut [u8]) -> bool {
@@ -457,7 +454,9 @@ impl Ext2Fs {
         if !crate::block_cache::bc_read(self.dev_id, sector, &mut buf) {
             return false;
         }
-        write_unaligned_bgdt(&mut buf[offset_in_sector as usize..], bgd);
+        if !write_unaligned(&mut buf[offset_in_sector as usize..], bgd) {
+            return false;
+        }
         crate::block_cache::bc_write(self.dev_id, sector, &buf)
     }
 
@@ -558,7 +557,9 @@ impl Ext2Fs {
             }
         }
 
-        write_unaligned_inode(&mut buf[offset_in_sector..], raw);
+        if !write_unaligned(&mut buf[offset_in_sector..], raw) {
+            return false;
+        }
 
         for i in 0..needed_sectors as u64 {
             let s = i as usize;

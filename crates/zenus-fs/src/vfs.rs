@@ -78,14 +78,6 @@ const EMPTY_MOUNT: Mount = Mount {
     fs: &crate::devfs::DevFs as &dyn FileSystem,
 };
 
-fn empty_dir_entry() -> DirEntry {
-    DirEntry {
-        name: alloc::string::String::new(),
-        file_type: FileType::None,
-        inode: 0,
-    }
-}
-
 impl MountTable {
     const fn new() -> Self {
         MountTable {
@@ -143,6 +135,9 @@ pub fn create_mnt_ns(ns_id: zenus_ns::NsId) -> bool {
     true
 }
 
+/// Resolve the mount table for `ns_id`, creating a per-namespace table on
+/// first use.
+#[allow(dead_code)]
 fn with_mount_table<R>(ns_id: zenus_ns::NsId, f: impl FnOnce(&mut MountTable) -> R) -> R {
     if ns_id == zenus_ns::NS_ROOT {
         let mut mt = MOUNT_TABLE.lock();
@@ -420,10 +415,6 @@ pub fn read_dir_in_ns(ns_id: zenus_ns::NsId, path: &str) -> alloc::vec::Vec<DirE
     }
 }
 
-fn read_dir_root() -> alloc::vec::Vec<DirEntry> {
-    read_dir_root_in_ns(zenus_ns::NS_ROOT)
-}
-
 fn read_dir_root_in_ns(ns_id: zenus_ns::NsId) -> alloc::vec::Vec<DirEntry> {
     let mut entries = alloc::vec::Vec::with_capacity(32);
 
@@ -515,7 +506,7 @@ pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
         inode: root_inode,
     };
     let root_inode_num = root_inode;
-    let mut path_segments: [&str; 32] = [""; 32];
+    let mut path_segments: [&str; MAX_PATH_SEGMENTS] = [""; MAX_PATH_SEGMENTS];
     let mut seg_count = 0;
 
     for part in trimmed.split('/') {
@@ -532,10 +523,14 @@ pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
             }
             continue;
         }
-        if seg_count < 32 {
-            path_segments[seg_count] = part;
-            seg_count += 1;
+        if seg_count >= MAX_PATH_SEGMENTS {
+            // Refuse instead of dropping the tail: a 33-component path used to
+            // resolve as its 32-component prefix, so a long path could name a
+            // *different* file than the caller asked for.
+            return None;
         }
+        path_segments[seg_count] = part;
+        seg_count += 1;
     }
 
     for i in 0..seg_count {
@@ -566,6 +561,13 @@ pub const S_IWOTH: u16 = 0o002;
 pub const S_IXOTH: u16 = 0o001;
 pub const S_IFREG: u16 = 0x8000;
 pub const S_IFDIR: u16 = 0x4000;
+/// Maximum number of components in a path.
+///
+/// Paths with more components are rejected rather than truncated: truncation
+/// turns "the file I asked for" into "some other file", which is a path
+/// confinement bypass rather than a limit.
+pub const MAX_PATH_SEGMENTS: usize = 32;
+
 pub const DEFAULT_FILE_MODE: u16 = 0x81A4;
 pub const DEFAULT_DIR_MODE: u16 = 0x41ED;
 
@@ -606,10 +608,19 @@ pub fn access_check(
             return (mode & S_IRGRP) != 0;
         }
     } else {
+        // "Other" needs the same directory rule as owner and group: a directory
+        // without search permission cannot be written to meaningfully, so
+        // creating or unlinking inside it must be refused, not silently allowed.
         if want_write {
-            return (mode & S_IWOTH) != 0;
+            if (mode & S_IWOTH) == 0 {
+                return false;
+            }
+            if (mode & S_IXOTH) == 0 && stat.file_type == FileType::Directory {
+                return false;
+            }
+            true
         } else {
-            return (mode & S_IROTH) != 0;
+            (mode & S_IROTH) != 0
         }
     }
 }

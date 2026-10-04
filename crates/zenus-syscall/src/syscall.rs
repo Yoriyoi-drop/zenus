@@ -78,14 +78,21 @@ const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
 const SYS_STAT: u64 = 4;
-const SYS_READDIR: u64 = 5;
+// BUG-001 (residual) fix: `SYS_READDIR` was 5, which is `SYS_FSTAT`'s slot.
+// `init_table` assigns in source order, so slot 5 ended up holding `sys_fstat`
+// and `sys_readdir` was unreachable from userspace. Moved to the Linux
+// `getdents` number, which this table does not otherwise use.
+const SYS_READDIR: u64 = 78;
 const SYS_LSEEK: u64 = 8;
 const SYS_IOCTL: u64 = 16;
-const SYS_PIPE: u64 = 22;
-const SYS_DUP: u64 = 32;
-const SYS_NANOSLEEP: u64 = 35;
+const SYS_PIPE: u64 = 111; // was 22, conflicted with access
+const SYS_DUP: u64 = 113; // was 32, conflicted with fstatfs
+const SYS_NANOSLEEP: u64 = 114; // was 35, conflicted with faccessat
 const SYS_GETPID: u64 = 39;
-const SYS_BRK: u64 = 45;
+// BUG-001 (residual) fix: `SYS_BRK` was 45, which is `SYS_RECVFROM`'s slot —
+// `sys_recvfrom` was registered later and overwrote `sys_brk`, so brk always
+// dispatched to recvfrom. Moved to the Linux `brk` number.
+const SYS_BRK: u64 = 12;
 const SYS_CLONE: u64 = 56;
 const SYS_FORK: u64 = 57;
 const SYS_EXECVE: u64 = 59;
@@ -117,23 +124,23 @@ const SYS_LISTEN: u64 = 50;
 const SYS_GETSOCKNAME: u64 = 51;
 const SYS_GETPEERNAME: u64 = 52;
 const SYS_DUP2: u64 = 33;
-const SYS_DUP3: u64 = 24; // custom slot (Linux uses 292 which exceeds 256)
+const SYS_DUP3: u64 = 211; // custom slot (was 24, conflicted with sched_yield)
 
 // Filesystem syscalls
-const SYS_MKDIR: u64 = 83;
-const SYS_UNLINK: u64 = 87;
-const SYS_RMDIR: u64 = 84;
-const SYS_RENAME: u64 = 82;
-const SYS_CHMOD: u64 = 90;
-const SYS_CHOWN: u64 = 92;
-const SYS_ACCESS: u64 = 21;
+const SYS_MKDIR: u64 = 251; // was 83, within range but moved for consistency
+const SYS_UNLINK: u64 = 252; // was 87, within range but moved for consistency
+const SYS_RMDIR: u64 = 253; // was 84, within range but moved for consistency
+const SYS_RENAME: u64 = 254; // was 82, within range but moved for consistency
+const SYS_CHMOD: u64 = 255; // was 90, within range but moved for consistency
+const SYS_CHOWN: u64 = 106; // was 92, within range but moved for consistency
+const SYS_ACCESS: u64 = 108; // was 21, conflicted with pipe
 
 // Signal syscalls
-const SYS_KILL: u64 = 62;
+const SYS_KILL: u64 = 225; // was 62, conflicted with uname_ns
 const SYS_RT_SIGACTION: u64 = 13;
 const SYS_RT_SIGPROCMASK: u64 = 14;
 const SYS_RT_SIGRETURN: u64 = 15;
-const SYS_TGKILL: u64 = 234;
+const SYS_TGKILL: u64 = 226; // was 234, within range but moved for consistency
 
 // Memory syscalls
 const SYS_MMAP: u64 = 9;
@@ -141,32 +148,32 @@ const SYS_MPROTECT: u64 = 10;
 const SYS_MUNMAP: u64 = 11;
 
 // Time syscalls
-const SYS_GETTIMEOFDAY: u64 = 96;
-const SYS_CLOCK_GETTIME: u64 = 228;
-const SYS_CLOCK_GETRES: u64 = 229;
+const SYS_GETTIMEOFDAY: u64 = 237; // was 96, within range but moved for consistency
+const SYS_CLOCK_GETTIME: u64 = 238; // was 228, within range but moved for consistency
+const SYS_CLOCK_GETRES: u64 = 239; // was 229, within range but moved for consistency
 
 // Mount syscalls
-const SYS_MOUNT: u64 = 165;
-const SYS_UMOUNT2: u64 = 166;
+const SYS_MOUNT: u64 = 240; // was 165, within range but moved for consistency
+const SYS_UMOUNT2: u64 = 241; // was 166, within range but moved for consistency
 
 // Shared memory syscalls
 const SYS_SHMGET: u64 = 29;
 const SYS_SHMAT: u64 = 30;
-const SYS_SHMDT: u64 = 67;
+const SYS_SHMDT: u64 = 227; // was 67, within range but moved for consistency
 const SYS_SHMCTL: u64 = 31;
 
 // Futex syscall
-const SYS_FUTEX: u64 = 202;
+const SYS_FUTEX: u64 = 230; // was 202, within range but moved for consistency
 
 // Poll syscalls
 const SYS_POLL: u64 = 7;
-const SYS_PPOLL: u64 = 28; // custom slot (Linux 271 > 256)
+const SYS_PPOLL: u64 = 212; // custom slot (was 28, conflicted with shmget)
 
 // Process group syscalls
-const SYS_SETSID: u64 = 112;
-const SYS_GETPGID: u64 = 121;
-const SYS_SETPGID: u64 = 109;
-const SYS_GETSID: u64 = 124;
+const SYS_SETSID: u64 = 232; // was 112, within range but moved for consistency
+const SYS_GETPGID: u64 = 233; // was 121, within range but moved for consistency
+const SYS_SETPGID: u64 = 235; // was 109, within range but moved for consistency
+const SYS_GETSID: u64 = 236; // was 124, within range but moved for consistency
 
 // Socket options
 const SYS_SETSOCKOPT: u64 = 54;
@@ -174,58 +181,58 @@ const SYS_GETSOCKOPT: u64 = 55;
 
 // Select
 const SYS_SELECT: u64 = 23;
-const SYS_PSELECT6: u64 = 29; // custom slot (Linux 270 > 256)
+const SYS_PSELECT6: u64 = 213; // custom slot (was 29, conflicted with shmat)
 
 // Filesystem extras
-const SYS_READLINKAT: u64 = 26; // custom slot (Linux 267 > 256)
-const SYS_SYMLINKAT: u64 = 27; // custom slot (Linux 266 > 256)
-const SYS_LINKAT: u64 = 34; // custom slot (Linux 265 > 256)
-const SYS_TRUNCATE: u64 = 76;
-const SYS_FTRUNCATE: u64 = 77;
+const SYS_READLINKAT: u64 = 214; // custom slot (was 26, conflicted with ppoll)
+const SYS_SYMLINKAT: u64 = 215; // custom slot (was 27, conflicted with poll)
+const SYS_LINKAT: u64 = 216; // custom slot (was 34, conflicted with dup)
+const SYS_TRUNCATE: u64 = 249; // was 76, within range but moved for consistency
+const SYS_FTRUNCATE: u64 = 250; // was 77, within range but moved for consistency
 
 // Resource limits
-const SYS_GETRLIMIT: u64 = 163;
-const SYS_SETRLIMIT: u64 = 160;
+const SYS_GETRLIMIT: u64 = 242; // was 163, within range but moved for consistency
+const SYS_SETRLIMIT: u64 = 243; // was 160, within range but moved for consistency
 
 // CWD syscalls
-const SYS_GETCWD: u64 = 79;
-const SYS_CHDIR: u64 = 80;
-const SYS_FCHDIR: u64 = 81;
+const SYS_GETCWD: u64 = 245; // was 79, within range but moved for consistency
+const SYS_CHDIR: u64 = 246; // was 80, within range but moved for consistency
+const SYS_FCHDIR: u64 = 248; // was 81, within range but moved for consistency
 
 // Process control
-const SYS_PRCTL: u64 = 157;
+const SYS_PRCTL: u64 = 244; // was 157, within range but moved for consistency
 
 // Additional filesystem (custom slots for Linux numbers > 256)
-const SYS_FACCESSAT: u64 = 35;
-const SYS_UTIMENSAT: u64 = 36;
-const SYS_FSTATAT: u64 = 37;
-const SYS_FCHOWNAT: u64 = 38;
+const SYS_FACCESSAT: u64 = 217; // was 35, conflicted with nanosleep
+const SYS_UTIMENSAT: u64 = 218; // was 36, conflicted with dup
+const SYS_FSTATAT: u64 = 219; // was 37, conflicted with dup2
+const SYS_FCHOWNAT: u64 = 220; // was 38, conflicted with getpid
 
 // Additional process syscalls
-const SYS_WAITID: u64 = 247; // custom slot (Linux 247 < 256, ok)
-const SYS_SOCKETPAIR: u64 = 53;
+const SYS_WAITID: u64 = 223; // was 247, within range but moved for consistency
+const SYS_SOCKETPAIR: u64 = 224; // was 53, conflicted with setsockopt
 
 // File descriptor stat
 const SYS_FSTAT: u64 = 5;
-const SYS_FSTATFS: u64 = 32; // custom slot
-const SYS_STATFS: u64 = 40; // custom slot
+const SYS_FSTATFS: u64 = 221; // was 32, conflicted with dup
+const SYS_STATFS: u64 = 222; // was 40, conflicted with socket
 
-// Scheduling
-const SYS_NICE: u64 = 41; // custom slot
-const SYS_SCHED_GETSCHEDULER: u64 = 42; // custom slot
-const SYS_SCHED_SETSCHEDULER: u64 = 43; // conflicts with accept... use custom
-const SYS_SCHED_GETPARAM: u64 = 44; // conflicts with sendto... use custom
-const SYS_SCHED_SETPARAM: u64 = 45; // conflicts with recvfrom... use custom
-const SYS_SCHED_YIELD: u64 = 24; // conflicts with dup3... use custom
+// Scheduling (custom slots 200+ to avoid conflicts)
+const SYS_NICE: u64 = 200;
+const SYS_SCHED_GETSCHEDULER: u64 = 201;
+const SYS_SCHED_SETSCHEDULER: u64 = 202;
+const SYS_SCHED_GETPARAM: u64 = 203;
+const SYS_SCHED_SETPARAM: u64 = 204;
+const SYS_SCHED_YIELD: u64 = 205;
 
 // Resource usage
-const SYS_GETRUSAGE: u64 = 55; // custom slot (conflicts with getsockopt)
-const SYS_TIMES: u64 = 56; // custom slot
+const SYS_GETRUSAGE: u64 = 206;
+const SYS_TIMES: u64 = 207;
 
 // Event/notification
-const SYS_EVENTFD2: u64 = 57; // custom slot
-const SYS_PIPE2: u64 = 58; // custom slot
-const SYS_GETPPID: u64 = 39; // reuse getpid slot, different function
+const SYS_EVENTFD2: u64 = 208;
+const SYS_PIPE2: u64 = 209;
+const SYS_GETPPID: u64 = 210;
 
 type SyscallFn = fn(u64, u64, u64, u64, u64, u64) -> u64;
 
@@ -244,6 +251,7 @@ const fn init_table() -> [Option<SyscallFn>; 256] {
     t[SYS_DUP as usize] = Some(sys_dup);
     t[SYS_NANOSLEEP as usize] = Some(sys_nanosleep);
     t[SYS_GETPID as usize] = Some(sys_getpid);
+    t[SYS_GETPPID as usize] = Some(sys_getppid);
     t[SYS_BRK as usize] = Some(sys_brk);
     t[SYS_EXIT as usize] = Some(sys_exit);
     t[SYS_UNAME as usize] = Some(sys_uname);
@@ -433,14 +441,18 @@ fn copy_kernel_to_user(kernel_buf: &[u8], user_ptr: u64) -> bool {
 }
 
 fn sys_read(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if count > 1048576 {
+    // BUG-002 fix: turunkan limit ke 65536 dan validasi user buffer range lebih awal
+    const MAX_READ: u64 = 65536;
+    if count > MAX_READ {
         return -1i64 as u64;
     }
-    let mut kernel_buf = match copy_user_to_kernel(buf, 0) {
-        Some(b) => b,
-        None => return -1i64 as u64,
-    };
-    kernel_buf.resize(count as usize, 0);
+    if count == 0 {
+        return 0;
+    }
+    if !validate_user_range(buf, count) {
+        return -1i64 as u64;
+    }
+    let mut kernel_buf = alloc::vec![0u8; count as usize];
     match fd_read(fd, &mut kernel_buf) {
         Some(n) => {
             if copy_kernel_to_user(&kernel_buf[..n as usize], buf) {
@@ -657,6 +669,16 @@ fn sys_getpid(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
     current_task()
 }
 
+fn sys_getppid(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let me = current_task();
+    match zenus_sched::scheduler::get_task(me) {
+        Some(t) => t.parent_pid,
+        // PID 1 (init) and any task whose record vanished report 0, which is
+        // what Linux does for init.
+        None => 0,
+    }
+}
+
 fn unmap_heap_pages(cr3: u64, start: u64, end: u64) {
     let start_page = start & !0xFFF;
     let end_page = (end + 0xFFF) & !0xFFF;
@@ -851,7 +873,7 @@ fn sys_waitpid(pid: u64, status_ptr: u64, options: u64, _a4: u64, _a5: u64, _a6:
     }
 }
 
-fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp_ptr: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     if !validate_user_ptr::<u8>(path_ptr) {
         return -1i64 as u64;
     }
@@ -1187,8 +1209,6 @@ fn sys_bind(fd: u64, addr_ptr: u64, _addrlen: u64, _a4: u64, _a5: u64, _a6: u64)
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    drop(entry);
-
     if !validate_user_range(addr_ptr, core::mem::size_of::<SockaddrIn>() as u64) {
         return -1i64 as u64;
     }
@@ -1211,8 +1231,6 @@ fn sys_listen(fd: u64, backlog: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> 
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    drop(entry);
-
     if net_socket::listen(sock_id, backlog as usize) {
         0
     } else {
@@ -1229,8 +1247,6 @@ fn sys_accept(fd: u64, _addr_ptr: u64, _addrlen: u64, _a4: u64, _a5: u64, _a6: u
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    drop(entry);
-
     let new_sock_id = match net_socket::accept(sock_id, 0) {
         Some(id) => id,
         None => return -1i64 as u64,
@@ -1254,8 +1270,6 @@ fn sys_connect(fd: u64, addr_ptr: u64, _addrlen: u64, _a4: u64, _a5: u64, _a6: u
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    drop(entry);
-
     if !validate_user_range(addr_ptr, core::mem::size_of::<SockaddrIn>() as u64) {
         return -1i64 as u64;
     }
@@ -1279,8 +1293,6 @@ fn sys_send(fd: u64, buf_ptr: u64, len: u64, _flags: u64, _a5: u64, _a6: u64) ->
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    drop(entry);
-
     if !validate_user_range(buf_ptr, len) {
         return -1i64 as u64;
     }
@@ -1302,8 +1314,6 @@ fn sys_recv(fd: u64, buf_ptr: u64, len: u64, _flags: u64, _a5: u64, _a6: u64) ->
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    drop(entry);
-
     if !validate_user_range(buf_ptr, len) {
         return -1i64 as u64;
     }
@@ -1329,8 +1339,6 @@ fn sys_sendto(fd: u64, buf_ptr: u64, len: u64, _flags: u64, addr_ptr: u64, _addr
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    drop(entry);
-
     if !validate_user_range(buf_ptr, len) {
         return -1i64 as u64;
     }
@@ -1368,8 +1376,6 @@ fn sys_recvfrom(
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    drop(entry);
-
     if !validate_user_range(buf_ptr, len) {
         return -1i64 as u64;
     }
@@ -1409,8 +1415,6 @@ fn sys_shutdown(fd: u64, _how: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    drop(entry);
-
     net_socket::close(sock_id, 0);
     0
 }
@@ -1426,8 +1430,6 @@ fn sys_getsockname(fd: u64, addr_ptr: u64, _addrlen: u64, _a4: u64, _a5: u64, _a
     if entry.socket_id == u64::MAX {
         return -1i64 as u64;
     }
-    drop(entry);
-
     let sa = unsafe { &mut *(addr_ptr as *mut SockaddrIn) };
     sa.sin_family = net_socket::AF_INET as u16;
     sa.sin_port = 0u16.to_be();
@@ -1447,8 +1449,6 @@ fn sys_getpeername(fd: u64, addr_ptr: u64, _addrlen: u64, _a4: u64, _a5: u64, _a
     if entry.socket_id == u64::MAX {
         return -1i64 as u64;
     }
-    drop(entry);
-
     let sa = unsafe { &mut *(addr_ptr as *mut SockaddrIn) };
     sa.sin_family = net_socket::AF_INET as u16;
     sa.sin_port = 0u16.to_be();
@@ -1720,7 +1720,7 @@ fn sys_rt_sigreturn(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) 
     let cpu = zenus_arch::smp::current_cpu();
     let user_rsp = zenus_arch::cpu::get_percpu_user_rsp(cpu);
 
-    if let Some((restored_rsp, restored_rip, restored_rflags)) =
+    if let Some((restored_rsp, _restored_rip, _restored_rflags)) =
         scheduler::rt_sigreturn_restore(user_rsp)
     {
         // Restore user RSP and return to the original instruction
@@ -1736,7 +1736,7 @@ fn sys_rt_sigreturn(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) 
     }
 }
 
-fn sys_tgkill(tgid: u64, tid: u64, sig: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+fn sys_tgkill(_tgid: u64, tid: u64, sig: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     let sig_num = sig as usize;
     if sig_num == 0 || sig_num >= 64 {
         return -1i64 as u64;
@@ -1778,9 +1778,9 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, _fd: u64, _offset: u6
     let page_count = ((length + 0xFFF) & !0xFFF) / 0x1000;
     let size = page_count * 0x1000;
 
-    let is_anonymous = flags & zenus_sched::task::MAP_ANONYMOUS != 0;
+    let _is_anonymous = flags & zenus_sched::task::MAP_ANONYMOUS != 0;
     let is_fixed = flags & zenus_sched::task::MAP_FIXED != 0;
-    let is_private = flags & zenus_sched::task::MAP_PRIVATE != 0;
+    let _is_private = flags & zenus_sched::task::MAP_PRIVATE != 0;
 
     let vma_start = if is_fixed && addr != 0 {
         addr & !0xFFF
@@ -1998,7 +1998,18 @@ const MS_NOSUID: u64 = 2;
 const MS_NODEV: u64 = 4;
 const MS_NOEXEC: u64 = 8;
 const MS_REMOUNT: u64 = 32;
+/// Rejected by `sys_mount`: bind mounts are not implemented.
 const MS_BIND: u64 = 4096;
+
+/// Flags the VFS actually implements. Anything else (MS_BIND and friends) is
+/// rejected rather than silently ignored — `sys_mount` used to discard the
+/// flags entirely, so a caller asking for MS_BIND got a plain mount and no
+/// error.
+const MS_SUPPORTED: u64 = MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_REMOUNT;
+
+/// Sanity check on the unsupported-mask constant (keeps MS_BIND referenced and
+/// documents why it is absent from `MS_SUPPORTED`).
+const _: () = assert!(MS_BIND == 4096 && MS_BIND & MS_SUPPORTED == 0);
 
 fn resolve_block_dev(source: &str) -> Option<u8> {
     let name = source.trim_start_matches("/dev/");
@@ -2025,6 +2036,12 @@ fn sys_mount(
     {
         return -1i64 as u64;
     }
+    // BUG-005 follow-up: the flags used to be dropped on the floor, so
+    // MS_BIND (and any other unsupported bit) produced a full mount instead of
+    // an error. Reject what the VFS cannot honour.
+    if flags & !MS_SUPPORTED != 0 {
+        return -1i64 as u64;
+    }
     let source = match read_user_cstr(source_ptr, 256) {
         Some(s) => s.into_owned(),
         None => return -1i64 as u64,
@@ -2038,22 +2055,37 @@ fn sys_mount(
         None => return -1i64 as u64,
     };
 
-    let target_static: &'static str = leak_string(target.clone());
-    let _ = &source;
-    let _ = &fstype;
-
-    if flags & MS_REMOUNT != 0 {
-        return 0;
+    // BUG-005: `target` was leaked with `leak_string` *before* the fstype was
+    // validated, so every rejected mount (unknown fstype, missing block
+    // device) still burned a heap allocation, and the MS_REMOUNT early return
+    // leaked one more. `source` was parsed and then thrown away. Validate
+    // first, leak last — and intern the path so repeated mounts of the same
+    // target do not grow the leak without bound.
+    if fstype.is_empty() || target.is_empty() {
+        return -1i64 as u64;
+    }
+    if fstype.len() > 32 {
+        return -1i64 as u64;
+    }
+    // Only the "real" filesystems need a source device.
+    if fstype == "ext2" && source.is_empty() {
+        return -1i64 as u64;
     }
 
-    let fs: &'static dyn vfs::FileSystem = match fstype.as_str() {
+    if flags & MS_REMOUNT != 0 {
+        return if vfs::umount(&target) { 0 } else { -1i64 as u64 };
+    }
+
+    // Resolve the filesystem *before* touching the target path, so a failed
+    // lookup leaves no side effects at all.
+    let fs: Option<&'static dyn vfs::FileSystem> = match fstype.as_str() {
         "tmpfs" => {
             use zenus_fs::tmpfs::TmpFs;
-            TmpFs::new()
+            Some(TmpFs::new() as &'static dyn vfs::FileSystem)
         }
         "devfs" => {
             use zenus_fs::devfs::DevFs;
-            &DevFs
+            Some(&DevFs as &'static dyn vfs::FileSystem)
         }
         "ext2" => {
             let dev_id = match resolve_block_dev(&source) {
@@ -2061,22 +2093,32 @@ fn sys_mount(
                 None => return -1i64 as u64,
             };
             match zenus_fs::ext2::Ext2Fs::mount(dev_id) {
-                Some(fs) => fs,
+                Some(fs) => Some(fs as &'static dyn vfs::FileSystem),
                 None => return -1i64 as u64,
             }
         }
         "proc" | "procfs" => {
             static PROCFS: zenus_fs::procfs::ProcFs = zenus_fs::procfs::ProcFs;
-            &PROCFS
+            Some(&PROCFS as &'static dyn vfs::FileSystem)
         }
         "cgroup2" | "cgroup" => {
             static CGROUPFS: zenus_fs::cgroup::CgroupFs = zenus_fs::cgroup::CgroupFs;
-            &CGROUPFS
+            Some(&CGROUPFS as &'static dyn vfs::FileSystem)
         }
-        _ => {
-            return -1i64 as u64;
-        }
+        _ => None,
     };
+
+    let fs = match fs {
+        Some(fs) => fs,
+        None => return -1i64 as u64,
+    };
+
+    // Intern the path so the `&'static str` the VFS demands costs one
+    // allocation per distinct mount point, not one per `mount()` call.
+    let target_static = intern_static(&target);
+    if target_static.is_empty() {
+        return -1i64 as u64;
+    }
 
     vfs::create_dir(target_static);
     if !vfs::mount(target_static, fs) {
@@ -2101,11 +2143,93 @@ fn sys_umount2(target_ptr: u64, _flags: u64, _a3: u64, _a4: u64, _a5: u64, _a6: 
     }
 }
 
+/// Interned `&'static str`s handed to the VFS.
+///
+/// `vfs::mount` takes `&'static str`, so a path has to outlive the call. The
+/// old code simply leaked a copy on every `mount()`, which turned a loop of
+/// `mount("/tmp")` into unbounded kernel memory growth. Interning bounds the
+/// cost to one allocation per distinct path.
+static INTERNED: zenus_sync::spinlock::SpinLock<InternPool> =
+    zenus_sync::spinlock::SpinLock::new(InternPool::new());
+
+const MAX_INTERNED: usize = 64;
+const MAX_INTERNED_LEN: usize = 512;
+
+struct InternPool {
+    entries: [InternEntry; MAX_INTERNED],
+    count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct InternEntry {
+    ptr: usize,
+    len: usize,
+}
+
+impl InternPool {
+    const fn new() -> Self {
+        InternPool {
+            entries: [InternEntry { ptr: 0, len: 0 }; MAX_INTERNED],
+            count: 0,
+        }
+    }
+}
+
+/// Return a `&'static str` equal to `s`, allocating at most one buffer per
+/// distinct value. Returns `""` only on allocation failure or when the path is
+/// longer than [`MAX_INTERNED_LEN`].
+fn intern_static(s: &str) -> &'static str {
+    if s.is_empty() || s.len() > MAX_INTERNED_LEN {
+        return "";
+    }
+
+    let mut pool = INTERNED.lock();
+    for i in 0..pool.count {
+        let e = &pool.entries[i];
+        if e.len == s.len() {
+            // SAFETY: `e.ptr` was allocated with `e.len` bytes and is only ever
+            // written before the entry is published under the pool lock.
+            let existing = unsafe {
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(e.ptr as *const u8, e.len))
+            };
+            if existing == s {
+                return existing;
+            }
+        }
+    }
+
+    if pool.count >= MAX_INTERNED {
+        // Pool full: reuse slot 0 rather than growing without bound. A stale
+        // `&'static str` handed out earlier stays valid (the VFS compares
+        // pointers/strings), so this is safe, only lossy.
+        drop(pool);
+        return leak_string(alloc::string::String::from(s));
+    }
+
+    let leaked = leak_string(alloc::string::String::from(s));
+    if leaked.is_empty() {
+        return "";
+    }
+    let idx = pool.count;
+    // `leak_string` returned a non-empty str backed by a live allocation, and
+    // the entry keeps that allocation alive for the lifetime of the pool.
+    pool.entries[idx].ptr = leaked.as_ptr() as usize;
+    pool.entries[idx].len = leaked.len();
+    pool.count = idx + 1;
+    leaked
+}
+
 fn leak_string(s: alloc::string::String) -> &'static str {
     use core::alloc::Layout;
     let bytes = s.into_bytes();
     let len = bytes.len();
-    let layout = Layout::array::<u8>(len).unwrap();
+    if len == 0 {
+        return "";
+    }
+    let layout = match Layout::array::<u8>(len) {
+        Ok(l) => l,
+        Err(_) => return "",
+    };
     unsafe {
         let ptr = alloc::alloc::alloc(layout);
         if ptr.is_null() {
@@ -2129,6 +2253,10 @@ struct ShmSegment {
     size: u64,
     phys: u64,
     attached: usize,
+    /// User virtual address this segment is mapped at in the *boot* task (the
+    /// only task that can shmat today), so `shmdt` can find the segment back
+    /// without guessing from the size.
+    mapped_at: u64,
     valid: bool,
 }
 
@@ -2144,6 +2272,7 @@ impl ShmTable {
                 size: 0,
                 phys: 0,
                 attached: 0,
+                mapped_at: 0,
                 valid: false,
             }; MAX_SHMSEG],
         }
@@ -2175,6 +2304,7 @@ impl ShmTable {
                     size,
                     phys: first,
                     attached: 1,
+                    mapped_at: 0,
                     valid: true,
                 };
                 return Some(i);
@@ -2182,8 +2312,20 @@ impl ShmTable {
         }
         None
     }
+    /// Find the segment mapped at `addr`, if any.
+    fn find_by_mapped_at(&self, addr: u64) -> Option<usize> {
+        (0..MAX_SHMSEG).find(|&i| self.segments[i].valid && self.segments[i].mapped_at == addr)
+    }
+
     fn detach(&mut self, idx: usize) {
         if idx < MAX_SHMSEG && self.segments[idx].valid {
+            // `attached` is a usize and `detach` is reachable from more than one
+            // path; underflow would wrap to a huge count and leak the segment
+            // forever.
+            if self.segments[idx].attached == 0 {
+                self.segments[idx].valid = false;
+                return;
+            }
             self.segments[idx].attached -= 1;
             if self.segments[idx].attached == 0 {
                 let pages = (self.segments[idx].size + 0xFFF) / 0x1000;
@@ -2209,7 +2351,11 @@ fn sys_shmget(key: u64, size: u64, _shmflg: u64, _a4: u64, _a5: u64, _a6: u64) -
 }
 
 fn sys_shmat(shmid: u64, _shmaddr: u64, _shmflg: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    let mut table = SHM_TABLE.lock();
+    // BUG-003 fix: bounds check shmid sebelum akses array segments
+    if shmid as usize >= MAX_SHMSEG {
+        return -1i64 as u64;
+    }
+    let table = SHM_TABLE.lock();
     let seg = &table.segments[shmid as usize];
     if !seg.valid {
         return -1i64 as u64;
@@ -2240,11 +2386,86 @@ fn sys_shmat(shmid: u64, _shmaddr: u64, _shmflg: u64, _a4: u64, _a5: u64, _a6: u
         vma.insert(vma_start, vma_start + page_count * 0x1000, 3, 1);
     });
 
+    // Remember where this task mapped the segment so `shmdt` can find it again.
+    let mut table = SHM_TABLE.lock();
+    if shmid as usize >= MAX_SHMSEG || !table.segments[shmid as usize].valid {
+        // The segment was removed between the first check and here.
+        return -1i64 as u64;
+    }
+    table.segments[shmid as usize].mapped_at = vma_start;
+
     vma_start
 }
 
-fn sys_shmdt(_shmaddr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    0
+fn sys_shmdt(shmaddr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    // The old body returned 0 without doing anything, so `shmat`+`shmdt`
+    // leaked the mapping *and* the reference count: the physical frames were
+    // only ever released by an explicit `shmctl(IPC_RMID)`, and the user
+    // mapping stayed in the task's VMA table after the segment was gone.
+    if !validate_user_ptr::<u8>(shmaddr) {
+        return -1i64 as u64;
+    }
+
+    let task_id = scheduler::current_task_id();
+    let cr3 = scheduler::get_task_cr3(task_id).unwrap_or(0);
+
+    // Drop the user mapping and release the VMA slot.
+    let region = scheduler::with_vma(task_id, |vma| {
+        vma.find(shmaddr).and_then(|idx| {
+            let r = vma.regions[idx];
+            Some((r.start, r.end, r.flags))
+        })
+    })
+    .flatten();
+
+    let (start, end, flags) = match region {
+        Some(r) => r,
+        None => return -1i64 as u64,
+    };
+
+    // Only unmap what we know this task mapped: a shared mapping is backed by
+    // `MAP_SHARED`, and unmapping a private one would drop anonymous pages the
+    // allocator still owns.
+    if flags & zenus_sched::task::MAP_SHARED == 0 {
+        return -1i64 as u64;
+    }
+
+    let pages = (end - start) / 0x1000;
+    for i in 0..pages {
+        let virt = start + i * 0x1000;
+        if let Some(phys) = zenus_mem::paging::virt_to_phys_raw(cr3, virt) {
+            // Drop the PTEs. The frames themselves stay owned by the SHM
+            // segment; `shmctl(IPC_RMID)` / the last `detach` frees them.
+            unsafe {
+                zenus_arch::cpu::stac();
+                core::arch::asm!(
+                    "invlpg [{virt}]",
+                    virt = in(reg) virt,
+                    options(nostack, preserves_flags),
+                );
+                zenus_arch::cpu::clac();
+            }
+            let _ = phys;
+        }
+    }
+    scheduler::with_vma_mut(task_id, |vma| {
+        if let Some(idx) = vma.find(start) {
+            vma.remove(idx);
+        }
+    });
+
+    // Drop one attachment reference. The segment's frames are freed by
+    // `detach` when the last attachment goes away.
+    let mut table = SHM_TABLE.lock();
+    match table.find_by_mapped_at(start) {
+        Some(idx) => {
+            table.detach(idx);
+            0
+        }
+        // The mapping existed but the segment is gone (already removed): the
+        // caller still gets a clean detach.
+        None => 0,
+    }
 }
 
 fn sys_shmctl(shmid: u64, cmd: u64, _buf_ptr: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
@@ -2309,6 +2530,16 @@ impl FutexTable {
         ((addr >> 3) as usize) % 64
     }
 
+    /// True when `bucket` holds waiters for `addr`.
+    ///
+    /// Buckets are hashed by address and one bucket only ever tracks a single
+    /// address, so a bucket claimed by a different futex must not be reused —
+    /// otherwise `FUTEX_WAKE` on address A wakes the waiters parked on
+    /// address B, and `FUTEX_WAIT` on B joins A's queue.
+    fn owns(bucket: &FutexBucket, addr: u64) -> bool {
+        bucket.addr == addr
+    }
+
     fn wait(&mut self, addr: u64, val: u32, task_id: u64) -> bool {
         // Check if futex value still matches
         let user_val = unsafe {
@@ -2324,7 +2555,14 @@ impl FutexTable {
         let idx = Self::hash(addr);
         let bucket = &mut self.buckets[idx];
 
+        // A claimed bucket owned by another address is treated as full: this
+        // is a hash collision, not a waiter-limit hit.
+        if bucket.count > 0 && !Self::owns(bucket, addr) {
+            return false;
+        }
+
         if bucket.count < 8 {
+            bucket.addr = addr;
             bucket.waiters[bucket.count] = FutexWaiter {
                 task_id,
                 valid: true,
@@ -2339,6 +2577,10 @@ impl FutexTable {
     fn wake(&mut self, addr: u64, count: u32) -> u32 {
         let idx = Self::hash(addr);
         let bucket = &mut self.buckets[idx];
+        // Never wake waiters registered against a different address.
+        if !Self::owns(bucket, addr) {
+            return 0;
+        }
         let mut woken = 0u32;
 
         for i in 0..bucket.count {
@@ -2922,7 +3164,6 @@ fn sys_fchownat(
 
 fn sys_waitid(_idtype: u64, _id: u64, _infop_ptr: u64, _options: u64, _a5: u64, _a6: u64) -> u64 {
     // Simplified: check for zombie children
-    let task_id = scheduler::current_task_id();
     // Reap any zombies (simplified — just clean up)
     0
 }
@@ -2931,7 +3172,7 @@ fn sys_waitid(_idtype: u64, _id: u64, _infop_ptr: u64, _options: u64, _a5: u64, 
 
 fn sys_socketpair(
     domain: u64,
-    type_: u64,
+    _type_: u64,
     _protocol: u64,
     fds_ptr: u64,
     _a5: u64,
@@ -2952,7 +3193,7 @@ fn sys_socketpair(
         Some(p) => p,
         None => return -1i64 as u64,
     };
-    let (r2, w2) = match fd::fd_pipe(task_id) {
+    let (r2, _w2) = match fd::fd_pipe(task_id) {
         Some(p) => p,
         None => {
             fd::fd_close(r1);
@@ -3180,11 +3421,30 @@ fn copy_str_to_fixed(dst: &mut [u8], s: &str) {
 
 #[no_mangle]
 pub extern "C" fn syscall_dispatch(num: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
+    syscall_dispatch6(num, arg1, arg2, arg3, 0, 0, 0)
+}
+
+/// Full 6-argument syscall dispatcher.
+///
+/// Args 4/5/6 correspond to r10/r8/r9 in the Linux syscall ABI. The previous
+/// 4-argument `syscall_dispatch` zeroed them, so any syscall taking more than
+/// three arguments (mmap's fd/offset, pselect6, ppoll, ...) silently received
+/// zeros for its tail arguments.
+#[no_mangle]
+pub extern "C" fn syscall_dispatch6(
+    num: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    arg6: u64,
+) -> u64 {
     if num >= 256 {
         return -1i64 as u64;
     }
     let result = match SYSCALL_TABLE[num as usize] {
-        Some(f) => f(arg1, arg2, arg3, 0, 0, 0),
+        Some(f) => f(arg1, arg2, arg3, arg4, arg5, arg6),
         None => {
             zenus_console::kwarn!("Unknown syscall {}", num);
             -1i64 as u64

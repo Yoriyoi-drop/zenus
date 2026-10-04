@@ -10,6 +10,45 @@ use zenus_arch::cpu;
 #[cfg(feature = "testing")]
 mod test_runner;
 
+#[cfg(feature = "fuzzing")]
+mod fuzz_runner;
+
+/// Boot into a fuzzing campaign instead of the interactive shell.
+///
+/// The `fuzz-*` features are mutually exclusive; each one selects the mode
+/// documented in `doc/fuzzing.md` ("Mode Operasi").
+#[cfg(all(
+    feature = "fuzzing",
+    feature = "fuzz-smoke",
+    not(feature = "fuzz-coverage"),
+    not(feature = "fuzz-regression")
+))]
+const FUZZ_MODE: Option<zenus_fuzz::Mode> = Some(zenus_fuzz::Mode::Smoke);
+#[cfg(all(
+    feature = "fuzzing",
+    feature = "fuzz-coverage",
+    not(feature = "fuzz-smoke"),
+    not(feature = "fuzz-regression")
+))]
+const FUZZ_MODE: Option<zenus_fuzz::Mode> = Some(zenus_fuzz::Mode::Coverage);
+#[cfg(all(
+    feature = "fuzzing",
+    feature = "fuzz-regression",
+    not(feature = "fuzz-smoke"),
+    not(feature = "fuzz-coverage")
+))]
+const FUZZ_MODE: Option<zenus_fuzz::Mode> = None;
+
+/// Run the selected campaign and power the VM off. Never returns.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn run_fuzz_campaign() -> ! {
+    zenus_arch::interrupts::pit::init();
+    match FUZZ_MODE {
+        Some(mode) => fuzz_runner::run_and_exit(mode, mode.default_cases()),
+        None => fuzz_runner::run_regression_and_exit(),
+    }
+}
+
 fn ata_read0(lba: u64, buf: &mut [u8]) -> bool {
     zenus_arch::ata::read_sectors(0, lba, 1, buf)
 }
@@ -101,20 +140,29 @@ static _FORCE_LIMINE: [u64; 0] = [];
 use zenus_arch::interrupts;
 use zenus_arch::smp;
 use zenus_console::serial::SerialPort;
-use zenus_fs::vfs::FileSystem as _;
 use zenus_mem::paging;
 
+// A fuzzing campaign replaces the interactive shell, so the whole shell
+// module is compiled out of those builds.
+#[cfg(not(feature = "fuzzing"))]
 mod shell;
 
 use zenus_mem::frame_allocator;
 use zenus_mem::frame_allocator::MemoryRegion;
 use zenus_sched::scheduler;
 
+/// Reserved slot for a future in-kernel echo service. Never constructed yet —
+/// kept as the shape of the state that service will need.
+#[allow(dead_code)]
 struct EchoState {
     listen_fds: [Option<usize>; 8],
     client_fds: [Option<usize>; 16],
 }
 
+// The bare-metal builds need our panic handler. The host test build
+// (`cargo test --target x86_64-unknown-linux-gnu`) links std, which already
+// provides one — two panic handlers is a duplicate `lang item` error.
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     if let Some(loc) = info.location() {
@@ -139,6 +187,12 @@ fn panic(info: &PanicInfo) -> ! {
 /// and waits for it to complete. This is the same flow as `run`
 /// command but runs before the interactive shell.
 /// Returns true if execution was successful, false otherwise.
+///
+/// Not called from `entry()` yet: the boot sequence that would use it has been
+/// superseded by the shell's `run` command (which is reachable over the
+/// serial console), so this stays here for the next boot-time autostart hook
+/// instead of being deleted.
+#[allow(dead_code)]
 fn boot_run_userspace(path: &str) -> bool {
     use zenus_fs::vfs;
     use zenus_mem::paging;
@@ -274,6 +328,7 @@ fn boot_run_userspace(path: &str) -> bool {
     false
 }
 
+#[cfg(not(feature = "fuzzing"))]
 fn shell_task() {
     // Skip userspace test programs for now, go straight to interactive shell
     let mut shell = shell::Shell::new();
@@ -375,11 +430,13 @@ pub extern "C" fn entry() -> ! {
     let apic_base_raw = unsafe { cpu::read_msr(0x1B) };
     let apic_base = apic_base_raw & 0xFFFFF000;
     interrupts::apic::init_with_virt(apic_base + hhdm_offset);
-    // Use PIT → PIC → ExtINT for timer interrupts (stable, tested).
-    // PIT IRQ0 and IRQ1 stay unmasked (PIC mask 0xFC from remap_pic).
-    // PIC EOI is sent in schedule_tick to prevent interrupt flooding.
+    // Tick source: the LAPIC timer drives vector 32 directly. The old
+    // PIT → 8259 → LINT0/ExtINT chain could wedge permanently (a latched
+    // in-service bit that only an EOI clears), and then the machine just
+    // sat in `hlt` with interrupts enabled and no faults at all.
+    // PIT stays initialised so pit::get_ticks() (uptime) keeps counting.
     interrupts::pit::init();
-    interrupts::apic::enable_pic_lint0();
+    interrupts::apic::enable_tick_source(32);
     zenus_arch::rtc::init();
     zenus_arch::rtc::cache_boot_epoch();
     zenus_arch::random::init_rng();
@@ -396,7 +453,7 @@ pub extern "C" fn entry() -> ! {
     // Route IRQ4 (COM1) through IOAPIC → vector 36, then enable IER bit 0.
     if zenus_arch::interrupts::ioapic::is_initialized() {
         let apic_id = zenus_arch::interrupts::apic::current_apic_id() as u8;
-        if zenus_arch::interrupts::ioapic::route_irq(4, 36u8, apic_id) {
+        if zenus_arch::interrupts::ioapic::route_irq(4, zenus_arch::interrupts::SERIAL_VECTOR, apic_id) {
             zenus_console::kinfo!("Serial IRQ4 -> vector 36 (IOAPIC)");
         } else {
             zenus_console::kwarn!("Serial IRQ4 -> IOAPIC FAILED");
@@ -550,6 +607,11 @@ pub extern "C" fn entry() -> ! {
         zenus_sync::lockdep::lockdep_init();
         zenus_arch::watchdog::watchdog_init(zenus_arch::watchdog::WatchdogType::Software, 30);
 
+        // Give the journal a real write barrier: the PIO ATA path completes a
+        // write before returning, so `bc_flush()` is already a barrier there.
+        // virtio-blk may reorder, so it gets a real FLUSH request.
+        zenus_fs::journal::set_device_flush(zenus_virtio::blk::blk_flush);
+
         if zenus_arch::ata::device_count() > 0 {
             zenus_fs::journal::journal_replay(0, 3000);
             if zenus_fs::journal::journal_init(0, 3000, 16) {}
@@ -570,13 +632,23 @@ pub extern "C" fn entry() -> ! {
         zenus_console::kinfo!("Zenus OS booted");
         zenus_console::serial::flush_output_blocking();
 
+        // Fuzzing builds replace the shell with a campaign: run it after every
+        // subsystem is initialised (the filesystem/memory/scheduler fuzzers
+        // need them) and before any user-facing task exists. The campaign ends
+        // in `poweroff()`, so nothing below it runs.
+        #[cfg(feature = "fuzzing")]
+        run_fuzz_campaign();
+
         // Create shell as a scheduled task for preemptive multitasking.
         // The scheduler will manage the shell via idle → yield → shell
         // cycle, enabling timer-based preemption.
-        let _shell_tid = scheduler::create_task_named(shell_task, 65536, "shell");
-        zenus_console::kinfo!("Shell PID={}", _shell_tid);
+        #[cfg(not(feature = "fuzzing"))]
+        {
+            let _shell_tid = scheduler::create_task_named(shell_task, 65536, "shell");
+            zenus_console::kinfo!("Shell PID={}", _shell_tid);
 
-        run_after_init()
+            run_after_init()
+        }
     }
 }
 
@@ -647,7 +719,7 @@ pub extern "C" fn entry() -> ! {
     zenus_arch::keyboard::init();
     if zenus_arch::interrupts::ioapic::is_initialized() {
         let apic_id = zenus_arch::interrupts::apic::current_apic_id() as u8;
-        if zenus_arch::interrupts::ioapic::route_irq(4, 36u8, apic_id) {
+        if zenus_arch::interrupts::ioapic::route_irq(4, zenus_arch::interrupts::SERIAL_VECTOR, apic_id) {
             zenus_console::kinfo!("Serial IRQ4 -> vector 36 (IOAPIC)");
         } else {
             zenus_console::kwarn!("Serial IRQ4 -> IOAPIC FAILED");
@@ -701,7 +773,7 @@ pub extern "C" fn entry() -> ! {
 // `entry()` which runs `test_runner` directly, so this function must not
 // reference `test_runner` when the feature is off — `cfg!()` is a runtime
 // boolean and would still typecheck (and link) the testing branch.
-#[cfg(not(feature = "testing"))]
+#[cfg(all(not(feature = "testing"), not(feature = "fuzzing")))]
 fn run_after_init() -> ! {
     loop {
         scheduler::idle();
@@ -721,6 +793,11 @@ fn run_after_init() -> ! {
     }
 }
 
+// The Limine entry symbol. Only the bare-metal kernel gets it: the host test
+// build of this crate links the C runtime, which already defines `_start`, so
+// leaving this ungated was a `duplicate symbol _start` link error and made the
+// `#[cfg(not(test))]` panic handler above pointless.
+#[cfg(target_os = "none")]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     entry()

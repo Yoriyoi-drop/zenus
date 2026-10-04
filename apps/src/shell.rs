@@ -118,14 +118,20 @@ impl Writer for ShellWriter {
     }
 
     fn write_u64(&mut self, v: u64) {
+        // Serial first: `SerialPort::write_u64` already handles v == 0.
+        // The old zero branch pushed a second `b'0'` onto the serial AFTER
+        // that, so every zero printed as "00" on serial (`uptime` showed
+        // `00 days, 00:000:34`, `meminfo` showed `Used: 00 frames`), and it
+        // returned before the VGA write, leaving the text console blank.
         self.serial.write_u64(v);
+        if v == 0 {
+            zenus_console::display::write_str("0");
+            zenus_console::serial::flush_output();
+            return;
+        }
         let mut buf = [0u8; 20];
         let mut i = 20;
         let mut n = v;
-        if n == 0 {
-            self.serial.write_byte_serial(b'0');
-            return;
-        }
         while n > 0 {
             i -= 1;
             buf[i] = b'0' + (n % 10) as u8;
@@ -145,23 +151,30 @@ impl Writer for ShellWriter {
         }
     }
 
+    /// Renders `0x` + minimal-width lowercase hex, and sends the SAME text to
+    /// serial and VGA.
+    ///
+    /// The old body called `SerialPort::write_hex` (which emits `0x` plus 16
+    /// zero-padded UPPERCASE digits) and then rendered a separate unpadded
+    /// lowercase string for the VGA. Serial and the text console therefore
+    /// disagreed on both width and case for every hex value printed.
     fn write_hex(&mut self, v: u64) {
-        self.serial.write_hex(v);
-        let mut buf = [0u8; 16];
-        let mut i = 16;
-        let mut started = false;
+        let mut buf = [0u8; 18];
+        buf[0] = b'0';
+        buf[1] = b'x';
         const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut i = 2;
+        let mut started = false;
         for s in (0..16).rev() {
             let nib = ((v >> (s * 4)) & 0xf) as u8;
             if nib != 0 || started || s == 0 {
-                i -= 1;
                 buf[i] = HEX[nib as usize];
+                i += 1;
                 started = true;
             }
         }
-        let s = core::str::from_utf8(&buf[i..]).unwrap_or("");
-        zenus_console::display::write_str(s);
-        zenus_console::serial::flush_output();
+        let s = core::str::from_utf8(&buf[..i]).unwrap_or("0x0");
+        self.write_str(s);
     }
 
     fn write_ip(&mut self, ip: [u8; 4]) {
@@ -1044,11 +1057,12 @@ impl Shell {
         w.write_str("\r\n");
         if status.class_count > 0 {
             w.write_str("  Lock classes:\r\n");
-            for i in 0..status.class_count {
+            // Class IDs are 1-based; `classes[0]` is the unused sentinel slot.
+            for id in 1..=status.class_count {
                 w.write_str("    [");
-                w.write_u64(i as u64);
+                w.write_u64(id as u64);
                 w.write_str("] ");
-                w.write_str(status.classes[i]);
+                w.write_str(status.classes[id]);
                 w.write_str("\r\n");
             }
         }
@@ -1420,7 +1434,7 @@ impl Shell {
         //   argv[1..] = remaining args from command line
         let max_strings = 32usize;
         let mut argv_strings: [&str; 32] = [""; 32];
-        let mut argv_count = 0usize;
+        let mut argv_count;
 
         argv_strings[0] = path;
         argv_count = 1;

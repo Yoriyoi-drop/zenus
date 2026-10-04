@@ -1,0 +1,19 @@
+[package]
+name = "zenus-fuzz"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+zenus-syscall = { path = "../zenus-syscall" }
+zenus-mem = { path = "../zenus-mem" }
+zenus-fs = { path = "../zenus-fs" }
+zenus-sched = { path = "../zenus-sched" }
+zenus-sync = { path = "../zenus-sync" }
+zenus-console = { path = "../zenus-console" }
+zenus-arch = { path = "../zenus-arch" }
+x86_64 = { workspace = true }
+
+[features]
+default = []
+testing = []

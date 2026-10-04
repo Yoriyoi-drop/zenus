@@ -187,6 +187,23 @@ impl OutBuf {
 /// or in panic/crash paths where buffer state is suspect.
 pub fn uart_write_byte_emergency(byte: u8) {
     unsafe {
+        // Wait for the transmit-holding register to drain. Without this the
+        // `out` is issued while the previous byte is still buffered, and the
+        // 16550 simply drops it — which is why the emergency panic dumps came
+        // out as isolated words with the numbers missing.
+        let mut spins = 0u32;
+        loop {
+            let lsr: u8;
+            core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16, options(nostack, preserves_flags));
+            if lsr & 0x20 != 0 {
+                break;
+            }
+            spins += 1;
+            if spins > 100_000 {
+                break; // UART wedged: write anyway rather than hang forever
+            }
+            core::hint::spin_loop();
+        }
         core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte, options(nostack, preserves_flags));
     }
 }
@@ -196,6 +213,20 @@ fn uart_write_byte(byte: u8) {
     unsafe {
         core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte, options(nostack, preserves_flags));
     }
+}
+
+/// Append ONE complete formatted line to the output buffer under a single
+/// lock acquisition.
+///
+/// `writeln!(SerialPort, ...)` calls `write_str` once per format chunk and
+/// each call takes `OUTPUT_BUF` separately, so on SMP a second CPU could
+/// lock, push its own line and flush between two chunks of the first CPU's
+/// line — the serial log came out as `[[WARN INFO ][][zenus_arch::...`
+/// during AP bring-up. Appending the whole line at once makes lines
+/// atomic: a flush can only ever see whole lines.
+pub fn push_output_line(bytes: &[u8]) {
+    let mut ob = OUTPUT_BUF.lock();
+    ob.push(bytes);
 }
 
 /// Flush output buffer using try_lock(). Safe to call from timer ISR —

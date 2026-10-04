@@ -3,6 +3,24 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, Pag
 use zenus_console::serial::SerialPort;
 
 use crate::gdt;
+use crate::fuzz_guard;
+
+/// Fuzzing containment hook. Every CPU exception handler must call this
+/// *before* doing anything else: while a fuzz checkpoint is armed the fault is
+/// a test-case result, not a system failure, and the handler must resume the
+/// campaign instead of panicking. Returns true when the handler should stop —
+/// the call then never returns.
+#[inline]
+fn fuzz_contain(vector: u64, frame: &InterruptStackFrame, addr: u64, err: u64) -> bool {
+    if !fuzz_guard::should_recover() {
+        return false;
+    }
+    // SAFETY: `should_recover` returned true, so a checkpoint is armed on this
+    // CPU. `recover_to_checkpoint` restores that checkpoint and never returns.
+    unsafe {
+        fuzz_guard::recover_to_checkpoint(vector, frame.instruction_pointer.as_u64(), addr, err);
+    }
+}
 
 fn is_kernel_addr(addr: u64) -> bool {
     addr >= 0xFFFF800000000000
@@ -64,11 +82,9 @@ pub fn init() {
     // that falls through past a syscall (or other instruction) will hit
     // int3 padding. Without DPL=3, this becomes a silent #GP instead of
     // a debuggable breakpoint trap.
-    unsafe {
-        idt.breakpoint
-            .set_handler_fn(breakpoint_handler)
-            .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
-    }
+    idt.breakpoint
+        .set_handler_fn(breakpoint_handler)
+        .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
     idt.overflow.set_handler_fn(overflow_handler);
     idt.bound_range_exceeded.set_handler_fn(bound_range_handler);
     idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
@@ -95,13 +111,8 @@ pub fn init() {
     idt.virtualization.set_handler_fn(virtualization_handler);
 
     // IRQ 0-15 mapped to vectors 32-47
-    // Vector 32: PIT timer — registered but timer ISR is intentionally
-    // disabled (PIC IRQ0 masked). IST is NOT used here because IST would
-    // switch to a dedicated stack and never restore RSP on kernel→kernel
-    // return, leaving the interrupted task on the wrong stack.
-    // When preemptive multitasking is needed, this entry should use the
-    // red-zone protection approach (sub rsp, 128 in the ISR stub) and
-    // each task must have its own kernel stack for proper IST semantics.
+    // Vector 32: preemption timer (LAPIC timer). Runs on the dedicated IST
+    // stack — see the comment on the entry below.
     unsafe {
         extern "C" {
             static apic_timer_isr_stub: u8;
@@ -111,24 +122,63 @@ pub fn init() {
             .set_handler_addr(x86_64::VirtAddr::new(addr))
             .disable_interrupts(true)
             .set_privilege_level(x86_64::PrivilegeLevel::Ring0);
+        // NOTE: deliberately NO IST here. With an IST stack the CPU pushes
+        // the frame on the shared per-CPU IST stack, so every task's saved
+        // context would live at the same address and the next timer tick
+        // overwrote it (frame with a garbage CS, kernel dies). The TSS.RSP0
+        // design is what keeps each task's saved context on its own stack.
     }
     idt[33].set_handler_fn(super::handler::interrupt_keyboard);
     idt[39].set_handler_fn(super::handler::interrupt_spurious);
 
-    // NIC interrupt (vector 43 = IRQ 11)
-    idt[43].set_handler_fn(super::handler::interrupt_nic);
+    // Every remaining vector gets an ack-and-return handler. A zeroed IDT
+    // slot makes the CPU jump to address 0 on the first stray interrupt
+    // (QEMU raises IRQ7 spuriously and a PIC EOI from the wrong CPU can
+    // re-aim a line), which showed up as APs executing garbage.
+    // SAFETY: the IDT is a `static mut` and this is the only place that writes
+    // the stray-vector slots, during single-threaded `init()`.
+    unsafe {
+        let stray = super::handler::interrupt_stray as *const () as u64;
+        for vec in 34u8..=255u8 {
+            if super::RESERVED_VECTORS.contains(&vec) {
+                continue;
+            }
+            idt[vec].set_handler_addr(x86_64::VirtAddr::new(stray));
+        }
+    }
 
-    // Serial (UART) interrupt (vector 36 = IRQ 4 for COM1)
-    idt[36].set_handler_fn(super::handler::interrupt_serial);
+    // NIC interrupt — vector is fixed (see `interrupts::NIC_VECTOR`), the
+    // driver routes whatever IRQ line the device reports onto it.
+    idt[super::NIC_VECTOR].set_handler_fn(super::handler::interrupt_nic);
+
+    // Serial (UART) interrupt (IRQ 4 for COM1)
+    idt[super::SERIAL_VECTOR].set_handler_fn(super::handler::interrupt_serial);
 
     idt.load();
 }
 
+/// Load the kernel IDT on a secondary CPU (AP).
+///
+/// IDTR is a per-CPU register. `init()` only loads it on the BSP; an AP
+/// that takes any interrupt/exception with a null IDTR double-faults and
+/// then triple-faults (observed in qemu `-d cpu_reset`: IDT=00000000
+/// on every AP during wake_aps). Call this on each AP after `gdt::init_ap()`
+/// (the double-fault/timer entries use IST, which needs the AP's TSS
+/// loaded) and before enabling interrupts.
+pub fn load_ap() {
+    unsafe {
+        let idt = &*IDT.as_ptr();
+        idt.load();
+    }
+}
+
 extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) {
+    if fuzz_contain(0, &frame, 0, 0) {}
     kpanic("Divide Error", frame);
 }
 
 extern "x86-interrupt" fn debug_handler(frame: InterruptStackFrame) {
+    if fuzz_contain(1, &frame, 0, 0) {}
     kpanic("Debug", frame);
 }
 
@@ -147,14 +197,17 @@ extern "x86-interrupt" fn breakpoint_handler(_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn overflow_handler(frame: InterruptStackFrame) {
+    if fuzz_contain(4, &frame, 0, 0) {}
     kpanic("Overflow", frame);
 }
 
 extern "x86-interrupt" fn bound_range_handler(frame: InterruptStackFrame) {
+    if fuzz_contain(5, &frame, 0, 0) {}
     kpanic("Bound Range", frame);
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
+    if fuzz_contain(6, &frame, 0, 0) {}
     kpanic("Invalid Opcode", frame);
 }
 
@@ -183,18 +236,22 @@ extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code
 }
 
 extern "x86-interrupt" fn invalid_tss_handler(frame: InterruptStackFrame, _code: u64) {
+    if fuzz_contain(10, &frame, 0, 0) {}
     kpanic("Invalid TSS", frame);
 }
 
 extern "x86-interrupt" fn segment_not_present_handler(frame: InterruptStackFrame, _code: u64) {
+    if fuzz_contain(11, &frame, 0, 0) {}
     kpanic("Segment Not Present", frame);
 }
 
 extern "x86-interrupt" fn stack_segment_handler(frame: InterruptStackFrame, _code: u64) {
+    if fuzz_contain(12, &frame, 0, 0) {}
     kpanic("Stack Segment Fault", frame);
 }
 
 extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
+    if fuzz_contain(13, &frame, 0, _code) {}
     let s = SerialPort::new(0x3F8);
     let stk = frame.stack_pointer.as_u64();
     s.write_str("\n[GPF] RIP: ");
@@ -367,6 +424,12 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
     }
 
     let addr = x86_64::registers::control::Cr2::read_raw();
+
+    // Fuzz containment comes first: while a checkpoint is armed, a page fault
+    // is the fuzzer's test-case outcome. It must NOT be routed into the
+    // user-fault recovery path below — that path may map a page and retry the
+    // faulting instruction forever.
+    if fuzz_contain(14, &frame, addr, code.bits() as u64) {}
 
     if try_handle_user_page_fault(addr, code) {
         return;

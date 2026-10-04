@@ -1,7 +1,13 @@
 #![no_std]
+// The host test harness needs std; the bare-metal build must not pull it in.
+#[cfg(test)]
+extern crate std;
+
 
 use zenus_net::nic;
 use zutils_common::{Args, Writer};
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
 
 pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     let count = nic::iface_count();
@@ -15,7 +21,11 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
                 if j > 0 {
                     w.write_byte(b':');
                 }
-                w.write_hex(*b as u64);
+                // Two hex digits per octet. `write_hex` emits `0x` plus 16
+                // zero-padded digits, which printed every octet as
+                // `0x0000000000000052`.
+                w.write_byte(HEX[(b >> 4) as usize]);
+                w.write_byte(HEX[(b & 0xF) as usize]);
             }
             w.write_str("\r\n  IP: ");
             w.write_ip(iface.ip);

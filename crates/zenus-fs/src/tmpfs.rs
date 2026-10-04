@@ -247,6 +247,15 @@ impl FileSystem for TmpFs {
         let mut child = nodes[pidx].first_child as usize;
         while child != 0 {
             if name_matches(&nodes[child], name) {
+                // POSIX `rmdir` semantics: a directory that still has children
+                // is not empty and cannot be removed. Unlinking it anyway made
+                // `rm -r /dir/b` leave `/dir` reporting success while `/dir/b`
+                // became unreachable — an orphaned subtree, not a deletion.
+                if nodes[child].file_type == FileType::Directory
+                    && nodes[child].first_child != 0
+                {
+                    return false;
+                }
                 if prev == 0 {
                     nodes[pidx].first_child = nodes[child].next_sibling;
                 } else {
