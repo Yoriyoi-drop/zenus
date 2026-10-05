@@ -949,11 +949,9 @@ fn sys_waitpid(pid: u64, status_ptr: u64, options: u64, _a4: u64, _a5: u64, _a6:
         match result {
             Some((child_pid, exit_code)) => {
                 // Write exit status to user space
-                if status_ptr != 0 && validate_user_range(status_ptr, 4) {
+                if status_ptr != 0 {
                     let status = ((exit_code & 0xFF) << 8) as u32;
-                    unsafe {
-                        *(status_ptr as *mut u32) = status;
-                    }
+                    copy_u32_to_user(status, status_ptr);
                 }
                 return child_pid;
             }
@@ -1506,10 +1504,8 @@ fn sys_recvfrom(
                 sa.sin_addr = [0; 4];
                 sa.sin_zero = [0; 8];
             }
-            if addrlen_ptr != 0 && validate_user_range(addrlen_ptr, 4) {
-                unsafe {
-                    *(addrlen_ptr as *mut u32) = core::mem::size_of::<SockaddrIn>() as u32;
-                }
+            if addrlen_ptr != 0 {
+                copy_u32_to_user(core::mem::size_of::<SockaddrIn>() as u32, addrlen_ptr);
             }
             n as u64
         }
@@ -1782,6 +1778,40 @@ fn sys_rt_sigaction(
     0
 }
 
+/// Write a scalar to a user pointer, with the per-page revalidation
+/// [`copy_kernel_to_user`] does.
+///
+/// `validate_user_range` on its own only checks that the address sits inside the
+/// user range. It does **not** check that the page is mapped. So the common
+/// shape
+///
+/// ```text
+/// if validate_user_range(ptr, 8) { *(ptr as *mut u64) = value; }
+/// ```
+///
+/// takes a kernel `#PF` on any in-range-but-unmapped pointer — and with SMAP
+/// off there is no `stac` fixup path that could turn it into `EFAULT`. The
+/// fuzzing campaign found exactly that: `rt_sigprocmask` writing to `0x7075`,
+/// which is inside the user range and mapped by nothing.
+///
+/// A syscall that writes to a user buffer must go through here, so a bad pointer
+/// is `EFAULT` instead of a fault in ring 0.
+fn copy_u64_to_user(value: u64, user_ptr: u64) -> bool {
+    copy_kernel_to_user(&value.to_ne_bytes(), user_ptr)
+}
+
+fn copy_u32_to_user(value: u32, user_ptr: u64) -> bool {
+    copy_kernel_to_user(&value.to_ne_bytes(), user_ptr)
+}
+
+/// Two adjacent `u64`s, as `pipe`/`pipe2`/`socketpair` write them.
+fn copy_u64_pair_to_user(first: u64, second: u64, user_ptr: u64) -> bool {
+    let mut buf = [0u8; 16];
+    buf[0..8].copy_from_slice(&first.to_ne_bytes());
+    buf[8..16].copy_from_slice(&second.to_ne_bytes());
+    copy_kernel_to_user(&buf, user_ptr)
+}
+
 fn sys_rt_sigprocmask(
     how: u64,
     set_ptr: u64,
@@ -1793,10 +1823,10 @@ fn sys_rt_sigprocmask(
     let task_id = scheduler::current_task_id();
 
     // Save old mask
-    if oldset_ptr != 0 && validate_user_range(oldset_ptr, 8) {
+    if oldset_ptr != 0 {
         let old_mask = scheduler::get_signal_mask(task_id);
-        unsafe {
-            *(oldset_ptr as *mut u64) = old_mask;
+        if !copy_u64_to_user(old_mask, oldset_ptr) {
+            return -1i64 as u64;
         }
     }
 
@@ -2932,15 +2962,11 @@ fn sys_getsockopt(
     optlen_ptr: u64,
     _a6: u64,
 ) -> u64 {
-    if optval_ptr != 0 && validate_user_range(optval_ptr, 4) {
-        unsafe {
-            *(optval_ptr as *mut u32) = 0;
-        }
+    if optval_ptr != 0 && !copy_u32_to_user(0, optval_ptr) {
+        return -1i64 as u64;
     }
-    if optlen_ptr != 0 && validate_user_range(optlen_ptr, 4) {
-        unsafe {
-            *(optlen_ptr as *mut u32) = 4;
-        }
+    if optlen_ptr != 0 && !copy_u32_to_user(4, optlen_ptr) {
+        return -1i64 as u64;
     }
     0
 }
@@ -3371,9 +3397,10 @@ fn sys_socketpair(
         }
     };
 
-    unsafe {
-        *(fds_ptr as *mut u64) = r1;
-        *(fds_ptr as *mut u64).add(1) = r2;
+    if !copy_u64_pair_to_user(r1, r2, fds_ptr) {
+        fd::fd_close(r1);
+        fd::fd_close(r2);
+        return -1i64 as u64;
     }
 
     0
@@ -3572,9 +3599,10 @@ fn sys_pipe2(fds_ptr: u64, _flags: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) 
     let task_id = scheduler::current_task_id();
     match fd::fd_pipe(task_id) {
         Some((r, w)) => {
-            unsafe {
-                *(fds_ptr as *mut u64) = r;
-                *(fds_ptr as *mut u64).add(1) = w;
+            if !copy_u64_pair_to_user(r, w, fds_ptr) {
+                fd::fd_close(r);
+                fd::fd_close(w);
+                return -1i64 as u64;
             }
             0
         }
@@ -3632,8 +3660,8 @@ pub extern "C" fn syscall_signal_hook(kernel_rsp: u64) {
 #[cfg(test)]
 mod host_tests {
     use super::{
-        brk_action, checked_array_len, mount_flags_from_syscall, BrkAction, MAX_XFER,
-        MS_NODEV, MS_NOSUID, MS_NOEXEC, USER_SPACE_LIMIT,
+        brk_action, checked_array_len, mount_flags_from_syscall, validate_user_range, BrkAction,
+        MAX_XFER, MS_NODEV, MS_NOSUID, MS_NOEXEC, USER_SPACE_LIMIT,
     };
     use super::MS_RDONLY as SYSCALL_MS_RDONLY;
 
@@ -3726,6 +3754,89 @@ mod host_tests {
         assert_eq!(
             mount_flags_from_syscall(SYSCALL_MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC),
             VFS_MS_RDONLY
+        );
+    }
+
+    /// Regression, found by the in-kernel fuzzing campaign: `rt_sigprocmask`
+    /// wrote `*(oldset_ptr as *mut u64) = mask` after `validate_user_range`,
+    /// which only checks that the address is inside the user range — not that
+    /// the page is mapped. The fuzzer passed `0x7075`, and the kernel took a
+    /// page fault in ring 0 instead of returning `EFAULT`.
+    ///
+    /// Six sites had that shape: `wait4` status, `getsockname` addrlen,
+    /// `rt_sigprocmask` oldset, `getsockopt` optval/optlen, `socketpair` fds,
+    /// `pipe2` fds. They now go through `copy_kernel_to_user`, which
+    /// revalidates each page.
+    ///
+    /// The store itself needs a live page table, so what is locked in here is
+    /// the *invariant*: no syscall may reach through a raw pointer store into
+    /// user space. A source scan catches a new site the day it is added, which
+    /// is the only way this can be enforced from the host.
+    #[test]
+    fn no_syscall_writes_to_user_space_through_a_raw_pointer() {
+        // Assembled from pieces so this test's own needles do not appear
+        // verbatim in the file it scans — otherwise it finds itself.
+        const NEEDLES: [&str; 3] = [
+            concat!("as *mut u64", ") ="),
+            concat!("as *mut u32", ") ="),
+            concat!("as *mut u8", ") ="),
+        ];
+        let source = include_str!("syscall.rs");
+
+        // The only remaining raw stores are the ELF loader writing the initial
+        // user stack of an address space it just created. Those addresses come
+        // from `loaded.stack_top`, not from the caller.
+        let allowed = [
+            concat!("*((argv_pos) as *mut u64", ") = str_cur2;"),
+            concat!("*((argv_pos) as *mut u64", ") = str_cur_pos;"),
+            concat!("*((argv_array_start + argc as u64 * 8) as *mut u64", ") = 0;"),
+            concat!("*((user_rsp) as *mut u64", ") = argc as u64;"),
+        ];
+
+        for (lineno, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            if !NEEDLES.iter().any(|n| trimmed.contains(n)) {
+                continue;
+            }
+            // Skip the doc comment that quotes the old shape as prose.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            assert!(
+                allowed.iter().any(|a| trimmed.contains(a)),
+                "syscall.rs:{} writes to a user pointer directly: {}. Route it \
+                 through copy_kernel_to_user (or copy_u64_to_user / \
+                 copy_u32_to_user / copy_u64_pair_to_user), so an \
+                 in-range-but-unmapped pointer becomes EFAULT instead of a page \
+                 fault in ring 0.",
+                lineno + 1,
+                trimmed
+            );
+        }
+    }
+
+    /// The copy helpers refuse exactly what `validate_user_range` already
+    /// refuses, so the two cannot disagree about what is addressable. And a
+    /// pointer *inside* the range passes the range check — which is precisely
+    /// why the helpers need their per-page revalidation on top.
+    #[test]
+    fn a_scalar_copy_helper_and_the_range_check_agree_on_what_is_addressable() {
+        for (ptr, why) in [
+            (0u64, "null"),
+            (0x800, "below the first page"),
+            (USER_SPACE_LIMIT, "exactly at the limit"),
+            (USER_SPACE_LIMIT + 0x1000, "past the limit"),
+            (u64::MAX - 4, "address space wraps"),
+        ] {
+            assert!(
+                !validate_user_range(ptr, 8),
+                "{why}: {ptr:#x} must not pass the range check"
+            );
+        }
+
+        assert!(
+            validate_user_range(0x7075, 8),
+            "0x7075 is in range — this is the case that used to fault"
         );
     }
 

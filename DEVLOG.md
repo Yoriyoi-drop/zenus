@@ -1049,6 +1049,81 @@ output serial di atas, dan itu direkam.
 
 ---
 
+### BUG-022 — enam syscall menulis ke user pointer tanpa cek halaman ter-map
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — page fault di ring 0, bukan `EFAULT`
+**Ditemukan oleh:** `make fuzz-smoke` (BUG-020 membuatnya bisa jalan)
+**Test:** `crates/zenus-syscall/src/syscall.rs` → `syscall::host_tests`
+- `no_syscall_writes_to_user_space_through_a_raw_pointer`
+- `a_scalar_copy_helper_and_the_range_check_agree_on_what_is_addressable`
+
+**Di mana:** `sys_wait4` (status), `sys_getsockname` (addrlen),
+`sys_rt_sigprocmask` (oldset), `sys_getsockopt` (optval + optlen),
+`sys_socketpair` (fds), `sys_pipe2` (fds)
+
+```rust
+// bentuk yang dipakai keenamnya
+if validate_user_range(ptr, 8) {
+    *(ptr as *mut u64) = value;
+}
+```
+
+**Yang salah:** `validate_user_range` hanya memeriksa bahwa alamatnya **di
+dalam rentang user** — `ptr >= 0x1000` dan ujungnya `< USER_SPACE_LIMIT`.
+Ia tidak memeriksa bahwa halamannya ter-map. Setelah itu, store langsung
+menulis lewat pointer.
+
+Jadi pointer in-range tapi tidak ter-map → `#PF` di ring 0, bukan `EFAULT`.
+Dan karena SMAP **dimatikan** (`SECURITY.md` gap #1), tidak ada jalur fixup
+`stac` yang bisa mengubahnya jadi error syscall. Program yang mengirim
+pointer seperti itu menjatuhkan kernel, bukan menerima `EFAULT`.
+
+`copy_kernel_to_user` sudah benar sejak awal: ia `checked_add` rentangnya,
+mengambil CR3, lalu **revalidasi per halaman** dengan `virt_to_phys_raw`
+sebelum setiap chunk. `SECURITY.md` bahkan menyebutnya sebagai kontrol yang
+dipakai. Enam call site itu tidak memakainya — mereka hanya memakai
+`validate_user_range` yang hanya setengah-setengah.
+
+**Bukti dari fuzzer:**
+
+```
+[FUZZ] CRASH ZENUS-FUZZ-000002 subsystem=0 type=PAGE_FAULT vector=14
+  rip=0xffffffff80029b8f addr=0x7075 err=0x2
+  args=[0, 4, 2f, 6d, 6e, 74, 0, 0, ...]
+```
+
+`addr=0x7075` in-range, tidak ter-map. `err=0x2` = write dari user. `rip`
+mengarah ke `sys_rt_sigprocmask` (`addr2line` →
+`crates/zenus-syscall/src/syscall.rs:1799`, yang persis baris
+`*(oldset_ptr as *mut u64) = old_mask;`). `args` mulai `[0, 4, '/', 'm',
+'n', 't']` = path "/mnt" — input fuzzer yang memancingnya.
+
+**Fix:** tiga helper — `copy_u64_to_user`, `copy_u32_to_user`,
+`copy_u64_pair_to_user` — semuanya menyeberang ke `copy_kernel_to_user`, jadi
+mendapat revalidasi per halaman. `rt_sigprocmask`, `getsockopt` dan `pipe2`/
+`socketpair` sekarang mengembalikan `-1` kalau copy-nya gagal (dan
+`socketpair`/`pipe2` menutup fd yang sudah dibuat, supaya tidak bocor).
+
+**Yang sengaja tidak diubah:** empat store di `execve` yang menulis stack awal
+user milik address space yang baru dibuat loader. Alamatnya dari
+`loaded.stack_top`, bukan dari caller.
+
+**Test:** store-nya sendiri butuh page table hidup, jadi yang dikunci di sini
+adalah **invariant**-nya — tidak ada syscall yang boleh menembak lewat store
+pointer mentah ke user space. `include_str!("syscall.rs")` + pemindaian
+menangkap site baru pada hari yang sama. Needle-nya dirakit dari
+`concat!` supaya test ini tidak mendeteksi dirinya sendiri. Diverifikasi gagal
+sebelum fix (satu site dikembalikan ke bentuk lama → 1 FAILED).
+
+Bug kedua yang ketemu di file yang sama: `execve` punya **dua** loop yang
+menulis argv pointer array. Loop pertama ("Actually let me rewrite more
+carefully" mengikutinya) langsung ditimpa, dan `str_cur2` di loop pertama
+menghitung indeks dari pointer yang sudah digeser — logika yang salah tapi
+tidak terlihat. Tidak disentuh di commit ini; layak cleanup tersendiri.
+
+---
+
 ## Lapisan verifikasi: apa yang benar-benar jalan
 
 | Lapisan | Status | Catatan |
