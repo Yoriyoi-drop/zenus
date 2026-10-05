@@ -9,6 +9,27 @@ use fd::*;
 const USER_SPACE_LIMIT: u64 = 0x0000_8000_0000_0000;
 const MAX_PATH_LEN: usize = 4096;
 
+/// Largest single copy a syscall will stage through a kernel buffer.
+///
+/// `sys_read` had this (65536) and `sys_recv` did not: `recv` bounded `len` only
+/// by `USER_SPACE_LIMIT`, 128 TiB, and then ran `alloc::vec![0u8; len as usize]`.
+/// The allocation was the bound, so asking for a terabyte did not fail — it
+/// tried, and the kernel ran out of memory. One `recv(fd, buf, 1<<48)` from ring 3.
+pub const MAX_XFER: u64 = 65536;
+
+/// Checked `size_of::<T>() * count` in `u64`.
+///
+/// Pure, because the multiplication is the part that breaks: `size_of::<Pollfd>()`
+/// is 8, so `8 * nfds` wraps for any `nfds > 2^61`. The wrapped value is
+/// *smaller*, so it passes `validate_user_range` and the loop then walks `nfds`
+/// entries of a buffer that was never validated.
+pub fn checked_array_len<T>(count: u64) -> Option<u64> {
+    (count as usize)
+        .checked_mul(core::mem::size_of::<T>())
+        .map(|n| n as u64)
+        .filter(|&n| n > 0)
+}
+
 fn validate_user_range(ptr: u64, len: u64) -> bool {
     if ptr == 0 || ptr < 0x1000 {
         return false;
@@ -467,9 +488,7 @@ fn copy_kernel_to_user(kernel_buf: &[u8], user_ptr: u64) -> bool {
 }
 
 fn sys_read(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    // BUG-002 fix: turunkan limit ke 65536 dan validasi user buffer range lebih awal
-    const MAX_READ: u64 = 65536;
-    if count > MAX_READ {
+    if count > MAX_XFER {
         return -1i64 as u64;
     }
     if count == 0 {
@@ -772,25 +791,75 @@ fn map_heap_pages(cr3: u64, start: u64, end: u64) -> bool {
     true
 }
 
+/// What `brk(addr)` should do.
+///
+/// Pure, because the shrink case is where the damage is and it can only be
+/// exercised against a live address space otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrkAction {
+    /// `brk(0)`: report the current break, change nothing.
+    Query,
+    Grow,
+    Shrink,
+    /// Below the heap's floor, or at or above the user-space limit. `EINVAL` /
+    /// `ENOMEM`, and above all: do not unmap anything.
+    Refuse,
+}
+
+/// Classify a `brk` request.
+///
+/// `floor` is where the loader put the heap — the initial break. Without it,
+/// `brk(small)` shrinks from the initial break down to `small`, and
+/// `unmap_heap_pages` walks every page in between: 6.4 billion page-table
+/// entries, and `free_frame` on every mapped one. The program's own text and
+/// data pages are in that range, so it released its own code back to the frame
+/// allocator while still executing from it.
+///
+/// So the floor is not a nicety. A shrink below it is refused outright.
+pub fn brk_action(addr: u64, current: u64, floor: u64, limit: u64) -> BrkAction {
+    if addr == 0 {
+        return BrkAction::Query;
+    }
+    if addr >= limit {
+        return BrkAction::Refuse;
+    }
+    if addr < floor {
+        return BrkAction::Refuse;
+    }
+    if addr > current {
+        BrkAction::Grow
+    } else if addr < current {
+        BrkAction::Shrink
+    } else {
+        // Equal to the current break: a no-op, not a shrink of zero pages.
+        BrkAction::Query
+    }
+}
+
 fn sys_brk(addr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     let task = scheduler::current_task_id();
     let heap_start = scheduler::get_task_heap_brk(task);
-    if addr == 0 {
-        return heap_start;
-    }
-    if addr > USER_SPACE_LIMIT {
-        return -1i64 as u64;
+    let floor = scheduler::get_task_heap_floor(task);
+    match brk_action(addr, heap_start, floor, USER_SPACE_LIMIT) {
+        BrkAction::Query => return heap_start,
+        BrkAction::Refuse => return -1i64 as u64,
+        BrkAction::Grow | BrkAction::Shrink => {}
     }
     let cr3: u64;
     unsafe {
         core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
     }
-    if addr > heap_start {
-        if !map_heap_pages(cr3, heap_start, addr) {
-            return -1i64 as u64;
+    match brk_action(addr, heap_start, floor, USER_SPACE_LIMIT) {
+        BrkAction::Grow => {
+            if !map_heap_pages(cr3, heap_start, addr) {
+                return -1i64 as u64;
+            }
         }
-    } else if addr < heap_start {
-        unmap_heap_pages(cr3, addr, heap_start);
+        BrkAction::Shrink => {
+            // Bounded by the floor, so this can only ever cover the heap itself.
+            unmap_heap_pages(cr3, addr, heap_start);
+        }
+        BrkAction::Query | BrkAction::Refuse => return -1i64 as u64,
     }
     scheduler::set_task_heap_brk(task, addr);
     addr
@@ -1049,6 +1118,10 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp_ptr: u64, _a4: u64, _a5: u64, 
     let tid = current_task();
     scheduler::set_task_cr3(tid, new_cr3);
     scheduler::set_task_heap_brk(tid, loaded.heap_base);
+    // `exec` loads a new image, so the old floor is meaningless. Without this
+    // the new image's heap would be shrinkable back into whatever the previous
+    // program had mapped.
+    scheduler::reset_task_heap_floor(tid, loaded.heap_base);
     scheduler::set_task_name(tid, &path_str);
 
     // Close user FDs (except 0,1,2) and destroy old address space
@@ -1340,6 +1413,12 @@ fn sys_recv(fd: u64, buf_ptr: u64, len: u64, _flags: u64, _a5: u64, _a6: u64) ->
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
+    // `USER_SPACE_LIMIT` is 128 TiB, and that was the only bound on the size of
+    // the kernel buffer allocated below. Asking for a terabyte was not an error,
+    // it was an allocation the kernel then could not satisfy.
+    if len > MAX_XFER {
+        return -1i64 as u64;
+    }
     if !validate_user_range(buf_ptr, len) {
         return -1i64 as u64;
     }
@@ -1402,6 +1481,12 @@ fn sys_recvfrom(
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
+    // `USER_SPACE_LIMIT` is 128 TiB, and that was the only bound on the size of
+    // the kernel buffer allocated below. Asking for a terabyte was not an error,
+    // it was an allocation the kernel then could not satisfy.
+    if len > MAX_XFER {
+        return -1i64 as u64;
+    }
     if !validate_user_range(buf_ptr, len) {
         return -1i64 as u64;
     }
@@ -2680,7 +2765,14 @@ fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64, _a4: u64, _a5: u64, _a6: u
     if fds_ptr == 0 || nfds == 0 {
         return -1i64 as u64;
     }
-    let total_size = core::mem::size_of::<Pollfd>() as u64 * nfds;
+    // `size_of::<Pollfd>() * nfds` used to be computed with a bare `*`, which
+    // wraps for any `nfds` above 2^61. The wrapped total is smaller, so it
+    // passes `validate_user_range` — and the loop below then walks `nfds`
+    // entries of a buffer that was only validated for the wrapped length.
+    let total_size = match checked_array_len::<Pollfd>(nfds) {
+        Some(n) => n,
+        None => return -1i64 as u64,
+    };
     if !validate_user_range(fds_ptr, total_size) {
         return -1i64 as u64;
     }
@@ -3502,4 +3594,135 @@ pub extern "C" fn syscall_dispatch6(
 #[no_mangle]
 pub extern "C" fn syscall_signal_hook(kernel_rsp: u64) {
     scheduler::check_signal_for_sysret(kernel_rsp);
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::{brk_action, checked_array_len, BrkAction, MAX_XFER, USER_SPACE_LIMIT};
+
+    #[repr(C)]
+    struct Pollfd {
+        fd: u32,
+        events: u16,
+        revents: u16,
+    }
+
+    /// Regression: `sys_poll` computed the span it validates as
+    /// `size_of::<Pollfd>() * nfds` with a bare `*`. `size_of::<Pollfd>()` is 8,
+    /// so `nfds` above 2^61 wraps — and the wrapped value is *smaller*, so it
+    /// passed `validate_user_range`. The loop then walked `nfds` entries of a
+    /// buffer that had only been validated for the wrapped length.
+    #[test]
+    fn the_pollfd_span_is_checked_before_it_is_used_as_a_length() {
+        assert_eq!(core::mem::size_of::<Pollfd>(), 8);
+        assert_eq!(checked_array_len::<Pollfd>(0), None, "zero entries");
+        assert_eq!(checked_array_len::<Pollfd>(1), Some(8));
+        assert_eq!(checked_array_len::<Pollfd>(4), Some(32));
+
+        // The wrap itself: 8 * 2^61 == 0.
+        let nfds = 1u64 << 61;
+        assert_eq!(8u64.wrapping_mul(nfds), 0, "the overflow being guarded");
+        assert_eq!(
+            checked_array_len::<Pollfd>(nfds),
+            None,
+            "a wrapping span must not be reported as a valid length"
+        );
+        assert_eq!(checked_array_len::<Pollfd>(u64::MAX), None);
+        assert_eq!(checked_array_len::<Pollfd>((1 << 61) + 1), None);
+    }
+
+    /// The same multiply for a zero-sized element would be a heap walk with no
+    /// bytes of stride, so the helper refuses zero-length spans outright rather
+    /// than reporting them as valid.
+    #[test]
+    fn a_zero_length_span_is_refused() {
+        struct Empty;
+        assert_eq!(checked_array_len::<Empty>(1), None);
+        assert_eq!(checked_array_len::<Empty>(1000), None);
+    }
+
+    /// Regression: `recv` bounded its length only by `USER_SPACE_LIMIT` — 128
+    /// TiB — and then allocated a kernel buffer of that size, while `sys_read`
+    /// capped the same operation at 64 KiB. Asking for a terabyte was not an
+    /// error; it was an allocation the kernel then could not satisfy.
+    #[test]
+    fn a_single_transfer_cannot_be_unbounded() {
+        assert_eq!(MAX_XFER, 65536);
+        assert!(USER_SPACE_LIMIT > MAX_XFER * 1000, "the limit must bind");
+
+        // What `recv` used to accept: 128 TiB is 2^47, and `USER_SPACE_LIMIT` is
+        // exactly that, so a terabyte-sized request passed validation.
+        assert_eq!(USER_SPACE_LIMIT, 1u64 << 47, "128 TiB");
+        assert!(1u64 << 40 < USER_SPACE_LIMIT, "1 TiB fit under the old bound");
+        // What it accepts now.
+        assert!(MAX_XFER < (1u64 << 40));
+        assert_eq!(MAX_XFER.checked_add(1), Some(MAX_XFER + 1));
+    }
+
+    /// Regression: `brk(small)` called `unmap_heap_pages(cr3, small, heap_brk)`.
+    /// `heap_brk` starts at the loader's heap base around 0x6000_0000_0000, so
+    /// the loop walked every page between the program's own text segment and its
+    /// heap — about 6.4 billion page-table entries — and `free_frame`d every
+    /// mapped one it found, which included the code the program was executing.
+    ///
+    /// The floor is the initial break. Anything below it is refused.
+    #[test]
+    fn brk_refuses_to_shrink_below_the_heap_floor() {
+        let floor = 0x6000_0000_0000u64;
+        let current = floor + 0x10_0000;
+
+        // The attack: shrink to a page near the bottom of user space.
+        assert_eq!(
+            brk_action(0x1000, current, floor, USER_SPACE_LIMIT),
+            BrkAction::Refuse,
+            "brk(0x1000) must not unmap everything between there and the heap"
+        );
+        assert_eq!(brk_action(0, current, floor, USER_SPACE_LIMIT), BrkAction::Query);
+        assert_eq!(
+            brk_action(floor - 1, current, floor, USER_SPACE_LIMIT),
+            BrkAction::Refuse,
+            "one byte below the floor is still below it"
+        );
+
+        // Exactly the floor is a legal (empty) shrink.
+        assert_eq!(brk_action(floor, current, floor, USER_SPACE_LIMIT), BrkAction::Shrink);
+
+        // Ordinary operations.
+        assert_eq!(
+            brk_action(current + 0x1000, current, floor, USER_SPACE_LIMIT),
+            BrkAction::Grow
+        );
+        assert_eq!(
+            brk_action(current - 0x1000, current, floor, USER_SPACE_LIMIT),
+            BrkAction::Shrink
+        );
+        assert_eq!(
+            brk_action(current, current, floor, USER_SPACE_LIMIT),
+            BrkAction::Query,
+            "brk(current) is a no-op, not a zero-length shrink"
+        );
+
+        // At or above the user-space limit is refused.
+        assert_eq!(
+            brk_action(USER_SPACE_LIMIT, current, floor, USER_SPACE_LIMIT),
+            BrkAction::Refuse
+        );
+        assert_eq!(
+            brk_action(USER_SPACE_LIMIT + 1, current, floor, USER_SPACE_LIMIT),
+            BrkAction::Refuse
+        );
+        assert_eq!(
+            brk_action(u64::MAX, current, floor, USER_SPACE_LIMIT),
+            BrkAction::Refuse
+        );
+
+        // A task whose floor could not be read falls back to the same
+        // default base the break uses, so shrinks below it are still refused.
+        // A floor of 0 would make every shrink legal, which is the unsafe
+        // direction to fail in.
+        assert_eq!(
+            brk_action(0x1000, current, 0x6000_0000_0000, USER_SPACE_LIMIT),
+            BrkAction::Refuse
+        );
+    }
 }

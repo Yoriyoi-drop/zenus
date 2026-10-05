@@ -652,14 +652,108 @@ peminta dan `answering_identity` ke `ifaces.first()` → 2 FAILED).
 
 ---
 
+### BUG-013 — `brk(small)` membebaskan frame ELF program itu sendiri
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** sangat tinggi — program bisa membebaskan kode yang sedang
+dijalankan; plus hang
+**Test:** `crates/zenus-syscall/src/syscall.rs` → `syscall::host_tests`
+- `brk_refuses_to_shrink_below_the_heap_floor`
+
+**Di mana:** `crates/zenus-syscall/src/syscall.rs` — `sys_brk`,
+`unmap_heap_pages`; `crates/zenus-sched/` — `Task::heap_floor`
+
+```rust
+// sebelum
+} else if addr < heap_start {
+    unmap_heap_pages(cr3, addr, heap_start);
+}
+```
+
+**Yang salah:** `heap_start` adalah `heap_brk`, yang **dimulai** di
+`heap_base` dari ELF loader — sekitar `0x6000_0000_0000`. `brk(0x1000)`
+menyebabkan `unmap_heap_pages(cr3, 0x1000, 0x6000_0000_0000)`, dan loop
+itu menghitung:
+
+```
+(end + 0xFFF) & !0xFFF - (start & !0xFFF)  /  0x1000
+= 0x6000_0000_0000 - 0x1000  /  0x1000
+= 6.442.450.944 halaman
+```
+
+Dua kerusakan sekaligus:
+
+1. **Program membebaskan dirinya sendiri.** Setiap halaman yang ter-map diberi
+   `free_frame`. ELF image, stack, dan heap semua berada di antara `0x1000`
+   dan heap base — jadi program mengembalikan frame kode yang sedang
+   dieksekusinya ke frame allocator, yang akan diberikan ke frame lain.
+2. **Hang.** 6.4 miliar iterasi, masing-masing menelusuri empat level page
+   table.
+
+Satu syscall dari ring 3, tanpa hak akses apa pun (`current_euid()` = 0 untuk
+hampir semua task). Tidak ada auth, tidak ada flag.
+
+**Fix:** `Task` punya `heap_floor` — break awal, yaitu tempat loader
+menaruh heap. `brk_action(addr, current, floor, limit)` adalah helper murni
+yang mengembalikan `Query` / `Grow` / `Shrink` / `Refuse`; `addr < floor`
+ditolak. Jadi shrink hanya bisa pernah menutupi heap itu sendiri.
+
+`get_task_heap_floor` mengembalikan fallback yang sama dengan
+`get_task_heap_brk` (`0x6000_0000_0000`), **bukan 0** — floor 0 membuat
+setiap shrink legal, dan itu arah gagal yang tidak aman.
+
+`exec` memuat image lain, jadi floor ikut di-reset lewat
+`reset_task_heap_floor`; kalau tidak, heap image baru bisa dikecilkan
+kembali ke apa pun yang dipetakan program sebelumnya.
+
+### BUG-014 — `8 * nfds` overflow, dan `recv` yang bisa meminta 128 TiB
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — validasi dilewati; alokasi kernel tak terbatas
+**Test:**
+- `the_pollfd_span_is_checked_before_it_is_used_as_a_length`
+- `a_zero_length_span_is_refused`
+- `a_single_transfer_cannot_be_unbounded`
+
+**Di mana:** `crates/zenus-syscall/src/syscall.rs` — `sys_poll`, `sys_recv`,
+`sys_recvfrom`, `sys_read`
+
+**BUG-014a — overflow perkalian:**
+
+```rust
+// sebelum
+let total_size = core::mem::size_of::<Pollfd>() as u64 * nfds;
+if !validate_user_range(fds_ptr, total_size) { return -1; }
+```
+
+`size_of::<Pollfd>()` = 8, jadi `8 * nfds` wrap untuk `nfds > 2^61`. Yang
+wrap adalah nilai yang **lebih kecil**, jadi ia lolos `validate_user_range` —
+lalu loop di bawahnya menelusuri `nfds` entri dari buffer yang hanya
+divalidasi sepanjang panjang yang sudah wrap.
+
+**Fix:** `checked_array_len::<T>(count) -> Option<u64>`, `checked_mul` plus
+filter `n > 0` (span nol berarti pemindaian dengan stride 0, juga tidak
+berguna). Dipakai di `sys_poll`.
+
+**BUG-014b — `recv` tanpa batas transfer:**
+
+`sys_read` punya `MAX_READ = 65536`; `sys_recv` dan `sys_recvfrom` tidak punya
+apa pun selain `USER_SPACE_LIMIT` = 128 TiB, lalu langsung
+`alloc::vec![0u8; len as usize]`. Jadi alokasi *adalah* batasnya, dan
+`recv(fd, buf, 1<<40)` tidak gagal — ia mencoba, dan kernel kehabisan memori.
+Dari ring 3, tanpa auth. Sekarang keduanya memakai `MAX_XFER` yang sama
+dengan `sys_read`.
+
+Empat test diverifikasi gagal sebelum fix (floor check dihapus,
+`checked_mul` diganti `*`, batas `MAX_XFER` pada recv dihapus → 3 FAILED).
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:
 
 | # | Lokasi | Bug | Uji |
 |---|---|---|---|
-| 7 | `zenus-syscall/src/syscall.rs:2681` | `8 * nfds` overflow → ukuran tervalidasi 0, ukuran terpakai 2^61 | host (helper) |
 | 8 | `zenus-syscall/src/syscall.rs:2459` | `sys_shmdt` `invlpg` tanpa menulis PTE → frame di-free sementara PTE masih hidup → UAF antar task. `shmat` juga tidak menaikkan `attached` | in-kernel |
-| 9 | `zenus-syscall/src/syscall.rs:1346` | `recv` alokasi `len` yang hanya dibatasi `USER_SPACE_LIMIT` (128 TiB), tidak seperti `sys_read`'s `MAX_READ` | host (helper) |
 | 13 | `zenus-syscall/src/syscall.rs:2034` | `sys_mount` menerima `MS_RDONLY\|MS_NOSUID\|MS_NODEV\|MS_NOEXEC` lalu mengabaikan semuanya, return 0. `vfs::Mount` tidak punya field flag sama sekali. Tidak ada cek `euid == 0` | host |
-| 14 | `zenus-syscall/src/syscall.rs:708` | `brk(small)` menjalankan `unmap_heap_pages` yang menelusuri *semua* halaman di `[addr, heap_brk)` lalu `free_frame` tiap yang ter-map → program membebaskan frame ELF-nya sendiri, dan menelusuri 6.4e9 entri page table (hang). `heap_brk = loaded.heap_base ≈ 0x6000_0000_0000` | host |

@@ -134,6 +134,12 @@ pub struct Task {
     pub cpu: u32,
     pub cr3: u64,
     pub heap_brk: u64,
+    /// The lowest address `brk` may shrink to: where the loader put the heap.
+    ///
+    /// `heap_brk` alone is not enough to reason about a shrink. It starts at
+    /// this value, so shrinking below it walks *backwards* through everything the
+    /// ELF loader mapped below the heap — the program's own code and data.
+    pub heap_floor: u64,
     pub uid: u32,
     pub gid: u32,
     pub euid: u32,
@@ -173,6 +179,7 @@ impl Task {
             cpu: 0,
             cr3: 0,
             heap_brk: 0,
+            heap_floor: 0,
             uid: 0,
             gid: 0,
             euid: 0,

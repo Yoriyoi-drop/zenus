@@ -736,6 +736,7 @@ pub fn clone_task(
         task.cpu = cpu;
         task.cr3 = cr3;
         task.heap_brk = heap_brk;
+        task.heap_floor = heap_brk;
         task.uid = parent.uid;
         task.gid = parent.gid;
         task.euid = parent.euid;
@@ -858,6 +859,7 @@ pub fn create_user_task(
         task.cpu = cpu;
         task.cr3 = cr3;
         task.heap_brk = heap_brk;
+        task.heap_floor = heap_brk;
         // Capture the parent BEFORE taking TASKS — `current_task_id()`
         // locks TASKS itself, so calling it here deadlocked the CPU.
         task.parent_pid = {
@@ -1453,6 +1455,38 @@ pub fn get_task_heap_brk(id: u64) -> u64 {
         }
     }
     0x6000_0000_0000u64
+}
+
+/// Lowest address `brk` may shrink this task's heap to.
+///
+/// Equal to the initial break, i.e. where the loader placed the heap. A
+/// program calling `brk(0x1000)` gets `ENOMEM` here instead of a shrink that
+/// walks back over its own text segment.
+pub fn get_task_heap_floor(id: u64) -> u64 {
+    let tasks = TASKS.lock();
+    for t in tasks.tasks.iter() {
+        if let Some(ref task) = t {
+            if task.id == id {
+                return task.heap_floor;
+            }
+        }
+    }
+    // Same fallback as `get_task_heap_brk`, and deliberately not 0: a floor of 0
+    // would make *every* shrink legal, which is the unsafe direction to fail in.
+    0x6000_0000_0000u64
+}
+
+/// Move the heap floor, for `exec` which loads a different image.
+pub fn reset_task_heap_floor(id: u64, floor: u64) {
+    let mut tasks = TASKS.lock();
+    for t in tasks.tasks.iter_mut() {
+        if let Some(ref mut task) = t {
+            if task.id == id {
+                task.heap_floor = floor;
+                return;
+            }
+        }
+    }
 }
 
 pub fn set_task_heap_brk(id: u64, brk: u64) {
