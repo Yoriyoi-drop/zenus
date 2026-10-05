@@ -308,6 +308,66 @@ dan `normalise_mount_path`, lalu `cargo test` → 3 FAILED).
 
 ---
 
+### BUG-007 — `pkg_remove` = arbitrary-path delete
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — uninstall lebih berkuasa dari install
+**Test:** `crates/zenus-fs/src/lib.rs`
+- `host_tests::pkg_remove_refuses_to_delete_outside_the_install_dir`
+- `host_tests::dir_confinement_checks_a_component_boundary`
+- `host_tests::every_installable_path_is_recorded_inside_the_install_dir`
+
+**Di mana:** `crates/zenus-fs/src/pkg.rs` — `pkg_remove`
+
+```rust
+// sebelum
+for f in &info.files {
+    vfs::remove(f);
+}
+```
+
+**Yang salah:** `pkg_install` memvalidasi setiap path entri lewat
+`install_path_for` (menolak `..` dan NUL, meng-prefix `/usr/local`), tapi
+`pkg_remove` tidak menjalankan validasi itu lagi. Manifesto adalah file teks
+biasa di `/var/db/zpk/<pkg>/manifest`. Siapa pun yang bisa menulis satu baris
+ke manifesto — atau memasang paket lalu menyuntingnya — mendapat
+**penghapusan path sembarang**. Install divalidasi, uninstall tidak, jadi
+uninstall adalah operasi yang lebih berbahaya daripada yang memasang.
+
+Yang hilang bukan proteksi di lapisan VFS, melainkan pemanggilan validasi
+yang sudah ada di `pkg.rs` dan hanya dipakai di satu sisi.
+
+**Fix:** dua helper murni.
+
+- `is_inside_dir(candidate, dir) -> bool` — `starts_with` saja tidak cukup:
+  `/usr/localevil` bukan di dalam `/usr/local`, jadi prefix harus berakhir
+  pada batas komponen.
+- `owned_path_for(recorded) -> Option<String>` — manifesto menyimpan path
+  yang **sudah ter-resolve** (output `install_path_for`), jadi helper ini
+  tidak boleh memberi prefix kedua kali; ia hanya reinstate cek
+  confinement.
+
+`pkg_remove` sekarang menolak baris di luar install dir, mencatat
+`FS_METADATA_CORRUPT`, **dan** mengembalikan `false` — "uninstall sukses"
+padahal ada file yang tidak dihapus adalah laporan sukses yang salah. Baris
+yang sah tetap dihapus: penolakan berlaku pada baris buruknya, bukan pada
+pembatalan seluruh uninstall.
+
+**Bug yang ketemu saat menulis test:** `owned_path_for` versi pertama
+memanggil `install_path_for` pada baris manifesto. Karena baris itu sudah
+meresolve path, hasilnya `/usr/local/usr/local/bin/demo`, dan test
+`pkg_install_list_and_remove` yang sudah ada langsung gagal. Itu bukti bahwa
+uninstall sebelumnya memang sudah salah: ia menghapus path yang tidak ada,
+dan kegagalannya bisu.
+
+`is_inside_dir(x, "")` mengembalikan `false`, bukan `true` — direktori kosong
+bukan induk dari semua path.
+
+Test end-to-end sudah diverifikasi gagal sebelum fix (guard
+`owned_path_for` diganti unconditional → 1 FAILED).
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:
@@ -327,5 +387,4 @@ Prioritas menurut dampak × kemudahan diuji:
 | 12 | `zenus-fs/src/vfs.rs:335-380` | Semua jalur mutating VFS (mkdir/unlink/chmod/chown) tanpa permission check; hanya `fd_open` yang memanggil `access_check` | host |
 | 13 | `zenus-syscall/src/syscall.rs:2034` | `sys_mount` menerima `MS_RDONLY\|MS_NOSUID\|MS_NODEV\|MS_NOEXEC` lalu mengabaikan semuanya, return 0. `vfs::Mount` tidak punya field flag sama sekali. Tidak ada cek `euid == 0` | host |
 | 14 | `zenus-syscall/src/syscall.rs:708` | `brk(small)` menjalankan `unmap_heap_pages` yang menelusuri *semua* halaman di `[addr, heap_brk)` lalu `free_frame` tiap yang ter-map → program membebaskan frame ELF-nya sendiri, dan menelusuri 6.4e9 entri page table (hang). `heap_brk = loaded.heap_base ≈ 0x6000_0000_0000` | host |
-| 17 | `zenus-fs/src/pkg.rs:329` | `pkg_remove` memanggil `vfs::remove` pada tiap baris manifest tanpa menjalankan ulang `install_path_for` → arbitrary-path delete | host |
 | 18 | `zenus-net/src/tcp.rs:894` | `KEEPALIVE_PROBE_INTERVAL` dihitung lalu dibuang (`let _probe_interval = ...`) → probe 96× lebih lambat dari yang didokumentasikan | host |

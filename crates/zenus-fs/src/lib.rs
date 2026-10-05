@@ -834,6 +834,113 @@ mod host_tests {
         assert!(!crate::pkg::pkg_install(&truncated, 0));
     }
 
+    // ── uninstall confinement ────────────────────────────────────────────
+
+    /// Regression: `pkg_remove` handed every manifest line straight to
+    /// `vfs::remove`. The manifest is a text file on disk, so anyone who could
+    /// write one line into it got an arbitrary-path delete — uninstall was
+    /// strictly more powerful than install, which validates every path.
+    #[test]
+    fn pkg_remove_refuses_to_delete_outside_the_install_dir() {
+        let _serial = serial();
+        fresh_fs();
+        assert!(crate::pkg::pkg_init());
+
+        // A file outside the install dir that a tampered manifest points at.
+        assert!(vfs::create_dir("/etc"), "set up the victim");
+        assert!(vfs::create_file("/etc/shadow"), "the file that must survive");
+
+        // Install normally, then rewrite the manifest to name the victim.
+        let image = zpk_image("demo", "1.0", "/bin/demo", b"payload");
+        assert!(crate::pkg::pkg_install(&image, 0));
+
+        let manifest_path = alloc::format!("/var/db/zpk/demo/manifest");
+        let manifest = "demo\n1.0\n2\n8\n/usr/local/bin/demo\n/etc/shadow\n";
+        {
+            let node = vfs::open(&manifest_path).expect("manifest exists");
+            assert!(node.fs.write(node.inode, 0, manifest.as_bytes()).is_some());
+        }
+
+        // Uninstall refuses the out-of-tree line and reports that it did not
+        // fully succeed.
+        assert!(
+            !crate::pkg::pkg_remove("demo"),
+            "a manifest naming /etc/shadow must not report a clean uninstall"
+        );
+        assert!(
+            vfs::open("/etc/shadow").is_some(),
+            "the out-of-tree file must survive uninstall"
+        );
+
+        // The in-tree file is still removed: the refusal is about the bad line,
+        // not about aborting the whole uninstall.
+        assert!(
+            vfs::open("/usr/local/bin/demo").is_none(),
+            "the legitimate file is still uninstalled"
+        );
+    }
+
+    /// The confinement test itself. `starts_with` alone is not enough: a
+    /// sibling whose name extends the install dir is not inside it.
+    #[test]
+    fn dir_confinement_checks_a_component_boundary() {
+        assert!(crate::pkg::is_inside_dir("/usr/local/bin/x", "/usr/local"));
+        assert!(crate::pkg::is_inside_dir("/usr/local", "/usr/local"));
+        assert!(
+            crate::pkg::is_inside_dir("/usr/local/", "/usr/local"),
+            "the dir with a trailing slash is itself"
+        );
+
+        assert!(!crate::pkg::is_inside_dir("/usr/localevil/x", "/usr/local"));
+        assert!(!crate::pkg::is_inside_dir("/usr/loc", "/usr/local"));
+        assert!(!crate::pkg::is_inside_dir("/etc/shadow", "/usr/local"));
+        assert!(!crate::pkg::is_inside_dir("/usr", "/usr/local"));
+        assert!(!crate::pkg::is_inside_dir("/usr/localevil", "/usr/local"));
+
+        // An empty directory matches nothing rather than everything.
+        assert!(!crate::pkg::is_inside_dir("/anything", ""));
+    }
+
+    /// Every path a package can install must be recorded inside the install dir, so
+    /// that uninstall — which re-validates each recorded line — can remove it.
+    /// This is the invariant `pkg_remove` now depends on.
+    #[test]
+    fn every_installable_path_is_recorded_inside_the_install_dir() {
+        let install_dir = crate::pkg::PKG_INSTALL_DIR;
+        for recorded in ["/bin/x", "bin/x", "/a/b/c", "x"] {
+            let installed = crate::pkg::install_path_for(recorded)
+                .unwrap_or_else(|| panic!("{recorded} should be installable"));
+            assert!(
+                crate::pkg::is_inside_dir(&installed, install_dir),
+                "{recorded} -> {installed} escaped the install dir"
+            );
+            // The manifest round trip must keep it inside, unchanged.
+            assert_eq!(
+                crate::pkg::owned_path_for(&installed).as_deref(),
+                Some(installed.as_str()),
+                "{recorded} must survive the manifest unchanged"
+            );
+        }
+
+        // Paths the installer refuses outright are never recorded, so the
+        // uninstaller never sees them.
+        for hostile in ["../../../etc/x", "..", "a/../../b", "", "a\0b"] {
+            assert!(
+                crate::pkg::install_path_for(hostile).is_none(),
+                "{hostile:?} must not be installable"
+            );
+        }
+
+        // A recorded path outside the install dir is not owned by the package,
+        // whatever produced it.
+        for out_of_tree in ["/etc/shadow", "/usr/localevil/x", "usr/local/x"] {
+            assert!(
+                crate::pkg::owned_path_for(out_of_tree).is_none(),
+                "{out_of_tree} must not be treated as package-owned"
+            );
+        }
+    }
+
     // ── path resolution hardening ────────────────────────────────────────
 
     /// Regression: a path with more than `MAX_PATH_SEGMENTS` components used to

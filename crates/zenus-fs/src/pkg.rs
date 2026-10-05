@@ -101,7 +101,7 @@ fn str_from_bytes(bytes: &[u8]) -> &str {
 /// then resolved *through* `..` by `vfs::open_in_ns`, so `pkg_install` could
 /// write anywhere the filesystem could reach, and `pkg_remove` deleted it
 /// again on uninstall.
-fn install_path_for(path_str: &str) -> Option<String> {
+pub fn install_path_for(path_str: &str) -> Option<String> {
     if path_str.is_empty() || path_str.contains('\0') {
         return None;
     }
@@ -115,6 +115,48 @@ fn install_path_for(path_str: &str) -> Option<String> {
         Some(alloc::format!("{}{}", PKG_INSTALL_DIR, path_str))
     } else {
         Some(alloc::format!("{}/{}", PKG_INSTALL_DIR, path_str))
+    }
+}
+
+/// Is `candidate` inside `dir`, on a component boundary?
+///
+/// Pure. `pkg_remove` re-validates every manifest line against the install dir
+/// before deleting it: the manifest is a plain text file under
+/// `/var/db/zpk`, and `pkg_remove` used to hand each line straight to
+/// `vfs::remove`. Anyone who could write one line into a manifest — or install
+/// a package whose manifest was edited afterwards — got an arbitrary-path
+/// delete. `starts_with` alone is not enough: `/usr/localevil` is not inside
+/// `/usr/local`.
+pub fn is_inside_dir(candidate: &str, dir: &str) -> bool {
+    let dir = dir.trim_end_matches('/');
+    if dir.is_empty() {
+        return false;
+    }
+    if candidate.trim_end_matches('/') == dir {
+        return true;
+    }
+    match candidate.strip_prefix(dir) {
+        Some(rest) => rest.starts_with('/') && rest.len() > 1,
+        None => false,
+    }
+}
+
+/// The path a manifest line names, if that path is inside the install dir.
+///
+/// The manifest stores the *already resolved* absolute path — the output of
+/// [`install_path_for`] — so this must not prefix it a second time. Doing that
+/// turned `/usr/local/bin/demo` into `/usr/local/usr/local/bin/demo` and
+/// uninstall silently stopped removing anything. What it must do is re-apply
+/// the confinement check, because the manifest is a text file on disk and its
+/// contents are not trustworthy input.
+pub fn owned_path_for(recorded: &str) -> Option<String> {
+    if recorded.is_empty() || recorded.contains('\0') {
+        return None;
+    }
+    if is_inside_dir(recorded, PKG_INSTALL_DIR) {
+        Some(String::from(recorded))
+    } else {
+        None
     }
 }
 
@@ -332,8 +374,27 @@ pub fn pkg_remove(name: &str) -> bool {
         None => return false,
     };
 
+    // Re-validate every recorded line. A manifest is a text file on disk, so
+    // its contents are not trustworthy input: handing each line straight to
+    // `vfs::remove` made uninstall an arbitrary-path delete for anyone who can
+    // write a manifest. The manifest itself and the package directory are
+    // removed only once every owned file is gone.
+    let mut removed_all = true;
     for f in &info.files {
-        vfs::remove(f);
+        match owned_path_for(f) {
+            Some(path) => {
+                vfs::remove(&path);
+            }
+            None => {
+                // Outside the install dir: refuse to delete it, and say the
+                // uninstall did not fully succeed.
+                removed_all = false;
+                zenus_console::kerror_code!(
+                    zenus_console::error::codes::FS_METADATA_CORRUPT,
+                    "pkg_remove: manifest names a path outside the install dir"
+                );
+            }
+        }
     }
 
     let pkg_dir = pkg_dir_path(name);
@@ -341,7 +402,7 @@ pub fn pkg_remove(name: &str) -> bool {
     vfs::remove(&manifest);
     vfs::remove(&pkg_dir);
 
-    true
+    removed_all
 }
 
 pub fn pkg_list() -> Vec<PkgInfo> {
