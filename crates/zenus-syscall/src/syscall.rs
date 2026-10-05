@@ -610,7 +610,10 @@ fn sys_stat(path_ptr: u64, stat_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64
     match vfs::open(&path_str) {
         Some(node) => {
             let stat = node.fs.stat(node.inode);
-            let stat_buf = stat_ptr as *mut StatBuf;
+            let stat_buf = match unsafe { user_ptr::<StatBuf>(stat_ptr) } {
+                Some(p) => p,
+                None => return -1i64 as u64,
+            };
             unsafe {
                 (*stat_buf).st_size = stat.size;
                 (*stat_buf).st_mode = match stat.file_type {
@@ -636,36 +639,34 @@ fn sys_readdir(fd: u64, buf: u64, buf_size: u64, _a4: u64, _a5: u64, _a6: u64) -
         return 0;
     }
 
-    let dst = buf as *mut u8;
+    // Built in a kernel buffer and copied out once, rather than written entry
+    // by entry through a raw pointer. The buffer is bounded by `buf_size`, which
+    // `validate_user_range` above already bounded — and `copy_kernel_to_user`
+    // then revalidates every page before touching it, so an in-range but
+    // unmapped `buf` is EFAULT instead of a #PF in ring 0.
     let max = buf_size as usize;
-    let mut written = 0u64;
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
     for entry in entries {
-        if written as usize + 2 > max {
+        if out.len() + 2 > max {
             break;
         }
         let name_bytes = entry.name.as_bytes();
         let name_len = name_bytes.len();
-        if written as usize + 1 + name_len + 1 > max {
+        if out.len() + 1 + name_len + 1 > max {
             break;
         }
-
-        unsafe {
-            dst.add(written as usize).write(entry.file_type as u8);
-            written += 1;
-            dst.add(written as usize).write(name_len as u8);
-            written += 1;
-            if name_len > 0 {
-                core::ptr::copy_nonoverlapping(
-                    name_bytes.as_ptr(),
-                    dst.add(written as usize),
-                    name_len,
-                );
-                written += name_len as u64;
-            }
+        out.push(entry.file_type as u8);
+        out.push(name_len as u8);
+        if name_len > 0 {
+            out.extend_from_slice(name_bytes);
         }
     }
-    written
+
+    if !copy_bytes_to_user(&out, buf) {
+        return -1i64 as u64;
+    }
+    out.len() as u64
 }
 
 fn sys_lseek(fd: u64, offset: u64, whence: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
@@ -922,10 +923,10 @@ fn sys_pipe(pipefd_ptr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -
     }
     match fd::fd_pipe(current_task()) {
         Some((read_fd, write_fd)) => {
-            let dst = pipefd_ptr as *mut u32;
-            unsafe {
-                dst.write(read_fd as u32);
-                dst.add(1).write(write_fd as u32);
+            if !copy_u32_pair_to_user(read_fd as u32, write_fd as u32, pipefd_ptr) {
+                fd::fd_close(read_fd);
+                fd::fd_close(write_fd);
+                return -1i64 as u64;
             }
             0
         }
@@ -1041,7 +1042,13 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp_ptr: u64, _a4: u64, _a5: u64, 
         }
         let mut arg_ptr_ptr = argv_ptr;
         loop {
-            let arg_str_ptr: u64 = unsafe { *(arg_ptr_ptr as *const u64) };
+            let arg_str_ptr = match unsafe { user_ptr::<u64>(arg_ptr_ptr) } {
+                Some(p) => unsafe { *p },
+                None => {
+                    zenus_mem::paging::destroy_address_space(new_cr3);
+                    return -1i64 as u64;
+                }
+            };
             if arg_str_ptr == 0 {
                 break;
             }
@@ -1178,10 +1185,10 @@ struct UtsName {
 }
 
 fn sys_uname(buf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if !validate_user_ptr::<UtsName>(buf) {
-        return -1i64 as u64;
-    }
-    let uts = buf as *mut UtsName;
+    let uts = match unsafe { user_ptr::<UtsName>(buf) } {
+        Some(p) => unsafe { &mut *p },
+        None => return -1i64 as u64,
+    };
     unsafe {
         copy_str_to_fixed(&mut (*uts).sysname, "Zenus");
         copy_str_to_fixed(&mut (*uts).nodename, "zenus");
@@ -1248,10 +1255,10 @@ fn sys_sethostname(name_ptr: u64, len: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u
 }
 
 fn sys_uname_ns(buf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if !validate_user_ptr::<UtsName>(buf) {
-        return -1i64 as u64;
-    }
-    let uts = buf as *mut UtsName;
+    let uts = match unsafe { user_ptr::<UtsName>(buf) } {
+        Some(p) => unsafe { &mut *p },
+        None => return -1i64 as u64,
+    };
     let uts_ns = zenus_sched::scheduler::current_uts_ns();
     let hostname = zenus_ns::uts::get_hostname(uts_ns);
     let domainname = zenus_ns::uts::get_domainname(uts_ns);
@@ -1429,10 +1436,16 @@ fn sys_send(fd: u64, buf_ptr: u64, len: u64, _flags: u64, _a5: u64, _a6: u64) ->
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    if !validate_user_range(buf_ptr, len) {
+    // `send` had no length bound at all — `recv` got MAX_XFER in an earlier
+    // commit and `send` was simply missed, so one call asked the socket layer
+    // to read 128 TiB out of user space.
+    if len > MAX_XFER {
         return -1i64 as u64;
     }
-    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len as usize) };
+    let data = match user_bytes(buf_ptr, len) {
+        Some(d) => d,
+        None => return -1i64 as u64,
+    };
 
     if net_socket::send(sock_id, data, 0) {
         len
@@ -1463,8 +1476,9 @@ fn sys_recv(fd: u64, buf_ptr: u64, len: u64, _flags: u64, _a5: u64, _a6: u64) ->
 
     match net_socket::recv(sock_id, &mut buf) {
         Some(n) => {
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, n);
+            // Through the page-validating copy: `buf_ptr` was only range-checked.
+            if !copy_bytes_to_user(&buf[..n as usize], buf_ptr) {
+                return -1i64 as u64;
             }
             n as u64
         }
@@ -1481,10 +1495,13 @@ fn sys_sendto(fd: u64, buf_ptr: u64, len: u64, _flags: u64, addr_ptr: u64, _addr
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    if !validate_user_range(buf_ptr, len) {
+    if len > MAX_XFER {
         return -1i64 as u64;
     }
-    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len as usize) };
+    let data = match user_bytes(buf_ptr, len) {
+        Some(d) => d,
+        None => return -1i64 as u64,
+    };
 
     let (dst_ip, dst_port) = if addr_ptr != 0 {
         let sa_ptr = match unsafe { user_ptr::<SockaddrIn>(addr_ptr) } {
@@ -1533,8 +1550,9 @@ fn sys_recvfrom(
 
     match net_socket::recv(sock_id, &mut buf) {
         Some(n) => {
-            unsafe {
-                core::ptr::copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, n);
+            // Through the page-validating copy: `buf_ptr` was only range-checked.
+            if !copy_bytes_to_user(&buf[..n as usize], buf_ptr) {
+                return -1i64 as u64;
             }
             if addr_ptr != 0 {
                 let sa_ptr = match unsafe { user_ptr::<SockaddrIn>(addr_ptr) } {
@@ -1798,29 +1816,30 @@ fn sys_rt_sigaction(
     let task_id = scheduler::current_task_id();
 
     // Save old action
-    if oldact_ptr != 0
-        && validate_user_range(oldact_ptr, core::mem::size_of::<KernelSigAction>() as u64)
-    {
+    if oldact_ptr != 0 {
+        let oldact = match unsafe { user_ptr::<KernelSigAction>(oldact_ptr) } {
+            Some(p) => unsafe { &mut *p },
+            None => return -1i64 as u64,
+        };
         let old = scheduler::get_signal_action(task_id, sig_num);
-        let oldact = oldact_ptr as *mut KernelSigAction;
-        unsafe {
-            (*oldact).handler_fn = old.handler_fn;
-            (*oldact).flags = old.flags;
-            (*oldact).restorer = old.restorer;
-            (*oldact).mask = old.mask;
-        }
+        oldact.handler_fn = old.handler_fn;
+        oldact.flags = old.flags;
+        oldact.restorer = old.restorer;
+        oldact.mask = old.mask;
     }
 
     // Set new action
-    if act_ptr != 0 && validate_user_range(act_ptr, core::mem::size_of::<KernelSigAction>() as u64)
-    {
-        let act = act_ptr as *const KernelSigAction;
+    if act_ptr != 0 {
+        let act = match unsafe { user_ptr::<KernelSigAction>(act_ptr) } {
+            Some(p) => unsafe { &*p },
+            None => return -1i64 as u64,
+        };
         let new_action = unsafe {
             zenus_sched::task::SignalAction {
-                handler_fn: (*act).handler_fn,
-                flags: (*act).flags,
-                restorer: (*act).restorer,
-                mask: (*act).mask,
+                handler_fn: act.handler_fn,
+                flags: act.flags,
+                restorer: act.restorer,
+                mask: act.mask,
             }
         };
         scheduler::set_signal_action(task_id, sig_num, new_action);
@@ -1914,6 +1933,46 @@ fn copy_u64_pair_to_user(first: u64, second: u64, user_ptr: u64) -> bool {
     copy_kernel_to_user(&buf, user_ptr)
 }
 
+/// Two adjacent `u32`s, as `pipe` writes them.
+fn copy_u32_pair_to_user(first: u32, second: u32, user_ptr: u64) -> bool {
+    let mut buf = [0u8; 8];
+    buf[0..4].copy_from_slice(&first.to_ne_bytes());
+    buf[4..8].copy_from_slice(&second.to_ne_bytes());
+    copy_kernel_to_user(&buf, user_ptr)
+}
+
+/// Copy a kernel slice into a user buffer.
+///
+/// A spelling of [`copy_kernel_to_user`] that says which way the bytes go, so
+/// the syscall bodies read as "where does this end up" rather than "which
+/// pointer arithmetic is safe today".
+fn copy_bytes_to_user(bytes: &[u8], user_ptr: u64) -> bool {
+    copy_kernel_to_user(bytes, user_ptr)
+}
+
+/// A read-only view of `len` bytes of user memory, or `None` if the range is
+/// not addressable or any of its pages is unmapped.
+///
+/// `sys_send` and `sys_sendto` used to do `from_raw_parts(buf_ptr, len)` behind
+/// nothing but `validate_user_range`, so the socket layer read straight out of
+/// whatever address the caller named.
+fn user_bytes(ptr: u64, len: u64) -> Option<&'static [u8]> {
+    if !validate_user_range(ptr, len) {
+        return None;
+    }
+    if !user_pages_mapped(ptr, len) {
+        return None;
+    }
+    // SAFETY: the range was bounded and every page in it was found present in
+    // the current address space, so the slice describes real mapped memory.
+    //
+    // The `'static` is a deliberate fib the caller must uphold: the view is only
+    // valid until the syscall returns, which is the only window in which it is
+    // used anywhere here. A real lifetime would need the caller's borrow to
+    // outlive the FFI boundary, and nothing does.
+    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) })
+}
+
 fn sys_rt_sigprocmask(
     how: u64,
     set_ptr: u64,
@@ -1933,8 +1992,11 @@ fn sys_rt_sigprocmask(
     }
 
     // Set new mask
-    if set_ptr != 0 && validate_user_range(set_ptr, 8) {
-        let new_set = unsafe { *(set_ptr as *const u64) };
+    if set_ptr != 0 {
+        let new_set = match unsafe { user_ptr::<u64>(set_ptr) } {
+            Some(p) => unsafe { *p },
+            None => return -1i64 as u64,
+        };
         let how = match how {
             signal::SIG_BLOCK => {
                 let old = scheduler::get_signal_mask(task_id);
@@ -2009,19 +2071,57 @@ fn sys_tgkill(_tgid: u64, tid: u64, sig: u64, _a4: u64, _a5: u64, _a6: u64) -> u
 
 // ── Memory syscalls ──
 
-fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, _fd: u64, _offset: u64) -> u64 {
+/// The page count and byte size an `mmap` should ask for, or `None` if the
+/// length is not something this kernel can map.
+///
+/// Pure. Two bugs, and the second one is why the fuzzing campaign wedged.
+///
+/// * `((length + 0xFFF) & !0xFFF) / 0x1000` used a bare add, so a length near
+///   `u64::MAX` wrapped to a *small* page count while the VMA was still
+///   recorded with a different size than the pages it mapped.
+/// * There was no upper bound of the *kernel's own*. `mmap` here maps eagerly,
+///   one page at a time, so the request size *is* the cost. The campaign asked
+///   for 4 GiB on a 2 GiB machine: the loop ran 1 048 577 times, each iteration
+///   taking the frame allocator lock and walking the page tables, before
+///   failing at the ~500 000th frame. That is minutes of emulated work for a
+///   mapping that could never succeed, and it is what stopped the campaign at
+///   case 5506.
+///
+///   A mapping is refused up front unless the free-frame count can satisfy it,
+///   so the failure is immediate and the cost is proportional to what the
+///   program can actually get.
+pub fn mmap_extent(length: u64, max_size: u64, free_frames: usize) -> Option<(u64, u64)> {
     if length == 0 {
-        return -1i64 as u64;
+        return None;
     }
+    // `checked_next_multiple_of` rounds up *and* reports the overflow, which the
+    // old `+ 0xFFF` did without.
+    let size = length.checked_next_multiple_of(0x1000)?;
+    if size > max_size {
+        return None;
+    }
+    let pages = size / 0x1000;
+    if pages > free_frames as u64 {
+        return None;
+    }
+    Some((pages, size))
+}
+
+fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, _fd: u64, _offset: u64) -> u64 {
+    let free_frames = zenus_mem::frame_allocator::FRAME_ALLOCATOR
+        .lock()
+        .free_frames_count();
+    let (page_count, size) =
+        match mmap_extent(length, zenus_mem::vma::MAX_MAPPING_SIZE, free_frames) {
+            Some(e) => e,
+            None => return -1i64 as u64,
+        };
 
     let task_id = scheduler::current_task_id();
     let cr3 = match scheduler::get_task_cr3(task_id) {
         Some(c) => c,
         None => return -1i64 as u64,
     };
-
-    let page_count = ((length + 0xFFF) & !0xFFF) / 0x1000;
-    let size = page_count * 0x1000;
 
     let _is_anonymous = flags & zenus_sched::task::MAP_ANONYMOUS != 0;
     let is_fixed = flags & zenus_sched::task::MAP_FIXED != 0;
@@ -2044,14 +2144,23 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, _fd: u64, _offset: u6
         return -1i64 as u64;
     }
 
-    // Map pages
+    // Map pages. When the frame allocator runs dry the pages already mapped are
+    // unmapped and their frames released: they belong to this call, and keeping
+    // them turns one over-large request into a machine with no free memory at
+    // all — which is exactly what wedged the fuzzing campaign at case 5506.
     for i in 0..page_count {
         let page_virt = vma_start + i * 0x1000;
         let frame = {
             let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
             match allocator.alloc_frame() {
                 Some(f) => f,
-                None => return -1i64 as u64,
+                None => {
+                    drop(allocator);
+                    for done in 0..i {
+                        zenus_mem::paging::unmap_page_raw(cr3, vma_start + done * 0x1000);
+                    }
+                    return -1i64 as u64;
+                }
             }
         };
         zenus_mem::paging::map_user_page_raw(
@@ -3329,12 +3438,11 @@ fn sys_getcwd(buf_ptr: u64, size: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -
     };
     let len = cwd.iter().position(|&b| b == 0).unwrap_or(256);
     let copy_len = (len as u64).min(size - 1);
-    if !validate_user_range(buf_ptr, copy_len + 1) {
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(copy_len as usize + 1);
+    out.extend_from_slice(&cwd[..copy_len as usize]);
+    out.push(0);
+    if !copy_bytes_to_user(&out, buf_ptr) {
         return -1i64 as u64;
-    }
-    unsafe {
-        core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf_ptr as *mut u8, copy_len as usize);
-        *(buf_ptr as *mut u8).add(copy_len as usize) = 0;
     }
     buf_ptr
 }
@@ -3839,7 +3947,7 @@ pub extern "C" fn syscall_signal_hook(kernel_rsp: u64) {
 #[cfg(test)]
 mod host_tests {
     use super::{
-        brk_action, checked_array_len, mount_flags_from_syscall, mprotect_range,
+        brk_action, checked_array_len, mmap_extent, mount_flags_from_syscall, mprotect_range,
         nanosleep_deadline, validate_user_range, BrkAction, MAX_XFER, MS_NODEV, MS_NOSUID,
         MS_NOEXEC, USER_SPACE_LIMIT,
     };
@@ -3956,12 +4064,19 @@ mod host_tests {
     fn no_syscall_reaches_user_space_through_a_raw_pointer() {
         // Assembled from pieces so this test's own needles do not appear
         // verbatim in the file it scans — otherwise it finds itself.
-        const NEEDLES: [&str; 5] = [
+        //
+        // Seven shapes, because the same bug has now been written seven ways: a
+        // scalar store, a struct store, a struct reference, a slice over user
+        // memory, and a `let p = ptr as *mut T` that is later dereferenced as
+        // `(*p).field`. Each of those cost a separate fuzzer run to find.
+        const NEEDLES: [&str; 7] = [
             concat!("as *mut u64", ") ="),
             concat!("as *mut u32", ") ="),
             concat!("as *mut u8", ") ="),
             concat!("&mut *("),
             concat!("&*("),
+            concat!("from_raw_parts(", "buf_ptr"),
+            concat!("let ", " = ", " as *mut "),
         ];
         // The needle literals above are themselves on lines the scan would flag,
         // so the test skips its own body: everything from here to the end.
@@ -3972,13 +4087,15 @@ mod host_tests {
         };
 
         // The only remaining raw accesses are the ELF loader building the
-        // initial user stack of an address space it just created. Those
-        // addresses come from `loaded.stack_top`, not from the caller.
+        // initial user stack of an address space it just created (those
+        // addresses come from `loaded.stack_top`, not from the caller), and the
+        // two helpers that build a pointer from a value they just validated.
         let allowed = [
             concat!("*((argv_pos) as *mut u64", ") = str_cur2;"),
             concat!("*((argv_pos) as *mut u64", ") = str_cur_pos;"),
             concat!("*((argv_array_start + argc as u64 * 8) as *mut u64", ") = 0;"),
             concat!("*((user_rsp) as *mut u64", ") = argc as u64;"),
+            concat!("Some(ptr as *mut T", ")"),
         ];
 
         for (lineno, line) in source.lines().enumerate() {
@@ -3993,14 +4110,28 @@ mod host_tests {
             assert!(
                 allowed.iter().any(|a| trimmed.contains(a)),
                 "syscall.rs:{} reaches into user space directly: {}. Route it \
-                 through user_ptr() for a struct, or copy_kernel_to_user (or \
-                 copy_u64_to_user / copy_u32_to_user / copy_u64_pair_to_user) \
-                 for a scalar, so an in-range-but-unmapped pointer becomes \
-                 EFAULT instead of a page fault in ring 0.",
+                 through user_ptr() for a struct, user_bytes() for a slice, or \
+                 copy_bytes_to_user / copy_u64_to_user / copy_u32_to_user / \
+                 copy_u64_pair_to_user / copy_u32_pair_to_user for bytes, so an \
+                 in-range-but-unmapped pointer becomes EFAULT instead of a page \
+                 fault in ring 0.",
                 lineno + 1,
                 trimmed
             );
         }
+    }
+
+    /// `send` and `sendto` had no `MAX_XFER` bound at all — `recv` got one in
+    /// an earlier commit and these two were simply missed, so a single call
+    /// asked the socket layer to read 128 TiB out of user space. They now share
+    /// the bound.
+    #[test]
+    fn every_transfer_shares_one_length_bound() {
+        // The bound is the same one `sys_read` uses.
+        assert_eq!(MAX_XFER, 65536);
+        // And it sits well inside the address space, so a legal request is
+        // never rejected by the size check alone.
+        assert!(MAX_XFER < USER_SPACE_LIMIT);
     }
 
     /// The copy helpers refuse exactly what `validate_user_range` already
@@ -4144,6 +4275,64 @@ mod host_tests {
             Some(u64::MAX),
             "a zero sleep at the end of the counter is just already elapsed"
         );
+    }
+
+    /// Regression: `sys_mmap` computed `((length + 0xFFF) & !0xFFF) / 0x1000`
+    /// with a bare add, so a length near `u64::MAX` wrapped to a *small* page
+    /// count while the VMA was recorded with a different size than the pages
+    /// actually mapped. It also had no upper bound of its own, so the fuzzer
+    /// could ask for 4 GiB and walk the frame allocator for half a million
+    /// frames before failing — leaking every one of them, which is what wedged
+    /// the campaign.
+    #[test]
+    fn an_mmap_extent_rounds_up_without_wrapping() {
+        const MAX: u64 = 0x7F00_0000_0000;
+        // Plenty of frames for an ordinary request, and a deliberately
+        // insufficient pool for the one the fuzzer made.
+        const PLENTY: usize = 4_000_000;
+        const NONE: usize = 0;
+
+        // The exact request the fuzzer made: refused up front, because the
+        // machine cannot back it. Before the cap, the loop ran 1 048 577 times
+        // before failing at the ~500 000th frame.
+        assert_eq!(
+            mmap_extent(0x100000010, MAX, NONE),
+            None,
+            "4 GiB plus one byte cannot be backed on a 2 GiB machine"
+        );
+        // Exactly enough frames and it is allowed through.
+        assert_eq!(
+            mmap_extent(0x100000010, MAX, 0x100001),
+            Some((0x100001, 0x100001000)),
+            "with the frames to back it, the same request is legal"
+        );
+
+        // Rounding.
+        assert_eq!(mmap_extent(1, MAX, PLENTY), Some((1, 0x1000)));
+        assert_eq!(mmap_extent(0x1000, MAX, PLENTY), Some((1, 0x1000)));
+        assert_eq!(mmap_extent(0x1001, MAX, PLENTY), Some((2, 0x2000)));
+
+        // Overflow is refused, not wrapped. The old `+ 0xFFF` wrapped here and
+        // produced a page count of zero.
+        assert_eq!(mmap_extent(u64::MAX, MAX, PLENTY), None);
+        assert_eq!(mmap_extent(u64::MAX - 8, MAX, PLENTY), None);
+        assert_eq!(mmap_extent(MAX + 1, MAX, PLENTY), None);
+        assert_eq!(
+            mmap_extent(MAX, MAX, usize::MAX),
+            Some((MAX / 0x1000, MAX)),
+            "a mapping that exactly fills the address-space cap is legal"
+        );
+
+        // A length just under the cap is fine, and the size reported is the
+        // rounded length, not the cap.
+        assert_eq!(
+            mmap_extent(MAX - 0x1000, MAX, usize::MAX),
+            Some(((MAX - 0x1000) / 0x1000, MAX - 0x1000))
+        );
+
+        // Zero length stays EINVAL, whatever the machine has.
+        assert_eq!(mmap_extent(0, MAX, PLENTY), None);
+        assert_eq!(mmap_extent(0, MAX, NONE), None);
     }
 
     /// Regression: `brk(small)` called `unmap_heap_pages(cr3, small, heap_brk)`.

@@ -339,6 +339,41 @@ pub fn unmap_page_raw_keep_frame(cr3_raw: u64, virt: u64) -> bool {
     false
 }
 
+/// Remove the PTE for `virt` in an arbitrary address space **and** release the
+/// frame it pointed at.
+///
+/// The counterpart to [`unmap_page_raw_keep_frame`], for pages the caller owns.
+/// `sys_mmap` allocates the frames itself, so a mapping it has to abandon must
+/// hand them back: leaking them is what turns one over-large `mmap` into a
+/// permanently broken machine.
+pub fn unmap_page_raw(cr3_raw: u64, virt: u64) -> bool {
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+    let cr3_phys = cr3_raw & !0xFFF;
+    let idxs = split_indices(virt);
+    unsafe {
+        let mut table_virt = (cr3_phys + hhdm) as *mut u64;
+        for (level, &idx) in idxs.iter().enumerate() {
+            let entry = *table_virt.add(idx as usize);
+            if (entry & 1) == 0 {
+                return false;
+            }
+            if level == 3 {
+                let frame = entry & 0x000FFFFFFFFFF000;
+                // Same ordering requirement as the keep-frame variant: the store
+                // has to be visible before the TLB entry is invalidated.
+                core::sync::atomic::fence(Ordering::SeqCst);
+                table_virt.add(idx as usize).write(0);
+                core::arch::asm!("invlpg [{0}]", in(reg) virt, options(nostack, preserves_flags));
+                let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+                allocator.free_frame(PhysAddr::new(frame));
+                return true;
+            }
+            table_virt = ((entry & 0x000FFFFFFFFFF000) + hhdm) as *mut u64;
+        }
+    }
+    false
+}
+
 pub fn create_address_space() -> Option<u64> {
     let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
     let cr3_phys = LEVEL4_PHYS.load(Ordering::Acquire);

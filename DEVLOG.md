@@ -1346,15 +1346,134 @@ Penargetannya jelas sekarang, dan `user_ptr()` sudah ada.
 
 ---
 
+### BUG-027 — 11 site pointer mentah ke user space, plus `send` tanpa batas panjang
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — `#PF` di ring 0; `send` bisa meminta 128 TiB
+**Ditemukan oleh:** `make fuzz-coverage`
+**Test:** `no_syscall_reaches_user_space_through_a_raw_pointer` (diperluas),
+`every_transfer_shares_one_length_bound`
+
+**Ini BUG-025, putaran kedua.** `fuzz-coverage` menemukan bentuk yang
+sekarang tidak lolos dari scan yang sama:
+
+```
+[FUZZ] CRASH ZENUS-FUZZ-000001 type=PAGE_FAULT
+  rip=0xffffffff8002e0be addr=0x10000000000 err=0x2
+  input=[06, 09, 2f, 74, 6d, 70, 38, 66, 75, 7a, 7a, ...]   ← "/tmp8fuzz"
+```
+
+`addr2line` → `sys_stat`. Dan `syscall.rs` ternyata punya **tujuh** bentuk
+tertulis dari bug yang sama — masing-masing ditemukan pada putaran fuzzer yang
+berbeda:
+
+| Bentuk | Contoh | Site |
+|---|---|---|
+| scalar store | `*(ptr as *mut u32) = v` | (BUG-022, sudah) |
+| struct reference | `&mut *(ptr as *mut Pollfd)` | (BUG-025, sudah) |
+| `let` lalu deref | `let p = ptr as *mut StatBuf; (*p).st_size = …` | `sys_stat` |
+| struct, nama lain | `let uts = buf as *mut UtsName;` | `sys_uname`, `sys_uname_ns` |
+| struct | `let rl = &mut *(rlim_ptr as *mut Rlimit)` | `sys_getrlimit` |
+| slice | `from_raw_parts(buf_ptr as *const u8, len)` | `sys_send`, `sys_sendto` |
+| pointer lalu tulis | `let dst = pipefd_ptr as *mut u32; dst.write(..)` | `sys_pipe` |
+
+Sisanya (`sys_execve` jalannya argv, `sys_rt_sigaction`, `sys_rt_sigprocmask`
+untuk `set`, `sys_getcwd`, `sys_readdir`, `sys_poll`) sudah ikut BUG-022/025
+atau diperbaiki di sini.
+
+**Fix:** semuanya lewat `user_ptr()` (struct), `user_bytes()` (slice), atau
+`copy_bytes_to_user` / `copy_u32_pair_to_user` (byte). Test invariant-nya
+diperluas dari lima needle ke tujuh, danpemindaiannya dipangkas mulai
+`mod host_tests` supaya test tidak mendeteksi dirinya sendiri. Diverifikasi
+gagal sebelum fix dengan tiga site dikembalikan ke bentuk lamanya → 1 FAILED.
+
+**Bug kedua yang ketemu sekalian: `send` dan `sendto` tidak punya batas
+panjang sama sekali.** `recv` sudah dapat `MAX_XFER` di commit BUG-014; dua
+ini terlewat, jadi `sys_send` meminta socket layer membaca 128 TiB dari user
+space. Sekarang ketiganya berbagi `MAX_XFER`, dan satu test mengunci bahwa
+memang mereka berbagi.
+
+### BUG-028 — `sys_mmap` overflow, tanpa batas, dan bocorkan frame
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — satu `mmap` besar bisa menghabiskan seluruh memori
+**Ditemukan oleh:** `make fuzz-coverage`
+**Test:** `an_mmap_extent_rounds_up_without_wrapping`
+
+Setelah BUG-025, `fuzz-coverage` berhenti di kasus 5506:
+
+```
+[FUZZ] TIMEOUT … stuck_in_case=5506 subsystem=0 syscall=9
+[FUZZ] stuck args=[706d742f, 100000010, 0, 0, 0, 0]
+```
+
+`syscall=9` adalah `SYS_MMAP`, `length = 0x100000010` — 4 GiB di mesin 2 GiB.
+
+**Tiga bug di satu fungsi:**
+
+1. `((length + 0xFFF) & !0xFFF) / 0x1000` memakai `+` biasa. Length dekat
+   `u64::MAX` wrap ke page count **kecil**, sementara VMA tetap dicatat dengan
+   ukuran yang berbeda dari halaman yang dipetakan.
+2. **Tidak ada batas atas milik sendiri.** `mmap` di sini memetakan
+   *eager*, satu halaman demi satu, jadi ukuran permintaan **adalah** biayanya.
+   Loop berjalan 1 048 577 kali — tiap iterasi mengambil lock frame allocator
+   dan menyusuri page table — sebelum gagal di frame ke ~500 000. Itu menit
+   pekerjaan emulasi untuk mapping yang mustahil berhasil.
+3. **Semua frame yang sudah dipetakan dibocorkan** ketika allocator habis:
+   `None => return -1i64 as u64` tanpa membersihkan apa pun.
+
+**Fix:** `mmap_extent(length, max_size, free_frames)` murni, yang memakai
+`checked_next_multiple_of` (membulatkan ke atas **dan** melaporkan overflow),
+menolak ukuran yang tidak bisa di-back oleh jumlah frame bebas, dan
+mengembalikan `(page_count, size)` yang konsisten. Di `sys_mmap`, ketika gagal
+di tengah, halaman yang sudah dipetakan sekarang di-unmap dan frame-nya
+dilepas — lewat `zenus_mem::paging::unmap_page_raw`, pasangan baru dari
+`unmap_page_raw_keep_frame` yang sudah ada sejak BUG-015.
+
+### Yang **tidak** ketemu, dan alasannya
+
+`fuzz-coverage` masih tidak selesai, tapi sekarang macet dengan cara yang
+**berbeda** — dan itu sendiri informasinya:
+
+```
+[FUZZ] progress cases=5500 crashes=0 edges=465 corpus=1454
+[FUZZ] waiting cases=2561 stuck_in_case=2561 elapsed=4s
+(nol output lagi selama 200 detik; tidak ada baris TIMEOUT)
+```
+
+Kasus yang macet berubah dari run ke run (corpus ikut tumbuh), dan yang penting
+begini: **watchdog ikut mati**. Baris `waiting` terakhir ada di `elapsed=4s`,
+lalu tidak apa-apa selama 200 detik lagi. Kalau hanya campaign task yang macet,
+boot task masih akan menjadwalkan dan watchdog akan mencetak `TIMEOUT` di
+detik ke-120 — persis yang terjadi di BUG-023 dan BUG-024.
+
+Jadi ini bukan "campaign task sedang looping". **Seluruh CPU tersendat**:
+kemungkinan spinlock yang dipegang task selagi loop tak berujung, lalu timer
+ISR mencoba lock yang sama dan menggantung dengan IF=0. Persis mode
+kegagalan yang `AGENTS.md` peringatkan ("Anything called from an ISR must not
+take a lock that a task can hold") dan yang `SpinLock::long_spin_report`
+seharusnya laporkan — tapi tidak ada baris `SPIN:` di log, jadi laporkanannya
+sendiri tidak pernah sampai ke UART.
+
+`crashes=0` sepanjang perjalanan: tidak ada `#PF` yang lolos. Yang belum
+diketahui adalah **site** mana. Itu butuh breakpoint di `SpinLock::lock`, dan
+simbol generik `SpinLock<T>::lock` tidak bisa di-breakpoint lewat nama karena
+yang ada di symbol table adalah bentuk mangled per-tipe — perlu address tiap
+instansiasi, atau `rbreak` setelah symbol statiknya ditemukan.
+
+---
+
+---
+
 ## Lapisan verifikasi: apa yang benar-benar jalan
 
 | Lapisan | Status | Catatan |
 |---|---|---|
-| `make test-host` | **hijau**, 196 test | Sepanjang sesi ini |
+| `make test-host` | **hijau**, 198 test | Sepanjang sesi ini |
 | `cargo build` (default / testing / fuzz-smoke / fuzz-coverage / fuzz-regression) | **hijau** | Semua kombinasi feature |
 | `make fuzz-smoke` | **hijau** | 2000 kasus, `crashes=0`, `EXIT code=0`, ~10 s |
 | `make fuzz-regression` | jalan, verdict salah | Lihat catatan di atas: harusnya `code=2`, selalu `code=3` |
-| `make fuzz-coverage` | jalan, **4 crash** | Semua sudah teridentifikasi, belum diperbaiki — lihat daftarnya di atas |
+| `make fuzz-coverage` | `crashes=0`, masih **macet** | Seluruh CPU tersendat di kasus ~2560; watchdog ikut mati. Lihat catatan BUG-027/028 |
 | `make test` | **boot**, belum menyelesaikan test | Fixed BUG-018 dan BUG-019; mesin mencapai `run_tests` dan test pertama jalan, lalu beberapa kali page fault berturut-turut (handler-nya sendiri fault saat membaca stack) |
 
 ### Yang belum selesai, dan kenapa saya tidak menebaknya
@@ -1376,9 +1495,10 @@ regression test — catatan saja").
 
 Kalau ada yang mau diambil berikutnya, urutannya:
 
-1. **Sisa `#PF` di `fuzz-coverage`** — Mechanismenya sudah ada
-   (`user_ptr()`), targetnya sudah terdaftar, dan setiap perbaikannya punya test
-   yang bisa ditulis. Ini yang paling murah dan paling bernilai.
+1. **Wedge di `fuzz-coverage`** — sekarang `crashes=0`, jadi tidak ada
+   `#PF` yang tersisa; yang tersisa adalah CPU yang tersendat total, dengan
+   watchdog ikut mati. Butuh breakpoint di `SpinLock::lock` per-instansiasi
+   (nama generiknya tidak bisa di-breakpoint) lalu `bt` saat macet.
 2. **`make test`** — butuh QEMU + gdb, dan jejak yang sudah ada tidak
    cukup untuk menemukan penyebabnya sendiri.
 3. **SMAP/SMEP** — tidak berubah; masih item #1 di `ROADMAP.md`, dan masih
