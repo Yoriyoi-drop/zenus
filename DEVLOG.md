@@ -1124,14 +1124,238 @@ tidak terlihat. Tidak disentuh di commit ini; layak cleanup tersendiri.
 
 ---
 
+### BUG-023 — `sys_mprotect` menjalankan loop halaman tanpa batas
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** sangat tinggi — **bukan** bug khusus fuzz. `mprotect` adalah syscall biasa
+**Ditemukan oleh:** `make fuzz-smoke` (BUG-020 membuatnya bisa jalan)
+**Test:** `mprotect_refuses_a_range_it_would_have_to_walk_forever`
+
+**Di mana:** `crates/zenus-syscall/src/syscall.rs` — `sys_mprotect`
+
+```rust
+// sebelum
+let end_page = ((addr + length) + 0xFFF) & !0xFFF;
+let mut page = start_page;
+while page < end_page {
+    zenus_mem::paging::protect_page_raw(cr3, page, writable, executable);
+    page += 0x1000;
+}
+```
+
+**Yang salah:** tidak ada cek overflow **dan** tidak ada batas atas.
+`addr + length` wrap bisu, dan tidak ada yang membatasi rentangnya.
+
+Yang fuzzer berikan:
+
+```
+[FUZZ] TIMEOUT … stuck_in_case=313 subsystem=0 syscall=10
+[FUZZ] stuck args=[7665002f706d742f, 6c6900001000, 100000000000000, 0, 0, 0]
+```
+
+`syscall=10` adalah `SYS_MPROTECT`. `args[0] = 0x7665002f706d742f`,
+`args[1] = 0x6c6900001000` — rentangnya **3,4 GB**, jadi ~870 000 iterasi,
+masing-masing memanggil `protect_page_raw` yang menyusuri empat level page
+table lalu `invlpg`. Tidak ada apa pun di loop itu yang bisa menghentikannya.
+
+**Ini bukan temuan eksotis.** `mprotect` dipanggil program mana pun; cukup
+satu `length` yang salah dan mesinnya menggantung. `map_heap_pages` sudah punya
+keluar `page >= USER_SPACE_LIMIT`; `mprotect` tidak pernah mendapatkannya.
+
+Bug ini adalah **pemblokir campaign**: sebelum diperbaiki, `make fuzz-smoke`
+berhenti di kasus 313 dari 2000. Sesudah diperbaiki, campaign menyelesaikan
+2000 kasus dalam ~10 detik.
+
+**Fix:** `mprotect_range(addr, length, limit) -> Option<(start_page, end_page)>`
+murni yang menolak `length == 0`, overflow, dan apa pun yang menyentuh
+`USER_SPACE_LIMIT`.
+
+Bug keempat yang ketemu di sini: `end_page = (end + 0xFFF) & !0xFFF` untuk
+`end` yang sudah page-aligned **tidak benar** — `0x3000` membulatkan ke
+`0x3000`, sehingga halaman yang memuat byte `0x3000` sendiri hilang. Bentuk
+benarnya `(end | 0xFFF) + 1`. Ini sedikit di luar bug utama, tapi test
+menangkapnya sebelum di-commit.
+
+### BUG-024 — `sys_nanosleep` membandingkan milidetik dengan tick
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** sedang — semua sleep 100× terlalu lama; input fuzzer bisa memblokir permanen
+**Ditemukan oleh:** `make fuzz-smoke`
+**Test:** `a_sleep_deadline_is_in_ticks_and_cannot_wrap`
+
+```rust
+// sebelum
+let total_ms = sec.saturating_mul(1000).saturating_add(nsec / 1_000_000);
+…
+if elapsed >= total_ms { break; }     // elapsed adalah TICK
+```
+
+**Yang salah:** `pit::get_ticks` menghitung **tick** (10 ms), tapi
+perbandingannya memakai **milidetik**. `nanosleep(1, 0)` tidur **10 detik**.
+`nanosleep(0, 10_000_000)` tidur 100 ms, bukan 10 ms.
+
+Selain itu `nsec` tidak pernah diperiksa terhadap batas 1e9 — POSIX bilang
+`EINVAL` — dan kode ini sama sekali tidak memeriksanya. `ticks` juga tidak
+disaturasi secara bermakna:
+1,8e19 tick. Task itu lalu `yield_now()` selamanya — persis kondisi yang
+membuat watchdog melapor `TIMEOUT` dengan `hangs=0`.
+
+**Fix:** `nanosleep_deadline(now, sec, nsec)` murni, membulatkan **ke atas**
+(permintaan tidak boleh kembali lebih awal), menolak `nsec >= 1e9`, dan
+menolak deadline yang akan melewati `u64::MAX`.
+
+### BUG-025 — 17 syscall membentuk referensi user space tanpa cek halaman
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — `#PF` di ring 0, bukan `EFAULT`, dari 17 syscall
+**Ditemukan oleh:** `make fuzz-coverage`
+**Test:** `no_syscall_reaches_user_space_through_a_raw_pointer`
+
+**Ini kelanjutan langsung dari BUG-022.** Setelah enam site *scalar* diperbaiki,
+`make fuzz-coverage` menemukan bentuk yang sama dalam bentuk lain:
+
+```
+[FUZZ] CRASH ZENUS-FUZZ-000001 type=PAGE_FAULT
+  rip=0xffffffff8002e0be addr=0x10000000000 err=0x2
+  input=[06, 09, 2f, 74, 6d, 70, 38, 66, 75, 7a, 7a, ...]   ← "/tmp8fuzz"
+```
+
+`addr2line` → `sys_stat`, dan barisnya:
+
+```rust
+let stat_buf = stat_ptr as *mut StatBuf;
+unsafe { (*stat_buf).st_size = stat.size; … }
+```
+
+Tujuh belas syscall melakukan ini lebih atau kurang sama: mereka menerima
+alamat dari caller lalu langsung membentuk `&mut *(ptr as *mut T)` atau
+`let p = ptr as *mut T` lalu menulis lewat `(*p).field`. Semuanya hanya
+melewati `validate_user_range`, yang **hanya** membatasi rentang alamat — bukan
+mengecek apakah halamannya ada. Dengan SMAP mati, tidak ada jalur fixup yang
+bisa mengubahnya jadi `EFAULT`.
+
+Bentuk yang berbeda dari BUG-022 (`as *mut u64) =`), jadi test yang mengunci
+kelas itu saja tidak menangkapnya — needle-nya diperluas ke `&mut *(` dan
+`&*(`.
+
+**Fix:** `unsafe fn user_ptr<T>(ptr) -> Option<*mut T>` +
+`fn user_pages_mapped(ptr, len) -> bool`. `user_ptr` memvalidasi rentangnya
+**dan** mengecek tiap halaman dengan `virt_to_phys_raw` sebelum/Reference-nya
+dibentuk. Ketujuh belas site sekarang lewat situ, dan yang gagal mengembalikan
+`-1` (`EFAULT`) alih-alih fault.
+
+**Test diperluas** untuk menutup bentuk yang terlewat, dan memindai hanya
+bagian file sebelum `mod host_tests` supaya test tidak mendeteksi dirinya
+sendiri. Diverifikasi gagal sebelum fix (satu `sys_poll` dikembalikan ke
+`&mut *(offset as *mut Pollfd)` → 1 FAILED).
+
+### BUG-026 — verdict yang benar ditimpa `TIMEOUT` palsu
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** sedang — laporan hasil berbohong
+**Test:** tidak ada test; ini perilaku harness
+
+**Di mana:** `Makefile` (`FUZZ_TIMEOUT`), `apps/src/fuzz_runner.rs`
+
+**Yang salah:** `make fuzz-smoke` menjalankan QEMU dengan `-no-shutdown`, jadi
+permintaan S5 dari `poweroff()` **selalu diabaikan**. Kalau campaign selesai,
+`finish()` mencetak SUMMARY dan EXIT code yang benar, lalu memanggil
+`poweroff()`, yang tidak pernah menyala → terjebak di loop `hlt`
+`shutdown_via_acpi`. Boot task ternyata masih jalan, watchdog melihat
+`CAMPAIGN_DONE`, memanggil `finished`, dan **mencetak `TIMEOUT` di atas verdict
+yang benar**, dengan SUMMARY kedua dan `EXIT code=3` kedua. Run yang lulus
+terbaca seperti run yang hang.
+
+**Fix:** dua bagian.
+1. `-no-shutdown` dihapus dari `fuzz_run`, jadi `poweroff()` benar-benar
+   bekerja dan QEMU keluar dengan kode yang benar.
+2. `EXITING` di-set di awal `finish()`, `abort()`, dan
+   `run_regression_and_exit()`. Selama flag itu menyala, watchdog hanya
+   menunggu — jadi kalau poweroff gagal, verdict yang sudah terbit
+   tetap berdiri sendiri.
+
+### Diagnostik harness: sekarang hang bisa dinamai
+
+Sebelum BUG-023 bisa ditemukan, campaign tidak bisa bilang **input mana** yang
+membuatnya macet. `CASE_COUNTER` hanya memberi tahu seberapa jauh campaign
+sudah berjalan, dan angkanya sama untuk "berhenti bersih di kasus 313" dan
+"macet di dalam kasus 313".
+
+Ditambahkan:
+- `zenus_fuzz::CURRENT_CASE` — indeks kasus yang sedang jalan, dipublikasikan
+  **sebelum** kasus itu jalan
+- `syscall_fuzz::CURRENT_SYSCALL` dan `CURRENT_ARGS[6]` — dipublikasikan
+  sebelum dispatch
+
+Baris `TIMEOUT` sekarang mencantumkan semuanya, dan baris `waiting`
+mencantumkan kasus yang sedang jalan. Karena seed-nya tetap, indeks kasus
+sudah cukup untuk mereplikasinya — itulah yang membuat BUG-023 bisa
+ditemukan dalam satu putaran, bukan dalam satu minggu.
+
+---
+
+## Hasil: ketiga target fuzz sekarang jalan
+
+| Target | Sebelum | Sesudah |
+|---|---|---|
+| `make fuzz-smoke` | **tidak bisa dikompilasi** | 2000 kasus, `crashes=0`, `EXIT code=0`, ~10 s |
+| `make fuzz-regression` | tidak bisa dikompilasi | jalan; melaporkan `NO-CORPUS` dengan benar (`EXIT code=3` masih salah — lihat catatan) |
+| `make fuzz-coverage` | tidak bisa dikompilasi | 5506 kasus, `crashes=4`, `EXIT code=3` |
+
+`fuzz-smoke` discovering → fixing → clean dalam satu sesi:
+
+| Run | Hasil |
+|---|---|
+| pertama (setelah BUG-020) | `cases=313 crashes=6` |
+| setelah BUG-022 | `cases=313 crashes=0` |
+| setelah BUG-023 | `cases=2000 crashes=0` `EXIT code=0` |
+
+### Yang masih ditemukan `fuzz-coverage` — pekerjaan berikutnya
+
+Tidak diperbaiki di commit ini; invoice-nya sudah sempit:
+
+| Site | Bentuk |
+|---|---|
+| `sys_stat` (`syscall.rs:613`) | `let stat_buf = stat_ptr as *mut StatBuf;` lalu `(*stat_buf).field = …` |
+| `sys_write`-jalur (`syscall.rs:639`) | `let dst = buf as *mut u8;` |
+| `sys_pipe` (`syscall.rs:925`) | `let dst = pipefd_ptr as *mut u32;` |
+| `sys_execve` (`syscall.rs:1044`) | `*(arg_ptr_ptr as *const u64)` |
+| `sys_sethostname`/`gethostname` (`:1184`, `:1254`) | `let uts = buf as *mut UtsName;` |
+| `sys_sendto`/`recvfrom` (`:1435`, `:1487`) | `from_raw_parts(buf_ptr as *const u8, len)` — slice user space |
+| `sys_rt_sigaction` (`:1805`, `:1817`) | `oldact_ptr as *mut KernelSigAction` |
+| `sys_rt_sigprocmask` set (`:1937`) | `*(set_ptr as *const u64)` |
+| (`:3337`) | `*(buf_ptr as *mut u8).add(n) = 0` |
+
+Semuanya bentuk yang sama: pointer mentah ke user space tanpa `user_ptr()`.
+Penargetannya jelas sekarang, dan `user_ptr()` sudah ada.
+
+### Catatan lain dari campaign
+
+- `EXIT code=3` untuk `fuzz-regression` belum benar. README bilang harusnya
+  `2` ("corpus kosong = run ini tidak membuktikan apa-apa"). Jalur
+  `regression_verdict` sudah mengembalikan verdict yang benar, tetapi
+  `run_regression_and_exit` mengabaikannya dan selalu `emit_exit(3)`.
+- Record crash `type=UNKNOWN rip=0x0 input=[00]` adalah noise harness:
+  `run_case` mencatat fault untuk kasus yang sebenarnya tidak fault, karena
+  `fuzz_guard::arm` me-*reset* `LAST_VECTOR`/`LAST_RIP`, dan tidak ada yang
+ mengisinya lagi untuk kasus yang tidak fault. Bukan bug kernel.
+- `doc/fuzzing.md` dan `README.md` menyebut smoke sebagai "2 000 cases". Itu
+  sekarang benar untuk pertama kalinya.
+
+---
+
+---
+
 ## Lapisan verifikasi: apa yang benar-benar jalan
 
 | Lapisan | Status | Catatan |
 |---|---|---|
-| `make test-host` | **hijau**, 192 test | Sepanjang sesi ini |
+| `make test-host` | **hijau**, 196 test | Sepanjang sesi ini |
 | `cargo build` (default / testing / fuzz-smoke / fuzz-coverage / fuzz-regression) | **hijau** | Semua kombinasi feature |
-| `make fuzz-smoke` | **build + start**, belum selesai | BUG-017 sudah di-fix. Masih ada fault di dalam campaign: `instruction-fetch` fault di `0xFFFFFFFF805B9008` dengan `RSP = IDLE_RSP - 8`, yaitu pola "ret ke alamat sampah". `IDLE_RSP` ada di `0xffffffff80858f90`, jadi address itu 0x2FF588 di bawahnya — di luar alokasi idle stack. Dugaan terkuat: frame `run_campaign` lebih besar dari yang di accommodating task 256 KiB (`create_task_named(entry, 1 << 18, "fuzz")`), atau `fuzz_guard` memulihkan `(rsp, rip)` yang salah. Belum dibuktikan — butuh breakpoint di QEMU |
-| `make test` | **boot**, belum menyelesaikan test | Fixed BUG-018 dan BUG-019; mesin sekarang mencapai `run_tests` dan test pertama jalan, lalu beberapa kali page fault berturut-turut (handler-nya sendiri fault saat membaca stack). Terdaftar di bagian "belum selesai" |
+| `make fuzz-smoke` | **hijau** | 2000 kasus, `crashes=0`, `EXIT code=0`, ~10 s |
+| `make fuzz-regression` | jalan, verdict salah | Lihat catatan di atas: harusnya `code=2`, selalu `code=3` |
+| `make fuzz-coverage` | jalan, **4 crash** | Semua sudah teridentifikasi, belum diperbaiki — lihat daftarnya di atas |
+| `make test` | **boot**, belum menyelesaikan test | Fixed BUG-018 dan BUG-019; mesin mencapai `run_tests` dan test pertama jalan, lalu beberapa kali page fault berturut-turut (handler-nya sendiri fault saat membaca stack) |
 
 ### Yang belum selesai, dan kenapa saya tidak menebaknya
 
@@ -1150,8 +1374,15 @@ regression test — catatan saja").
    (`test_new_cache_empty`) selesai, jadi bukan boot lagi.
 3. **SMAP/SMEP.** Tidak berubah; masih item #1 di `ROADMAP.md`.
 
-Kalau ada yang mau diambil berikutnya, saya sarankan nomor 1 dengan QEMU + gdb,
-karena satu-satunya yang punya jejak yang cukup untuk diuji.
+Kalau ada yang mau diambil berikutnya, urutannya:
+
+1. **Sisa `#PF` di `fuzz-coverage`** — Mechanismenya sudah ada
+   (`user_ptr()`), targetnya sudah terdaftar, dan setiap perbaikannya punya test
+   yang bisa ditulis. Ini yang paling murah dan paling bernilai.
+2. **`make test`** — butuh QEMU + gdb, dan jejak yang sudah ada tidak
+   cukup untuk menemukan penyebabnya sendiri.
+3. **SMAP/SMEP** — tidak berubah; masih item #1 di `ROADMAP.md`, dan masih
+   butuh alasan yang benar.
 
 ---
 

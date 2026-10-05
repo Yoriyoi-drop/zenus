@@ -696,13 +696,50 @@ fn sys_dup(old_fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
     }
 }
 
+/// PIT frequency in Hz. `zenus_arch::interrupts::pit::get_ticks` counts at
+/// this rate and `uptime` assumes it.
+const TICKS_PER_SEC: u64 = 100;
+
+/// Convert a `timespec` into a tick deadline, or `None` if it is not valid.
+///
+/// Pure, and there were two bugs in the body this replaced:
+///
+/// * `tv_nsec` must be below 1e9. A value at or above it is `EINVAL`; the old
+///   code folded it in with `nsec / 1_000_000` and carried on, so
+///   `nanosleep(0, 2_000_000_000)` silently became a 2-second sleep.
+/// * The comparison was against **milliseconds** while `get_ticks` counts
+///   **ticks**. Every sleep was therefore 100x out: `nanosleep(1, 0)` slept ten
+///   seconds, and `nanosleep(0, 10_000_000)` slept 100 ms. And nothing
+///   saturated, so `nanosleep(u64::MAX, 0)` produced a deadline of 1.8e19
+///   ticks — a permanent block. That is what a fuzzed input found: the
+///   campaign task yielded forever, the watchdog fired, and the run was
+///   reported as a timeout with `hangs=0` rather than as the hang it was.
+pub fn nanosleep_deadline(now: u64, sec: u64, nsec: u64) -> Option<u64> {
+    const NSEC_PER_SEC: u64 = 1_000_000_000;
+    if nsec >= NSEC_PER_SEC {
+        return None;
+    }
+    let ms = sec
+        .saturating_mul(1000)
+        .saturating_add(nsec / 1_000_000);
+    // Ticks are 10 ms, so round *up*: a request must never return early.
+    let ticks = ms
+        .saturating_mul(TICKS_PER_SEC)
+        .saturating_add(999)
+        / 1000;
+    // Saturating, so the deadline stays in the future but never wraps.
+    now.checked_add(ticks)
+}
+
 fn sys_nanosleep(sec: u64, nsec: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    let total_ms = sec.saturating_mul(1000).saturating_add(nsec / 1_000_000);
-    let start = zenus_arch::interrupts::pit::get_ticks();
+    let now = zenus_arch::interrupts::pit::get_ticks();
+    let deadline = match nanosleep_deadline(now, sec, nsec) {
+        Some(d) => d,
+        None => return -1i64 as u64,
+    };
     loop {
         zenus_sched::scheduler::yield_now();
-        let elapsed = zenus_arch::interrupts::pit::get_ticks().wrapping_sub(start);
-        if elapsed >= total_ms {
+        if zenus_arch::interrupts::pit::get_ticks().wrapping_sub(now) >= deadline - now {
             break;
         }
         x86_64::instructions::hlt();
@@ -1306,10 +1343,11 @@ fn sys_bind(fd: u64, addr_ptr: u64, _addrlen: u64, _a4: u64, _a5: u64, _a6: u64)
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    if !validate_user_range(addr_ptr, core::mem::size_of::<SockaddrIn>() as u64) {
-        return -1i64 as u64;
-    }
-    let sa = unsafe { &*(addr_ptr as *const SockaddrIn) };
+    let sa_ptr = match unsafe { user_ptr::<SockaddrIn>(addr_ptr) } {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let sa = unsafe { &*sa_ptr };
     let port = u16::from_be(sa.sin_port);
 
     if net_socket::bind(sock_id, port) {
@@ -1367,10 +1405,11 @@ fn sys_connect(fd: u64, addr_ptr: u64, _addrlen: u64, _a4: u64, _a5: u64, _a6: u
         return -1i64 as u64;
     }
     let sock_id = entry.socket_id as usize;
-    if !validate_user_range(addr_ptr, core::mem::size_of::<SockaddrIn>() as u64) {
-        return -1i64 as u64;
-    }
-    let sa = unsafe { &*(addr_ptr as *const SockaddrIn) };
+    let sa_ptr = match unsafe { user_ptr::<SockaddrIn>(addr_ptr) } {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let sa = unsafe { &*sa_ptr };
     let dst_port = u16::from_be(sa.sin_port);
     let dst_ip = sa.sin_addr;
 
@@ -1447,10 +1486,12 @@ fn sys_sendto(fd: u64, buf_ptr: u64, len: u64, _flags: u64, addr_ptr: u64, _addr
     }
     let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len as usize) };
 
-    let (dst_ip, dst_port) = if addr_ptr != 0
-        && validate_user_range(addr_ptr, core::mem::size_of::<SockaddrIn>() as u64)
-    {
-        let sa = unsafe { &*(addr_ptr as *const SockaddrIn) };
+    let (dst_ip, dst_port) = if addr_ptr != 0 {
+        let sa_ptr = match unsafe { user_ptr::<SockaddrIn>(addr_ptr) } {
+            Some(p) => p,
+            None => return -1i64 as u64,
+        };
+        let sa = unsafe { &*sa_ptr };
         (sa.sin_addr, u16::from_be(sa.sin_port))
     } else {
         return -1i64 as u64;
@@ -1495,10 +1536,12 @@ fn sys_recvfrom(
             unsafe {
                 core::ptr::copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, n);
             }
-            if addr_ptr != 0
-                && validate_user_range(addr_ptr, core::mem::size_of::<SockaddrIn>() as u64)
-            {
-                let sa = unsafe { &mut *(addr_ptr as *mut SockaddrIn) };
+            if addr_ptr != 0 {
+                let sa_ptr = match unsafe { user_ptr::<SockaddrIn>(addr_ptr) } {
+                    Some(p) => p,
+                    None => return -1i64 as u64,
+                };
+                let sa = unsafe { &mut *sa_ptr };
                 sa.sin_family = net_socket::AF_INET as u16;
                 sa.sin_port = 0u16.to_be();
                 sa.sin_addr = [0; 4];
@@ -1537,7 +1580,11 @@ fn sys_getsockname(fd: u64, addr_ptr: u64, _addrlen: u64, _a4: u64, _a5: u64, _a
     if entry.socket_id == u64::MAX {
         return -1i64 as u64;
     }
-    let sa = unsafe { &mut *(addr_ptr as *mut SockaddrIn) };
+    let sa_ptr = match unsafe { user_ptr::<SockaddrIn>(addr_ptr) } {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let sa = unsafe { &mut *sa_ptr };
     sa.sin_family = net_socket::AF_INET as u16;
     sa.sin_port = 0u16.to_be();
     sa.sin_addr = [0, 0, 0, 0];
@@ -1556,7 +1603,11 @@ fn sys_getpeername(fd: u64, addr_ptr: u64, _addrlen: u64, _a4: u64, _a5: u64, _a
     if entry.socket_id == u64::MAX {
         return -1i64 as u64;
     }
-    let sa = unsafe { &mut *(addr_ptr as *mut SockaddrIn) };
+    let sa_ptr = match unsafe { user_ptr::<SockaddrIn>(addr_ptr) } {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let sa = unsafe { &mut *sa_ptr };
     sa.sin_family = net_socket::AF_INET as u16;
     sa.sin_port = 0u16.to_be();
     sa.sin_addr = [0, 0, 0, 0];
@@ -1776,6 +1827,57 @@ fn sys_rt_sigaction(
     }
 
     0
+}
+
+/// Validate a user range and hand back a pointer to it, or `None` if any of its
+/// pages is not mapped.
+///
+/// `validate_user_range` only bounds the address; it does not check that the
+/// page exists. Seventeen syscalls used to take a caller-supplied address and
+/// immediately build `&mut *(ptr as *mut T)` from it, so any in-range-but-
+/// unmapped pointer read or wrote through a page table entry that was not
+/// there — a `#PF` in ring 0. With SMAP off there is no `stac` fixup path that
+/// could turn it into `EFAULT`, so the program crashes the kernel.
+///
+/// Every reference into user space has to come from here.
+///
+/// # Safety
+///
+/// The returned pointer is only valid while the mapping stays put. Callers
+/// dereference it immediately, which is the intent: that is how a syscall reads
+/// a struct out of user memory.
+unsafe fn user_ptr<T>(ptr: u64) -> Option<*mut T> {
+    let len = core::mem::size_of::<T>() as u64;
+    if !validate_user_range(ptr, len) {
+        return None;
+    }
+    if !user_pages_mapped(ptr, len) {
+        return None;
+    }
+    Some(ptr as *mut T)
+}
+
+/// Are all the pages of `ptr..ptr+len` present in the current address space?
+///
+/// Reads no memory, so it is safe to call on a range that is not mapped — which
+/// is exactly the case being tested.
+fn user_pages_mapped(ptr: u64, len: u64) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
+    }
+    let mut offset = 0u64;
+    while offset < len {
+        let current = ptr + offset;
+        if zenus_mem::paging::virt_to_phys_raw(cr3, current).is_none() {
+            return false;
+        }
+        offset += 4096 - (current & 0xFFF);
+    }
+    true
 }
 
 /// Write a scalar to a user pointer, with the per-page revalidation
@@ -2027,10 +2129,54 @@ fn sys_munmap(addr: u64, length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) ->
     0
 }
 
-fn sys_mprotect(addr: u64, length: u64, prot: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+/// The page range an `mprotect` walks, or `None` if the request is not a legal
+/// range to walk at all.
+///
+/// Pure, and `sys_mprotect` had neither an overflow check nor an upper bound:
+///
+/// ```text
+/// let end_page = ((addr + length) + 0xFFF) & !0xFFF;
+/// while page < end_page { protect_page_raw(cr3, page, ..); page += 0x1000; }
+/// ```
+///
+/// `addr + length` wraps silently, and nothing caps the span. The fuzzing
+/// campaign found it immediately with
+/// `mprotect(0x7665002f706d742f, 0x6c6900001000, …)` — a span of about 3.4 GB,
+/// so roughly 870 000 iterations, each a four-level page-table walk ending in an
+/// `invlpg`. Nothing in the loop could stop it, and `mprotect` is an ordinary
+/// syscall: any program with a bad `length` hangs the machine.
+///
+/// `map_heap_pages` already had the `page >= USER_SPACE_LIMIT` bail-out that
+/// this needed; `mprotect` never got one.
+pub fn mprotect_range(addr: u64, length: u64, limit: u64) -> Option<(u64, u64)> {
     if length == 0 {
-        return -1i64 as u64;
+        return None;
     }
+    // Round the end up *without* wrapping. `addr + length - 1` is the last byte
+    // actually named, so this is the exact overflow check.
+    let end = addr.checked_add(length.checked_sub(1)?)?;
+    if end >= limit {
+        return None;
+    }
+    let start_page = addr & !0xFFF;
+    // `end` is the last byte named, so the exclusive end is one past the page
+    // that holds it. `(end + 0xFFF) & !0xFFF` gets this wrong for an
+    // already-aligned `end`: 0x3000 rounds to 0x3000, dropping the page that
+    // contains byte 0x3000 itself.
+    let end_page = (end | 0xFFF).checked_add(1)?;
+    // `end_page` cannot be below `start_page` after the checks above, but the
+    // loop depends on it and one bad number here is a 2^64-iteration hang.
+    if end_page <= start_page {
+        return None;
+    }
+    Some((start_page, end_page))
+}
+
+fn sys_mprotect(addr: u64, length: u64, prot: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let (start_page, end_page) = match mprotect_range(addr, length, USER_SPACE_LIMIT) {
+        Some(r) => r,
+        None => return -1i64 as u64,
+    };
 
     let task_id = scheduler::current_task_id();
     let cr3 = match scheduler::get_task_cr3(task_id) {
@@ -2038,8 +2184,6 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64, _a4: u64, _a5: u64, _a6: u64)
         None => return -1i64 as u64,
     };
 
-    let start_page = addr & !0xFFF;
-    let end_page = ((addr + length) + 0xFFF) & !0xFFF;
     let writable = prot & zenus_sched::task::PROT_WRITE != 0;
     let executable = prot & zenus_sched::task::PROT_EXEC != 0;
 
@@ -2080,8 +2224,12 @@ fn sys_gettimeofday(tv_ptr: u64, _tz_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6
     let sec = epoch + uptime_ms / 1000;
     let usec = (uptime_ms % 1000) * 1000;
 
-    if tv_ptr != 0 && validate_user_range(tv_ptr, core::mem::size_of::<Timeval>() as u64) {
-        let tv = unsafe { &mut *(tv_ptr as *mut Timeval) };
+    if tv_ptr != 0 {
+        let tv_ptr = match unsafe { user_ptr::<Timeval>(tv_ptr) } {
+            Some(p) => p,
+            None => return -1i64 as u64,
+        };
+        let tv = unsafe { &mut *tv_ptr };
         tv.tv_sec = sec;
         tv.tv_usec = usec;
     }
@@ -2113,8 +2261,12 @@ fn sys_clock_gettime(clock_id: u64, tp_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _
         _ => return -1i64 as u64,
     };
 
-    if tp_ptr != 0 && validate_user_range(tp_ptr, core::mem::size_of::<Timespec>() as u64) {
-        let tp = unsafe { &mut *(tp_ptr as *mut Timespec) };
+    if tp_ptr != 0 {
+        let tp_ptr = match unsafe { user_ptr::<Timespec>(tp_ptr) } {
+            Some(p) => p,
+            None => return -1i64 as u64,
+        };
+        let tp = unsafe { &mut *tp_ptr };
         tp.tv_sec = sec;
         tp.tv_nsec = nsec;
     }
@@ -2126,8 +2278,12 @@ fn sys_clock_getres(clock_id: u64, res_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _
         0 | 1 | 2 | 3 => (0u64, 10_000_000u64), // 10ms resolution
         _ => return -1i64 as u64,
     };
-    if res_ptr != 0 && validate_user_range(res_ptr, core::mem::size_of::<Timespec>() as u64) {
-        let res = unsafe { &mut *(res_ptr as *mut Timespec) };
+    if res_ptr != 0 {
+        let res_ptr = match unsafe { user_ptr::<Timespec>(res_ptr) } {
+            Some(p) => p,
+            None => return -1i64 as u64,
+        };
+        let res = unsafe { &mut *res_ptr };
         res.tv_sec = sec;
         res.tv_nsec = nsec;
     }
@@ -2851,7 +3007,10 @@ fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64, _a4: u64, _a5: u64, _a6: u
         let mut ready = 0u64;
         for i in 0..nfds {
             let offset = fds_ptr + i * core::mem::size_of::<Pollfd>() as u64;
-            let pfd = unsafe { &mut *(offset as *mut Pollfd) };
+            let pfd = match unsafe { user_ptr::<Pollfd>(offset) } {
+                Some(p) => unsafe { &mut *p },
+                None => return -1i64 as u64,
+            };
             pfd.revents = 0;
 
             let fd = pfd.fd as u64;
@@ -2988,8 +3147,12 @@ fn sys_select(
         return -1i64 as u64;
     }
 
-    let timeout_ms = if timeout_ptr != 0 && validate_user_range(timeout_ptr, 8) {
-        let ts = unsafe { &*(timeout_ptr as *const Timespec) };
+    let timeout_ms = if timeout_ptr != 0 {
+        let ts_ptr = match unsafe { user_ptr::<Timespec>(timeout_ptr) } {
+            Some(p) => p,
+            None => return -1i64 as u64,
+        };
+        let ts = unsafe { &*ts_ptr };
         ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000
     } else {
         u64::MAX
@@ -3127,10 +3290,11 @@ struct Rlimit {
 }
 
 fn sys_getrlimit(resource: u64, rlim_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if rlim_ptr == 0 || !validate_user_range(rlim_ptr, core::mem::size_of::<Rlimit>() as u64) {
-        return -1i64 as u64;
-    }
-    let rl = unsafe { &mut *(rlim_ptr as *mut Rlimit) };
+    let rl_ptr = match unsafe { user_ptr::<Rlimit>(rlim_ptr) } {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let rl = unsafe { &mut *rl_ptr };
     match resource {
         7 | 9 => {
             rl.rlim_cur = 256;
@@ -3337,7 +3501,11 @@ fn sys_fstatat(_dirfd: u64, path_ptr: u64, stat_ptr: u64, _flags: u64, _a5: u64,
         None => return -1i64 as u64,
     };
     let stat = node.fs.stat(node.inode);
-    let sb = unsafe { &mut *(stat_ptr as *mut StatBuf) };
+    let sb_ptr = match unsafe { user_ptr::<StatBuf>(stat_ptr) } {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let sb = unsafe { &mut *sb_ptr };
     sb.st_size = stat.size;
     sb.st_mode = stat.mode as u64;
     sb.st_ino = stat.inode;
@@ -3432,7 +3600,11 @@ fn sys_fstat(fd: u64, stat_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> 
         Some(e) => e,
         None => return -1i64 as u64,
     };
-    let sb = unsafe { &mut *(stat_ptr as *mut StatBuf) };
+    let sb_ptr = match unsafe { user_ptr::<StatBuf>(stat_ptr) } {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let sb = unsafe { &mut *sb_ptr };
     if let Some(fs) = entry.fs {
         let stat = fs.stat(entry.inode);
         sb.st_size = stat.size;
@@ -3447,10 +3619,11 @@ fn sys_fstat(fd: u64, stat_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> 
 }
 
 fn sys_fstatfs(_fd: u64, buf_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if buf_ptr == 0 || !validate_user_range(buf_ptr, core::mem::size_of::<StatFs>() as u64) {
-        return -1i64 as u64;
-    }
-    let sb = unsafe { &mut *(buf_ptr as *mut StatFs) };
+    let sb_ptr = match unsafe { user_ptr::<StatFs>(buf_ptr) } {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let sb = unsafe { &mut *sb_ptr };
     sb.f_type = 0x5346544E; // "NTFS" magic for ext2-like
     sb.f_bsize = 4096;
     sb.f_blocks = 1024;
@@ -3464,10 +3637,11 @@ fn sys_fstatfs(_fd: u64, buf_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -
 }
 
 fn sys_statfs(_path_ptr: u64, buf_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if buf_ptr == 0 || !validate_user_range(buf_ptr, core::mem::size_of::<StatFs>() as u64) {
-        return -1i64 as u64;
-    }
-    let sb = unsafe { &mut *(buf_ptr as *mut StatFs) };
+    let sb_ptr = match unsafe { user_ptr::<StatFs>(buf_ptr) } {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let sb = unsafe { &mut *sb_ptr };
     sb.f_type = 0x5346544E;
     sb.f_bsize = 4096;
     sb.f_blocks = 1024;
@@ -3537,10 +3711,11 @@ struct RUsage {
 }
 
 fn sys_getrusage(_who: u64, rusage_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if rusage_ptr == 0 || !validate_user_range(rusage_ptr, core::mem::size_of::<RUsage>() as u64) {
-        return -1i64 as u64;
-    }
-    let ru = unsafe { &mut *(rusage_ptr as *mut RUsage) };
+    let ru_ptr = match unsafe { user_ptr::<RUsage>(rusage_ptr) } {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let ru = unsafe { &mut *ru_ptr };
     let ticks = zenus_arch::interrupts::pit::get_ticks();
     let sec = ticks / 100;
     let usec = (ticks % 100) * 10000;
@@ -3565,8 +3740,12 @@ struct Tms {
 
 fn sys_times(tms_ptr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     let ticks = zenus_arch::interrupts::pit::get_ticks();
-    if tms_ptr != 0 && validate_user_range(tms_ptr, core::mem::size_of::<Tms>() as u64) {
-        let tms = unsafe { &mut *(tms_ptr as *mut Tms) };
+    if tms_ptr != 0 {
+        let tms_ptr = match unsafe { user_ptr::<Tms>(tms_ptr) } {
+            Some(p) => p,
+            None => return -1i64 as u64,
+        };
+        let tms = unsafe { &mut *tms_ptr };
         tms.tms_utime = ticks;
         tms.tms_stime = 0;
         tms.tms_cutime = 0;
@@ -3660,8 +3839,9 @@ pub extern "C" fn syscall_signal_hook(kernel_rsp: u64) {
 #[cfg(test)]
 mod host_tests {
     use super::{
-        brk_action, checked_array_len, mount_flags_from_syscall, validate_user_range, BrkAction,
-        MAX_XFER, MS_NODEV, MS_NOSUID, MS_NOEXEC, USER_SPACE_LIMIT,
+        brk_action, checked_array_len, mount_flags_from_syscall, mprotect_range,
+        nanosleep_deadline, validate_user_range, BrkAction, MAX_XFER, MS_NODEV, MS_NOSUID,
+        MS_NOEXEC, USER_SPACE_LIMIT,
     };
     use super::MS_RDONLY as SYSCALL_MS_RDONLY;
 
@@ -3773,19 +3953,27 @@ mod host_tests {
     /// user space. A source scan catches a new site the day it is added, which
     /// is the only way this can be enforced from the host.
     #[test]
-    fn no_syscall_writes_to_user_space_through_a_raw_pointer() {
+    fn no_syscall_reaches_user_space_through_a_raw_pointer() {
         // Assembled from pieces so this test's own needles do not appear
         // verbatim in the file it scans — otherwise it finds itself.
-        const NEEDLES: [&str; 3] = [
+        const NEEDLES: [&str; 5] = [
             concat!("as *mut u64", ") ="),
             concat!("as *mut u32", ") ="),
             concat!("as *mut u8", ") ="),
+            concat!("&mut *("),
+            concat!("&*("),
         ];
+        // The needle literals above are themselves on lines the scan would flag,
+        // so the test skips its own body: everything from here to the end.
         let source = include_str!("syscall.rs");
+        let source = match source.split_once("mod host_tests {") {
+            Some((head, _)) => head,
+            None => source,
+        };
 
-        // The only remaining raw stores are the ELF loader writing the initial
-        // user stack of an address space it just created. Those addresses come
-        // from `loaded.stack_top`, not from the caller.
+        // The only remaining raw accesses are the ELF loader building the
+        // initial user stack of an address space it just created. Those
+        // addresses come from `loaded.stack_top`, not from the caller.
         let allowed = [
             concat!("*((argv_pos) as *mut u64", ") = str_cur2;"),
             concat!("*((argv_pos) as *mut u64", ") = str_cur_pos;"),
@@ -3798,17 +3986,17 @@ mod host_tests {
             if !NEEDLES.iter().any(|n| trimmed.contains(n)) {
                 continue;
             }
-            // Skip the doc comment that quotes the old shape as prose.
+            // Skip the doc comments that quote the old shapes as prose.
             if trimmed.starts_with("//") {
                 continue;
             }
             assert!(
                 allowed.iter().any(|a| trimmed.contains(a)),
-                "syscall.rs:{} writes to a user pointer directly: {}. Route it \
-                 through copy_kernel_to_user (or copy_u64_to_user / \
-                 copy_u32_to_user / copy_u64_pair_to_user), so an \
-                 in-range-but-unmapped pointer becomes EFAULT instead of a page \
-                 fault in ring 0.",
+                "syscall.rs:{} reaches into user space directly: {}. Route it \
+                 through user_ptr() for a struct, or copy_kernel_to_user (or \
+                 copy_u64_to_user / copy_u32_to_user / copy_u64_pair_to_user) \
+                 for a scalar, so an in-range-but-unmapped pointer becomes \
+                 EFAULT instead of a page fault in ring 0.",
                 lineno + 1,
                 trimmed
             );
@@ -3837,6 +4025,124 @@ mod host_tests {
         assert!(
             validate_user_range(0x7075, 8),
             "0x7075 is in range — this is the case that used to fault"
+        );
+    }
+
+    /// Regression, found by the fuzzing campaign: `sys_mprotect` had no overflow
+    /// check and no upper bound. It computed `((addr + length) + 0xFFF) & !0xFFF`
+    /// and walked page by page from `addr` to there. The fuzzer passed
+    /// `mprotect(0x7665002f706d742f, 0x6c6900001000, …)` — a ~3.4 GB span, so
+    /// ~870 000 iterations of a four-level page-table walk each ending in an
+    /// `invlpg`, with nothing in the loop able to stop.
+    ///
+    /// This is not a fuzz-only bug: `mprotect` is an ordinary syscall, so any
+    /// program with a bad `length` wedges the machine.
+    #[test]
+    fn mprotect_refuses_a_range_it_would_have_to_walk_forever() {
+        // The exact pair the fuzzer produced.
+        assert_eq!(
+            mprotect_range(0x7665002f706d742f, 0x6c6900001000, USER_SPACE_LIMIT),
+            None,
+            "a 3.4 GB span starting past the user-space limit"
+        );
+
+        // `addr + length` overflow is refused, not wrapped into the past. A
+        // wrapped end below the start would skip the loop entirely; a wrapped
+        // end above it would be a 2^64-iteration hang.
+        assert_eq!(mprotect_range(u64::MAX, 2, USER_SPACE_LIMIT), None);
+        assert_eq!(mprotect_range(u64::MAX - 8, 4096, USER_SPACE_LIMIT), None);
+        assert_eq!(mprotect_range(0x1000, u64::MAX, USER_SPACE_LIMIT), None);
+
+        // Reaching the user-space limit is refused: the last usable page is
+        // below it.
+        assert_eq!(mprotect_range(0x1000, USER_SPACE_LIMIT, USER_SPACE_LIMIT), None);
+
+        // A zero length is EINVAL, as before.
+        assert_eq!(mprotect_range(0x1000, 0, USER_SPACE_LIMIT), None);
+
+        // Ordinary requests still work, and the range is page-aligned.
+        assert_eq!(
+            mprotect_range(0x1000, 0x1000, USER_SPACE_LIMIT),
+            Some((0x1000, 0x2000))
+        );
+        assert_eq!(
+            mprotect_range(0x1234, 1, USER_SPACE_LIMIT),
+            Some((0x1000, 0x2000)),
+            "one byte still covers its whole page, and the end rounds up"
+        );
+        assert_eq!(
+            mprotect_range(0x1000, 0x2001, USER_SPACE_LIMIT),
+            Some((0x1000, 0x4000)),
+            "0x2001 bytes is three pages, not two"
+        );
+
+        // The last byte may be the one below the limit.
+        assert_eq!(
+            mprotect_range(USER_SPACE_LIMIT - 0x1000, 0x1000, USER_SPACE_LIMIT),
+            Some((USER_SPACE_LIMIT - 0x1000, USER_SPACE_LIMIT))
+        );
+
+        // The helper is only useful if `sys_mprotect` actually calls it. The
+        // range walk needs a live address space, so what is locked in is that
+        // the syscall cannot go back to computing its own unbounded end.
+        let source = include_str!("syscall.rs");
+        let body = source
+            .split("fn sys_mprotect(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("sys_mprotect exists");
+        assert!(
+            body.contains("mprotect_range(addr, length, USER_SPACE_LIMIT)"),
+            "sys_mprotect must derive its page range from mprotect_range"
+        );
+        assert!(
+            !body.contains("(addr + length)"),
+            "sys_mprotect must not compute its own end offset: that is the \
+             unchecked expression this bug was"
+        );
+    }
+
+    /// Regression, found by the fuzzing campaign: `sys_nanosleep` compared a
+    /// **millisecond** count against `pit::get_ticks`, which counts **ticks** —
+    /// 10 ms apart. Every sleep was 100x too long, and `sec` never saturated, so
+    /// a fuzzed `nanosleep(u64::MAX, 0)` had a deadline of 1.8e19 ticks. The
+    /// campaign task then yielded forever, the watchdog fired, and the run was
+    /// labelled a timeout with `hangs=0` instead of the hang it was.
+    #[test]
+    fn a_sleep_deadline_is_in_ticks_and_cannot_wrap() {
+        // One second is 100 ticks at 100 Hz — not 1000. And a tick is 10 ms, so
+        // 10 ms is one tick, not ten.
+        assert_eq!(nanosleep_deadline(0, 1, 0), Some(100));
+        assert_eq!(nanosleep_deadline(0, 0, 10_000_000), Some(1));
+        assert_eq!(nanosleep_deadline(0, 0, 0), Some(0), "a zero sleep is not an error");
+
+        // Rounds up, so a request never returns early. 1 ms still costs a whole
+        // tick, and 11 ms must not round down to one.
+        assert_eq!(nanosleep_deadline(0, 0, 1_000_000), Some(1));
+        assert_eq!(nanosleep_deadline(0, 0, 11_000_000), Some(2));
+
+        // The deadline is relative to now, not absolute.
+        assert_eq!(nanosleep_deadline(500, 1, 0), Some(600));
+
+        // `tv_nsec` out of range is EINVAL, not a silently folded-in number.
+        assert_eq!(nanosleep_deadline(0, 0, 1_000_000_000), None);
+        assert_eq!(nanosleep_deadline(0, 0, u64::MAX), None);
+        assert_eq!(nanosleep_deadline(0, 0, 999_999_999), Some(100));
+
+        // And the fuzzed case that hung the campaign now has a deadline in the
+        // future rather than 1.8e19 ticks out.
+        let huge = nanosleep_deadline(0, u64::MAX, 0).expect("saturates, not None");
+        assert!(huge > 0);
+        assert_eq!(
+            nanosleep_deadline(u64::MAX, 1, 0),
+            None,
+            "a real sleep at the end of the counter must be refused, not wrapped \
+             into the past — which would return immediately"
+        );
+        assert_eq!(
+            nanosleep_deadline(u64::MAX, 0, 0),
+            Some(u64::MAX),
+            "a zero sleep at the end of the counter is just already elapsed"
         );
     }
 

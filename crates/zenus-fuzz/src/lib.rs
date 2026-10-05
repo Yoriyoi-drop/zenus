@@ -35,6 +35,15 @@ pub static CURRENT_SUBSYSTEM: core::sync::atomic::AtomicU8 =
 pub static CASE_COUNTER: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
+/// Index of the case currently executing, published *before* it runs.
+///
+/// The watchdog reads this when it fires. `CASE_COUNTER` only says how far the
+/// campaign got, which is the same number for "stopped cleanly on case 313" and
+/// "wedged inside case 313" — so it could not distinguish a hang from a
+/// campaign that simply ran out of budget.
+pub static CURRENT_CASE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 #[derive(Clone, Copy, Default)]
 pub struct FuzzStats {
     pub total_cases: u64,
@@ -299,6 +308,13 @@ pub fn run_campaign(mode: Mode, cases: u64, seed: u64) -> FuzzStats {
         } else {
             base
         };
+
+        // Published *before* the case runs, and read by the watchdog. Without
+        // it, a campaign that wedges says only "cases=313" — the number it had
+        // reached — and never which input wedged it. Since the seed is fixed,
+        // the index is enough to replay it, so this is the difference between
+        // "the fuzzer hung" and "the fuzzer hung on *this*".
+        CURRENT_CASE.store(executed, core::sync::atomic::Ordering::Release);
 
         // `run_case` owns the checkpoint: a fault inside the case unwinds back
         // into *it*, not into this loop, so the loop's state is never touched

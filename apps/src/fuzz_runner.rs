@@ -25,6 +25,15 @@ use zenus_console::serial::SerialPort;
 
 /// Set by the campaign task when it finished normally.
 static CAMPAIGN_DONE: AtomicBool = AtomicBool::new(false);
+/// Set once a verdict has been published, before the VM is asked to power off.
+///
+/// The campaign task and the boot task's watchdog are independent: if the power
+/// off does not take (no ACPI table, or QEMU started with `-no-shutdown`), the
+/// campaign task sits in `shutdown_via_acpi`'s `hlt` loop, the watchdog sees
+/// `CAMPAIGN_DONE` and calls `finished`, and a **bogus** `TIMEOUT` gets printed
+/// on top of a correct verdict — with a second `SUMMARY` and a second
+/// `EXIT code=3`. A run that passed then read as a run that hung.
+static EXITING: AtomicBool = AtomicBool::new(false);
 /// Wall-clock budget for a campaign, in PIT ticks (100 Hz) plus seconds.
 const TIMEOUT_SECS: u64 = 120;
 
@@ -69,6 +78,7 @@ fn emit_exit(code: u32) {
 
 /// Campaign verdict.
 fn finish(stats: &zenus_fuzz::FuzzStats) -> ! {
+    EXITING.store(true, Ordering::Release);
     zenus_fuzz::print_stats();
     zenus_fuzz::print_report();
 
@@ -88,12 +98,27 @@ fn finish(stats: &zenus_fuzz::FuzzStats) -> ! {
 
 /// Report an aborted campaign (watchdog fired) and power off.
 fn abort(reason: &str) -> ! {
+    EXITING.store(true, Ordering::Release);
+    // `CURRENT_CASE`, not just `CASE_COUNTER`: the counter only says how far the
+    // campaign got, which is the same number whether it stopped cleanly on case
+    // 313 or wedged inside it. The index is what makes the run replayable,
+    // since the seed is fixed.
+    let stuck_syscall = zenus_fuzz::syscall_fuzz::CURRENT_SYSCALL.load(Ordering::Relaxed);
     zenus_console::kinfo!(
-        "[FUZZ] TIMEOUT reason={} cases={} subsystem={}",
+        "[FUZZ] TIMEOUT reason={} cases={} stuck_in_case={} subsystem={} syscall={}",
         reason,
         zenus_fuzz::CASE_COUNTER.load(Ordering::Relaxed),
-        zenus_fuzz::CURRENT_SUBSYSTEM.load(Ordering::Relaxed)
+        zenus_fuzz::CURRENT_CASE.load(Ordering::Relaxed),
+        zenus_fuzz::CURRENT_SUBSYSTEM.load(Ordering::Relaxed),
+        stuck_syscall
     );
+    if zenus_fuzz::CURRENT_SUBSYSTEM.load(Ordering::Relaxed) == 0 {
+        let args: alloc::vec::Vec<u64> = zenus_fuzz::syscall_fuzz::CURRENT_ARGS
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .collect();
+        zenus_console::kinfo!("[FUZZ] stuck args={:x?}", args);
+    }
     zenus_fuzz::print_report();
     emit_exit(3);
     poweroff()
@@ -163,6 +188,12 @@ pub fn run_and_exit(mode: zenus_fuzz::Mode, cases: u64) -> ! {
 /// Watchdog predicate: true once the deadline expired or the campaign task
 /// finished without publishing a verdict.
 fn watchdog() -> bool {
+    // A verdict is already out. Keep idling: reporting a timeout now would
+    // stack a `TIMEOUT` and a second `EXIT code=3` on top of the real result.
+    // See `EXITING`.
+    if EXITING.load(Ordering::Acquire) {
+        return false;
+    }
     if CAMPAIGN_DONE.load(Ordering::Acquire) {
         return true;
     }
@@ -179,8 +210,9 @@ fn watchdog() -> bool {
     if ticks != LAST_REPORT.load(Ordering::Relaxed) {
         LAST_REPORT.store(ticks, Ordering::Relaxed);
         zenus_console::kinfo!(
-            "[FUZZ] waiting cases={} elapsed={}s",
+            "[FUZZ] waiting cases={} stuck_in_case={} elapsed={}s",
             zenus_fuzz::CASE_COUNTER.load(Ordering::Relaxed),
+            zenus_fuzz::CURRENT_CASE.load(Ordering::Relaxed),
             ticks
         );
         flush();
@@ -195,6 +227,7 @@ static LAST_REPORT: AtomicU64 = AtomicU64::new(0);
 
 /// `make fuzz-regression`: replay the recorded crash corpus.
 pub fn run_regression_and_exit() -> ! {
+    EXITING.store(true, Ordering::Release);
     print_banner(zenus_fuzz::Mode::Regression, 0);
     zenus_arch::interrupts::pit::init();
     zenus_arch::fuzz_guard::reset();

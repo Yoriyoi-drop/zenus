@@ -4,6 +4,25 @@ use crate::coverage;
 use crate::crash;
 use crate::FuzzResult;
 
+/// Syscall number of the case currently executing, published before the
+/// dispatch.
+///
+/// A fuzzed syscall can block forever, and nothing in the fault containment
+/// catches that — `fuzz_guard` resumes faults, not parks. When the watchdog
+/// fires, `CURRENT_CASE` says *which* case wedged; this says which syscall it
+/// was calling, which is what actually identifies the bug.
+pub static CURRENT_SYSCALL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Arguments of the case currently executing, for the same reason.
+pub static CURRENT_ARGS: [core::sync::atomic::AtomicU64; 6] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
 /// Fuzzing input format for syscalls:
 /// [syscall_id: u8] [arg0..arg5: u64 each] [memory_region: bytes]
 pub fn execute(input: &[u8]) -> FuzzResult {
@@ -19,6 +38,14 @@ pub fn execute(input: &[u8]) -> FuzzResult {
         return FuzzResult::Normal;
     }
     let args = parse_args(&input[1..]);
+
+    // Published before the dispatch, so the watchdog can name the syscall that
+    // wedged the campaign. `fuzz_guard` contains faults; nothing contains a
+    // block, so this is the only trail a hang leaves.
+    CURRENT_SYSCALL.store(syscall_id, core::sync::atomic::Ordering::Release);
+    for (slot, value) in CURRENT_ARGS.iter().zip(args.iter()) {
+        slot.store(*value, core::sync::atomic::Ordering::Release);
+    }
 
     // Record coverage for this syscall path
     coverage::record_edge(syscall_id.wrapping_mul(31));
