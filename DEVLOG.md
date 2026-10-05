@@ -972,6 +972,83 @@ lapisan yang menutupi satu sama lain.
 
 ---
 
+### BUG-020 — `idle_until` memanggil pointer fungsi basi di putaran kedua
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** sangat tinggi — lompat ke `.bss`, instruction-fetch fault
+**Test:** tidak bisa jadi host test — ini level register dalam inline asm.
+Buktinya Serial output sebelum/sesudah, ada di bawah
+
+**Di mana:** `crates/zenus-sched/src/scheduler.rs` — `idle_until`
+
+```asm
+; sebelum — rsi dan rdi dipilih compiler untuk check dan finished
+3:      call *%rdi          ; cond
+        test %al,%al
+        jnz  4f
+        sti
+        hlt
+        jmp  3b             ; ← kembali ke call *%rdi
+```
+
+**Yang salah:** `check` dan `finished` diletakkan di register pilihan compiler
+(`rdi` dan `rsi`), lalu loop memanggilnya lagi. Tapi `call *%rdi` memanggil
+fungsi Rust yang **boleh** mengubah register caller-clobbered — dan `rdi`/`rsi`
+termasuk. Jadi:
+
+1. Putaran pertama `call *%rdi` → `watchdog()` jalan
+2. `watchdog()` memanggil `kinfo!` → format dan cetak → **`%rdi` berubah**
+3. `hlt`, timer tick, `jmp 3b`
+4. Putaran kedua `call *%rdi` → memanggil **isi register itu**, yaitu
+   `fuzz_runner::LAST_REPORT`, sebuah `AtomicU64` di `.bss`
+
+Hasilnya persis yang tercatat di serial:
+
+```
+!!! PAGE FAULT !!!
+TYPE: supervisor-write-nonpresent [IF]
+ADDR=0xFFFFFFFF805B9008 RIP=0xFFFFFFFF805B9008 CAUSE=instruction-fetch
+```
+
+`ADDR == RIP`: control sudah pindah ke sana, lalu CPU mencoba mengeksekusi
+data. `nm` mengonfirmasi `0xffffffff805b9008` adalah
+`zenus::fuzz_runner::LAST_REPORT + 0x0`.
+
+Yang membuatnya bertahan: pointer masuk dengan benar. Di breakpoint entry
+`idle_until`, gdb melaporkan
+`cond=0xffffffff80004d90 <zenus::fuzz_runner::watchdog>` — jadi tidak ada yang
+salah di sisi pemanggil. Kerusakan baru terjadi *di dalam* loop, di iterasi
+kedua, yang tidak terlihat dari breakpoint mana pun.
+
+`idle()` tidak terkena: pointer-nya `sym idle_yield_bridge`, jadi assembler
+yang me-resolve ke alamat tetap, dan tidak ada register yang harus bertahan
+melewati panggilan.
+
+**Fix:** pointer masuk ke `static UNTIL_CHECK` / `UNTIL_FINISHED`, dan loop
+memuat ulang dari slot itu **tepat sebelum** tiap `call`. Register yang
+di-clobber tidak bisa berpengaruh karena nilainya dibaca ulang dari memori
+setiap putaran. `sym` tidak bisa dipakai karena `cond`/`finished` adalah nilai
+runtime, bukan fungsi tetap.
+
+**Bukti (before → after), `make fuzz-smoke`:**
+
+| | Sebelum | Sesudah |
+|---|---|---|
+| Fault | `instruction-fetch` di `0xffffffff805b9008` | tidak ada |
+| `[FUZZ] SUMMARY` | tidak pernah tercetak | `cases=313 crashes=6 hangs=0 new_paths=66 corpus=1151 edges=69 faults=0 unrecovered=0` |
+| `[FUZZ] EXIT` | tidak pernah tercetak | `code=3` (watchdog — lihat BUG-021) |
+| Crash ditemukan | 0 | **6** |
+
+Efek sampingnya: campaign sekarang **menemukan 6 crash asli** yang selama ini
+tidak pernah terlihat, karena fuzzing tidak pernah berjalan sama sekali.
+
+Tidak ada regression test untuk ini. `idle_until` berisi `cli`/`sti`/`hlt`,
+yang di ring 3 fault — jadi hanya lapisan in-kernel yang bisa mengujinya, dan
+suite itu sendiri belum selesai (BUG-023). Yang bisa dijadikan bukti adalah
+output serial di atas, dan itu direkam.
+
+---
+
 ## Lapisan verifikasi: apa yang benar-benar jalan
 
 | Lapisan | Status | Catatan |

@@ -1,5 +1,5 @@
 use super::task::{Task, TaskInfo, TaskState, MAX_TASKS};
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use zenus_mem::allocator::ALLOCATOR;
 use zenus_ns::{NsId, NS_ROOT};
 use zenus_sync::spinlock::SpinLock;
@@ -1956,26 +1956,44 @@ pub fn idle() -> ! {
     }
 }
 
-/// Idle loop with a watchdog predicate, mirroring [`idle()`] but able to
-/// return.
+/// Slots the idle loop's function pointers live in.
 ///
-/// `cond` runs on the idle task's own stack with interrupts enabled. While it
-/// returns `false` the loop yields to the other tasks through
-/// [`yield_now`]; the first `true` returns control to the caller.
+/// They cannot live in registers. `idle_until` calls `cond` and then jumps back
+/// to call it again, and every register `in(reg)` picks is caller-clobbered — so
+/// by the second pass the register held whatever `cond` had left behind. In the
+/// fuzzing harness `cond` is `watchdog`, which formats and prints, and the
+/// second `call` landed on the address of `fuzz_runner::LAST_REPORT` — a
+/// variable in `.bss`. The CPU tried to execute it:
+///
+/// ```text
+/// TYPE: supervisor-write-nonpresent [IF]
+/// ADDR=0xFFFFFFFF805B9008 RIP=0xFFFFFFFF805B9008 CAUSE=instruction-fetch
+/// ```
+///
+/// A `sym` operand would avoid this, but `cond` and `finished` are runtime
+/// values rather than a fixed function, so they have to travel through memory.
+/// The loop reloads them from these slots immediately before each `call`, so a
+/// clobbered register cannot matter.
+static UNTIL_CHECK: AtomicUsize = AtomicUsize::new(0);
+static UNTIL_FINISHED: AtomicUsize = AtomicUsize::new(0);
+
+/// Run `cond` on the idle stack until it returns true, then run `finished`.
+///
+/// `cond` runs on the idle task's own stack with interrupts enabled; while it
+/// returns `false` the loop `hlt`s, and the timer interrupt is what lets the
+/// other tasks run. The first `true` runs `finished`.
 ///
 /// The fuzzing harness needs this: a bare `yield_now()` from the boot task
-/// keeps the boot task's frame on the boot stack instead of `IDLE_RSP`, and
-/// the context switch never completes — the boot task simply spins and the
-/// campaign task is never entered.
-/// Spin on the idle stack until `cond` returns true, then run `finished`.
+/// keeps the boot task's frame on the boot stack instead of `IDLE_RSP`, and the
+/// context switch never completes — the boot task simply spins and the campaign
+/// task is never entered.
 ///
-/// `finished` is a separate `fn() -> !` on purpose. This function switches
-/// RSP to `IDLE_RSP`, so control can never come back to the caller's frame:
-/// if `cond` returned true and the asm simply fell through, the following `ret`
+/// `finished` is a separate `fn() -> !` on purpose. This function switches RSP
+/// to `IDLE_RSP`, so control can never come back to the caller's frame: if
+/// `cond` returned true and the asm simply fell through, the following `ret`
 /// would pop a "return address" out of the idle task's frame and jump to
 /// garbage. That made `fuzz_runner`'s `abort("watchdog")` unreachable — the
 /// watchdog path could never report a timeout.
-/// Run `cond` on the idle stack until it returns true, then run `finished`.
 ///
 /// Never returns: `finished` is `fn() -> !`, and the asm block ends in `ud2` so
 /// a hypothetical return traps rather than falling through into whatever
@@ -1984,13 +2002,19 @@ pub fn idle() -> ! {
 /// its own unreachable tail, and `run_and_exit`'s tail-expression form does not
 /// typecheck at all.
 pub fn idle_until(cond: fn() -> bool, finished: fn() -> !) -> ! {
-    let check: fn() -> bool = cond;
+    UNTIL_CHECK.store(cond as usize, Ordering::Release);
+    UNTIL_FINISHED.store(finished as usize, Ordering::Release);
+    let mut check: usize = 0;
+    let mut done: usize = 0;
     unsafe {
         core::arch::asm!(
             "cli",
             "mov rsp, {idle_rsp}",
             "sti",
             "3:",
+            // Reloaded every pass. See `UNTIL_CHECK`: a pointer held in a
+            // register across `call {check}` does not survive `check`.
+            "mov {check}, [{check_slot}]",
             "call {check}",
             "test al, al",
             "jnz 4f",
@@ -2000,13 +2024,16 @@ pub fn idle_until(cond: fn() -> bool, finished: fn() -> !) -> ! {
             "hlt",
             "jmp 3b",
             "4:",
+            "mov {done}, [{done_slot}]",
             "call {done}",
             // `done` never returns; trap rather than fall through into
             // whatever follows.
             "ud2",
             idle_rsp = sym IDLE_RSP,
-            check = in(reg) check,
-            done = in(reg) finished,
+            check_slot = sym UNTIL_CHECK,
+            done_slot = sym UNTIL_FINISHED,
+            check = inout(reg) check,
+            done = inout(reg) done,
             // The predicates are ordinary Rust `fn` pointers; the `call`s above
             // go through them, so nothing else needs to know it is Rust-ABI.
         );
