@@ -2506,6 +2506,12 @@ fn sys_shmat(shmid: u64, _shmaddr: u64, _shmflg: u64, _a4: u64, _a5: u64, _a6: u
         return -1i64 as u64;
     }
     table.segments[shmid as usize].mapped_at = vma_start;
+    // Count the mapping as a reference. Without this the *first* `shmdt` took
+    // the count to zero and released the frames while this task's PTEs were
+    // still live — the other half of the use-after-free that clearing the PTE
+    // fixes. `shmget` also counts, so a segment created and never attached is
+    // still reclaimed when its creator detaches.
+    table.segments[shmid as usize].attached += 1;
 
     vma_start
 }
@@ -2546,20 +2552,13 @@ fn sys_shmdt(shmaddr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> 
     let pages = (end - start) / 0x1000;
     for i in 0..pages {
         let virt = start + i * 0x1000;
-        if let Some(phys) = zenus_mem::paging::virt_to_phys_raw(cr3, virt) {
-            // Drop the PTEs. The frames themselves stay owned by the SHM
-            // segment; `shmctl(IPC_RMID)` / the last `detach` frees them.
-            unsafe {
-                zenus_arch::cpu::stac();
-                core::arch::asm!(
-                    "invlpg [{virt}]",
-                    virt = in(reg) virt,
-                    options(nostack, preserves_flags),
-                );
-                zenus_arch::cpu::clac();
-            }
-            let _ = phys;
-        }
+        // Clear the PTE. The old code only ran `invlpg`, which invalidates the
+        // TLB entry and leaves the PTE present, still pointing at the frame — so
+        // after `detach` released the frames, the next access through this
+        // address read whatever had since been allocated into them. The frames
+        // themselves stay owned by the SHM segment; `shmctl(IPC_RMID)` or the
+        // last `detach` frees them.
+        zenus_mem::paging::unmap_page_raw_keep_frame(cr3, virt);
     }
     scheduler::with_vma_mut(task_id, |vma| {
         if let Some(idx) = vma.find(start) {

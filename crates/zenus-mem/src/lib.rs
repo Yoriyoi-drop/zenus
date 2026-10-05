@@ -23,6 +23,40 @@ mod host_tests {
         PAGE_USER, PAGE_WRITABLE, PROT_EXEC, PROT_READ, PROT_WRITE,
     };
 
+    /// `unmap_page_raw_keep_frame` walks four levels by index. The indices come
+    /// from four shifts, and a wrong shift is invisible until it reads the wrong
+    /// table — which on a live system means unmapping somebody else's page.
+    /// This pins the split against the addresses it actually has to serve.
+    #[test]
+    fn page_table_indices_are_split_at_the_right_levels() {
+        use crate::paging::split_indices;
+
+        // A shared segment is mapped at 0x3000_0000_0000 by `shmat`:
+        // PML4 96, and the rest zero, so the walk is PML4[96] -> PDPT[0] ->
+        // PD[0] -> PT[0].
+        assert_eq!(split_indices(0x3000_0000_0000), [96, 0, 0, 0]);
+
+        // Low addresses and the top of user space.
+        assert_eq!(split_indices(0x1000), [0, 0, 0, 1]);
+        assert_eq!(split_indices(0), [0, 0, 0, 0]);
+
+        // Every index is in range for a 512-entry table, including the very top
+        // of the 48-bit canonical user range.
+        for virt in [0u64, 0x1000, 0x7FFF_FFFF_F000, 0x0000_7FFF_FFFF_F000] {
+            for idx in split_indices(virt) {
+                assert!(idx < 512, "{virt:#x} produced index {idx}");
+            }
+        }
+
+        // Distinct bits land in distinct levels: two pages differ only in the
+        // page-table index, one 2 MiB-aligned block differs only in the
+        // page-directory index.
+        assert_eq!(split_indices(0x1000)[3], 1);
+        assert_eq!(split_indices(0x2000)[3], 2);
+        assert_eq!(split_indices(0x1000)[2], 0);
+        assert_eq!(split_indices(0x20_0000)[2], 1, "2 MiB boundary is the PD index");
+    }
+
     #[test]
     fn vma_insert_find_contains() {
         let mut table = VmaTable::new();

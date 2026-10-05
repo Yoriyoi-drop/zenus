@@ -749,11 +749,80 @@ Empat test diverifikasi gagal sebelum fix (floor check dihapus,
 
 ---
 
+### BUG-015 — `shmdt`: `invlpg` tanpa menulis PTE → use-after-free antar task
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — UAF; page table masih mengklaim page ter-map
+**Test:** `crates/zenus-mem/src/lib.rs`
+- `page_table_indices_are_split_at_the_right_levels`
+
+**Di mana:** `crates/zenus-syscall/src/syscall.rs` — `sys_shmdt`, `sys_shmat`;
+`crates/zenus-mem/src/paging.rs` — `unmap_page_raw_keep_frame`, `split_indices`
+
+```rust
+// sebelum, per page
+if let Some(phys) = zenus_mem::paging::virt_to_phys_raw(cr3, virt) {
+    // Drop the PTEs. The frames themselves stay owned by the SHM segment...
+    unsafe {
+        zenus_arch::cpu::stac();
+        core::arch::asm!("invlpg [{virt}]", ...);
+        zenus_arch::cpu::clac();
+    }
+}
+```
+
+**Yang salah (#15a):** `invlpg` **bukan** unmap. Ia hanya membatalkan entri
+TLB; PTE-nya tetap PRESENT dan tetap menunjuk frame yang sama. Jadi:
+
+1. PTE masih hidup dan menunjuk frame SHM
+2. `detach` menurunkan `attached`; di nol, frame di-`free_frame`
+3. Frame diberikan ke frame lain — page table kernel, buffer, task lain
+4. Akses berikutnya ke alamat virtual itu membaca **memori orang lain**
+
+Page table masih bilang page itu ter-map. Tidak ada page fault, tidak ada
+`#PF`, tidak ada jejak. Dua task berbeda bisa membaca halaman yang sama lewat
+"shared memory" yang sudah di-detach.
+
+Yang membuat bug ini bertahan lama: `virt_to_phys_raw` dipanggil, jadi
+terlihat seperti pemetaan memang disentuh, dan `stac`/`clac` terlihat seperti
+perhatian sungguhan terhadap user page. Yang tidak ada adalah satu-satunya
+instruksi yang penting: menulis 0 ke PTE.
+
+**Yang salah (#15b):** `shmat` tidak menaikkan `attached`. `shmget` menaikkan
+satu, `shmdt` menurunkan satu — jadi `shmget` + `shmat` + `shmdt` pertama sudah
+membawa hitungan ke nol dan membebaskan frame **sementara PTE task ini masih
+hidup**. Kedua sisi dari UAF yang sama.
+
+**Fix:**
+
+- `zenus_mem::paging::unmap_page_raw_keep_frame(cr3, virt)` — berjalan empat
+  level, **menulis 0 ke PTE leaf**, lalu `invlpg`. Frame tidak dibebaskan:
+  kepemilikannya ada di segmen SHM. `fence(SeqCst)` antara store dan
+  invalidasi, karena tanpa itu CPU boleh melayani akses yang sedang kita
+  matikan dari entri TBL lama.
+- `shmat` menaikkan `attached` untuk pemetaannya sendiri, jadi `shmdt`
+  pertama hanya melepas **pemetaan**-nya, bukan segmennya.
+- `split_indices(virt)` — helper murni untuk empat shift. Tiga walk di
+  `paging.rs` memakai shift yang sama dan salah satu berarti membaca tabel
+  yang salah; test memverifikasi terhadap `0x3000_0000_0000` (alamat yang
+  dipakai `shmat`), 0x1000, dan batas 2 MiB.
+
+Dicatat: `mapped_at` menyimpan **satu** alamat per segmen, jadi `shmat`
+kedua untuk segmen yang sama menimpa yang pertama dan pemetaan pertama
+menjadi tidak bisa di-detach. Itu batas yang sudah ada sebelumnya dan tidak
+disentuh di sini; perbaikannya butuh daftar attachment per segmen, bukan satu
+skalar.
+
+Test diverifikasi gagal sebelum fix (shift PML4 diganti ke level yang salah →
+1 FAILED). Test full end-to-end SHM tetap butuh QEMU karena butuh page table
+sungguhan; yang bisa diuji di host adalah bagian indeksnya.
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:
 
 | # | Lokasi | Bug | Uji |
 |---|---|---|---|
-| 8 | `zenus-syscall/src/syscall.rs:2459` | `sys_shmdt` `invlpg` tanpa menulis PTE → frame di-free sementara PTE masih hidup → UAF antar task. `shmat` juga tidak menaikkan `attached` | in-kernel |
 | 13 | `zenus-syscall/src/syscall.rs:2034` | `sys_mount` menerima `MS_RDONLY\|MS_NOSUID\|MS_NODEV\|MS_NOEXEC` lalu mengabaikan semuanya, return 0. `vfs::Mount` tidak punya field flag sama sekali. Tidak ada cek `euid == 0` | host |

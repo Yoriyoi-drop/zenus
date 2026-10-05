@@ -290,6 +290,55 @@ pub fn protect_page_raw(cr3_raw: u64, virt: u64, writable: bool, executable: boo
     false
 }
 
+/// The four page-table indices of a 48-bit canonical virtual address, most
+/// significant first.
+///
+/// Pure. Every raw page-table walk in this module indexes with the same four
+/// shifts, and they are easy to get subtly wrong — a missing level means the
+/// walk stops one level early and silently reads the wrong table.
+pub fn split_indices(virt: u64) -> [u16; 4] {
+    [
+        ((virt >> 39) & 0x1FF) as u16,
+        ((virt >> 30) & 0x1FF) as u16,
+        ((virt >> 21) & 0x1FF) as u16,
+        ((virt >> 12) & 0x1FF) as u16,
+    ]
+}
+
+/// Remove the PTE for `virt` in an arbitrary address space **without**
+/// releasing the physical frame.
+///
+/// `invlpg` on its own is not an unmap: it invalidates the TLB entry and
+/// leaves the PTE present, still pointing at the frame. If the frame is then
+/// handed to somebody else, the next access through that address reads their
+/// memory — a use-after-free across tasks, with the page table still claiming
+/// the page is mapped. This clears the entry first, then flushes it.
+pub fn unmap_page_raw_keep_frame(cr3_raw: u64, virt: u64) -> bool {
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+    let cr3_phys = cr3_raw & !0xFFF;
+    let idxs = split_indices(virt);
+    unsafe {
+        let mut table_virt = (cr3_phys + hhdm) as *mut u64;
+        for (level, &idx) in idxs.iter().enumerate() {
+            let entry = *table_virt.add(idx as usize);
+            if (entry & 1) == 0 {
+                return false;
+            }
+            if level == 3 {
+                // The leaf. `x86_64` makes the store visible before the
+                // invalidation below; without it the CPU is allowed to service
+                // the very access we are trying to kill from the old TLB entry.
+                core::sync::atomic::fence(Ordering::SeqCst);
+                table_virt.add(idx as usize).write(0);
+                core::arch::asm!("invlpg [{0}]", in(reg) virt, options(nostack, preserves_flags));
+                return true;
+            }
+            table_virt = ((entry & 0x000FFFFFFFFFF000) + hhdm) as *mut u64;
+        }
+    }
+    false
+}
+
 pub fn create_address_space() -> Option<u64> {
     let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
     let cr3_phys = LEVEL4_PHYS.load(Ordering::Acquire);
