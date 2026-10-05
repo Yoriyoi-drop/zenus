@@ -253,6 +253,61 @@ tidak meninggalkan batas yang benar.
 
 ---
 
+### BUG-006 — mount di `/tmp` juga menangkap `/tmp.evil/x`
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — path confusion / confinement bypass
+**Test:** `crates/zenus-fs/src/lib.rs`
+- `host_tests::a_mount_prefix_must_end_on_a_path_boundary`
+- `host_tests::mount_points_are_normalised_on_the_way_in`
+- `host_tests::a_mounted_filesystem_does_not_capture_a_sibling_directory`
+- `host_tests::a_mount_point_with_a_trailing_slash_still_resolves`
+
+**Di mana:** `crates/zenus-fs/src/vfs.rs` — `find_mount_in_table`,
+`find_mount_to_pair`, `mount_in_ns`
+
+```rust
+// sebelum, tiga kali di tree
+if path.starts_with(m.path) && m.path.len() > best_len { ... }
+```
+
+**Yang salah:** pencocokan mount tidak memeriksa batas komponen path.
+Mount di `/tmp` ikut mencakup `/tmp.evil/x`, `/tmpx`, `/tmp2`. Ini bypass
+konfinement: caller yang dibatasi ke `/tmp` bisa menjangkau direktori
+tetangga hanya dengan memilih nama yang diawali karakter yang sama. Tiga
+tempat mengulangi logika yang sama — persis masalah yang
+`ARCHITECTURE.md` mencatat satu salinan VMA di `zenus-mem` sebagai
+persis masalah bentuk ini.
+
+Bug kedua di tempat yang sama: `Mount.path` disimpan apa adanya, termasuk
+slash di akhir, sementara `open_in_ns` memotong dengan
+`&path[prefix.len()..]`. Mount yang diregistrasi sebagai `/tmp/` membuat
+potongan itu mendarat satu byte terlalu awal — atau, untuk path mount point
+sendiri, gagal total dan jatuh ke lookup seluruh path.
+
+**Fix:** dua helper murni.
+
+- `mount_covers(path, mount) -> bool` — prefix harus diakhiri `/` atau
+  berakhirnya string. Mengembalikan `0` (tidak cocok) kalau tidak.
+- `normalise_mount_path(path) -> &'static str` — tanpa slash di akhir, dengan
+  slash di depan. Dipanggil sekali di `mount_in_ns`, di titik mount
+  direkam, sehingga semua keputusan berikutnya bisa berasumsi prefix sudah
+  bersih. `mount_prefix_len` memakai `mount_covers` untuk longest-prefix.
+
+Ketiga loop sekarang memakai `mount_prefix_len`, jadi hanya ada satu
+implementasi aturan tersebut.
+
+**Test pakai filesystem penanda** (`MarkerFs` dengan `root_inode = 0xF00D`)
+karena tmpfs dan procfs sama-sama memakai inode 0 untuk root — inode saja
+tidak cukup untuk membuktikan filesystem mana yang menjawab. Yang diperiksa
+tambahan adalah `file_type`: `/tmp.evil` dibuat sebagai file di tmpfs,
+sedangkan `MarkerFs` melaporkan semuanya sebagai directory.
+
+Ketiga test sudah diverifikasi gagal sebelum fix (reverted `mount_covers`
+dan `normalise_mount_path`, lalu `cargo test` → 3 FAILED).
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:
@@ -272,7 +327,5 @@ Prioritas menurut dampak × kemudahan diuji:
 | 12 | `zenus-fs/src/vfs.rs:335-380` | Semua jalur mutating VFS (mkdir/unlink/chmod/chown) tanpa permission check; hanya `fd_open` yang memanggil `access_check` | host |
 | 13 | `zenus-syscall/src/syscall.rs:2034` | `sys_mount` menerima `MS_RDONLY\|MS_NOSUID\|MS_NODEV\|MS_NOEXEC` lalu mengabaikan semuanya, return 0. `vfs::Mount` tidak punya field flag sama sekali. Tidak ada cek `euid == 0` | host |
 | 14 | `zenus-syscall/src/syscall.rs:708` | `brk(small)` menjalankan `unmap_heap_pages` yang menelusuri *semua* halaman di `[addr, heap_brk)` lalu `free_frame` tiap yang ter-map → program membebaskan frame ELF-nya sendiri, dan menelusuri 6.4e9 entri page table (hang). `heap_brk = loaded.heap_base ≈ 0x6000_0000_0000` | host |
-| 15 | `zenus-fs/src/journal.rs:151` | Batas indeks blok data memakai konstanta `MAX_ENTRIES` (123), bukan `num_blocks` yang dikonfigurasi. Boot pakai journal 15 blok (`journal_init(0, 3000, 16)`), jadi entri #16 menulis ke blok 3016 — blok ext2 yang hidup | host |
-| 16 | `zenus-fs/src/vfs.rs:170` | Pencocokan mount `path.starts_with(m.path)` tanpa cek separator → mount di `/tmp` juga menangkap `/tmp.evil/x` | host |
 | 17 | `zenus-fs/src/pkg.rs:329` | `pkg_remove` memanggil `vfs::remove` pada tiap baris manifest tanpa menjalankan ulang `install_path_for` → arbitrary-path delete | host |
 | 18 | `zenus-net/src/tcp.rs:894` | `KEEPALIVE_PROBE_INTERVAL` dihitung lalu dibuang (`let _probe_interval = ...`) → probe 96× lebih lambat dari yang didokumentasikan | host |

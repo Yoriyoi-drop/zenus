@@ -1190,6 +1190,158 @@ mod host_tests {
         );
     }
 
+    /// Regression: mount lookup matched with a bare `path.starts_with(m.path)`,
+    /// so a mount at `/tmp` also captured `/tmp.evil/x` and `/tmpx`. That is a
+    /// path-confusion bypass — a caller confined to `/tmp` reaches a sibling
+    /// directory just by picking a name that begins with the same characters.
+    #[test]
+    fn a_mount_prefix_must_end_on_a_path_boundary() {
+        // Inside the mount, and the mount point itself.
+        assert!(vfs::mount_covers("/tmp", "/tmp"));
+        assert!(vfs::mount_covers("/tmp/x", "/tmp"));
+        assert!(vfs::mount_covers("/tmp/a/b/c", "/tmp"));
+
+        // Siblings that merely share a character prefix. These are the bypass.
+        assert!(!vfs::mount_covers("/tmpx", "/tmp"));
+        assert!(!vfs::mount_covers("/tmpx/y", "/tmp"));
+        assert!(!vfs::mount_covers("/tmp.evil/x", "/tmp"));
+        assert!(!vfs::mount_covers("/tmp2", "/tmp"));
+        assert!(!vfs::mount_covers("/etc/passwd", "/mnt"));
+
+        // A trailing slash on the mount point must not change the answer.
+        assert!(vfs::mount_covers("/tmp/x", "/tmp/"));
+        assert!(!vfs::mount_covers("/tmpx", "/tmp/"));
+
+        // Root covers every absolute path and nothing relative.
+        assert!(vfs::mount_covers("/", "/"));
+        assert!(vfs::mount_covers("/anything/at/all", "/"));
+        assert!(!vfs::mount_covers("relative", "/"));
+    }
+
+    /// Mount points are stored as `&'static str`, and `open_in_ns` slices
+    /// `&path[prefix.len()..]` using the stored length. A prefix stored with a
+    /// trailing slash therefore made the slice land one byte early and resolve
+    /// a *different* path than the caller asked for.
+    #[test]
+    fn mount_points_are_normalised_on_the_way_in() {
+        assert_eq!(vfs::normalise_mount_path("/mnt"), "/mnt");
+        assert_eq!(vfs::normalise_mount_path("/mnt/"), "/mnt");
+        assert_eq!(vfs::normalise_mount_path("/mnt///"), "/mnt");
+        assert_eq!(vfs::normalise_mount_path("/"), "/");
+        assert_eq!(vfs::normalise_mount_path("///"), "/");
+        assert_eq!(vfs::normalise_mount_path("mnt"), "/mnt");
+        assert_eq!(vfs::normalise_mount_path(""), "/");
+    }
+
+    /// A filesystem distinguishable from tmpfs by its root inode, so a test can
+    /// tell which one answered a path lookup. tmpfs and procfs both answer 0.
+    struct MarkerFs;
+
+    const MARKER_ROOT: u64 = 0xF00D;
+
+    impl crate::vfs::FileSystem for MarkerFs {
+        fn name(&self) -> &'static str {
+            "marker"
+        }
+        fn root_inode(&self) -> u64 {
+            MARKER_ROOT
+        }
+        fn read(&self, _inode: u64, _offset: u64, _buf: &mut [u8]) -> Option<u64> {
+            Some(0)
+        }
+        fn write(&self, _inode: u64, _offset: u64, _buf: &[u8]) -> Option<u64> {
+            Some(0)
+        }
+        fn read_dir(&self, _inode: u64) -> Vec<crate::vfs::DirEntry> {
+            Vec::new()
+        }
+        fn stat(&self, _inode: u64) -> vfs::FileStat {
+            vfs::FileStat {
+                size: 0,
+                file_type: vfs::FileType::Directory,
+                inode: MARKER_ROOT,
+                blocks: 0,
+                uid: 0,
+                gid: 0,
+                mode: vfs::S_IFDIR | 0o755,
+            }
+        }
+        fn create(&self, _parent: u64, _name: &str, _ft: vfs::FileType) -> Option<u64> {
+            None
+        }
+        fn unlink(&self, _parent: u64, _name: &str) -> bool {
+            false
+        }
+    }
+
+    static MARKER: MarkerFs = MarkerFs;
+
+    /// End-to-end through the real mount table: a filesystem mounted at `/tmp`
+    /// must not answer for `/tmp.evil`. This is the regression — the old
+    /// `path.starts_with(m.path)` check made `/tmp` cover `/tmp.evil`, so a
+    /// caller confined to `/tmp` reached a sibling directory.
+    #[test]
+    fn a_mounted_filesystem_does_not_capture_a_sibling_directory() {
+        let _serial = serial();
+        fresh_fs();
+
+        assert!(vfs::create_dir("/tmp"));
+        assert!(vfs::create_file("/tmp.evil"), "set up the sibling");
+        assert!(vfs::mount("/tmp", &MARKER));
+
+        // Exactly the mount point resolves to the mounted filesystem.
+        let at_mount = vfs::open("/tmp").expect("/tmp exists");
+        assert_eq!(at_mount.inode, MARKER_ROOT, "/tmp is the mount point");
+
+        // A path *inside* the mount resolves there too: the prefix is stripped
+        // and the rest is looked up in the mounted filesystem (which has no
+        // children, so this legitimately misses).
+        assert!(
+            vfs::open("/tmp/anything").is_none(),
+            "MarkerFs has no entries, so a lookup below the mount must miss"
+        );
+
+        // The sibling is not covered by the mount, so it stays on tmpfs. This
+        // is the line the old prefix check broke.
+        let sibling = vfs::open("/tmp.evil").expect("the sibling still exists on tmpfs");
+        assert_ne!(
+            sibling.inode, MARKER_ROOT,
+            "a mount at /tmp must not capture /tmp.evil"
+        );
+        // tmpfs and MarkerFs both use inode 0 for their root, so the inode alone
+        // is not enough. The type is: `/tmp.evil` was created as a file on
+        // tmpfs, and MarkerFs reports everything as a directory.
+        assert_eq!(
+            sibling.fs.stat(sibling.inode).file_type,
+            vfs::FileType::File,
+            "the sibling is still the tmpfs file, not the mounted filesystem"
+        );
+    }
+
+    /// A mount point registered with a trailing slash must still resolve. The
+    /// prefix is stored as a `&'static str` and `open_in_ns` slices
+    /// `&path[prefix.len()..]`, so a stored `/tmp/` made the slice land one byte
+    /// early — or, for the mount point itself, fall through to a lookup of the
+    /// whole path and miss entirely.
+    #[test]
+    fn a_mount_point_with_a_trailing_slash_still_resolves() {
+        let _serial = serial();
+        fresh_fs();
+
+        assert!(vfs::create_dir("/tmp"));
+        assert!(vfs::mount("/tmp/", &MARKER));
+
+        let at_mount = vfs::open("/tmp").expect("/tmp is the mount point");
+        assert_eq!(
+            at_mount.inode, MARKER_ROOT,
+            "a mount registered as /tmp/ must answer for /tmp"
+        );
+        assert!(
+            vfs::open("/tmp/anything").is_none(),
+            "the prefix is stripped and the rest is looked up in MarkerFs"
+        );
+    }
+
     // ── .zpk on-disk ABI ──────────────────────────────────────────────────
 
     /// The `.zpk` reader used to cast byte offsets to `*const ZpkHeader` /

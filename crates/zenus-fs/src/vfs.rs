@@ -157,6 +157,46 @@ fn with_mount_table<R>(ns_id: zenus_ns::NsId, f: impl FnOnce(&mut MountTable) ->
     }
 }
 
+/// Does a mount at `mount` cover `path`?
+///
+/// The prefix has to end on a path-component boundary. Plain
+/// `path.starts_with(mount)` let a mount at `/tmp` also capture
+/// `/tmp.evil/x` and `/tmpx`, which is a path-confusion bypass: a caller
+/// confined to `/tmp` reaches a sibling directory by choosing a name that
+/// merely begins with the same characters. Pure, so it is testable without a
+/// mount table.
+pub fn mount_covers(path: &str, mount: &str) -> bool {
+    // The root mount covers everything.
+    if mount == "/" || mount.is_empty() {
+        return path.starts_with('/');
+    }
+    let mount = mount.trim_end_matches('/');
+    if mount.is_empty() {
+        return path.starts_with('/');
+    }
+    if !path.starts_with(mount) {
+        return false;
+    }
+    match path.as_bytes().get(mount.len()) {
+        None => true,                       // exactly the mount point
+        Some(b'/') => true,                 // a component below it
+        Some(_) => false,                   // `/tmp` must not cover `/tmpx`
+    }
+}
+
+/// Length of the matching mount prefix, for longest-prefix selection.
+fn mount_prefix_len(path: &str, mount: &str) -> usize {
+    if mount_covers(path, mount) {
+        if mount == "/" || mount.is_empty() {
+            1
+        } else {
+            mount.trim_end_matches('/').len()
+        }
+    } else {
+        0
+    }
+}
+
 fn find_mount_in_table(
     ns_id: zenus_ns::NsId,
     path: &str,
@@ -167,9 +207,10 @@ fn find_mount_in_table(
         let mut best_len = 0usize;
         for i in 0..mt.count {
             let m = &mt.mounts[i];
-            if path.starts_with(m.path) && m.path.len() > best_len {
+            let len = mount_prefix_len(path, m.path);
+            if len > best_len {
                 best = Some((m.fs, m.path));
-                best_len = m.path.len();
+                best_len = len;
             }
         }
         return best;
@@ -182,9 +223,10 @@ fn find_mount_in_table(
                 let mut best_len = 0usize;
                 for j in 0..entry.table.count {
                     let m = &entry.table.mounts[j];
-                    if path.starts_with(m.path) && m.path.len() > best_len {
+                    let len = mount_prefix_len(path, m.path);
+                    if len > best_len {
                         best = Some((m.fs, m.path));
-                        best_len = m.path.len();
+                        best_len = len;
                     }
                 }
                 return best;
@@ -200,9 +242,10 @@ fn find_mount_to_pair(path: &str) -> Option<(&'static (dyn FileSystem + 'static)
     let mut best_len = 0usize;
     for i in 0..mt.count {
         let m = &mt.mounts[i];
-        if path.starts_with(m.path) && m.path.len() > best_len {
+        let len = mount_prefix_len(path, m.path);
+        if len > best_len {
             best = Some((m.fs, m.path));
-            best_len = m.path.len();
+            best_len = len;
         }
     }
     best
@@ -286,6 +329,25 @@ pub fn umount_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
     false
 }
 
+/// Canonical form of a mount point: leading slash guaranteed, no trailing slash
+/// (except the root). Pure.
+pub fn normalise_mount_path(path: &'static str) -> &'static str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/";
+    }
+    if trimmed.starts_with('/') {
+        trimmed
+    } else {
+        // The relative case needs an owned string to prepend a slash to. Leaked
+        // deliberately: `Mount.path` is `&'static str` and there is no
+        // allocator-free way to store a prefix plus a borrowed slice. Mount
+        // points are a handful of literals registered once at boot, so this
+        // runs a handful of times for the kernel's lifetime.
+        alloc::boxed::Box::leak(alloc::format!("/{trimmed}").into_boxed_str())
+    }
+}
+
 fn paths_equal(a: &str, b: &str) -> bool {
     let a = a.trim_end_matches('/');
     let b = b.trim_end_matches('/');
@@ -296,6 +358,12 @@ fn paths_equal(a: &str, b: &str) -> bool {
 }
 
 pub fn mount_in_ns(ns_id: zenus_ns::NsId, path: &'static str, fs: &'static dyn FileSystem) -> bool {
+    // Normalise once, at the point the mount is recorded: every later decision
+    // (prefix matching, longest-prefix selection, and the `&path[prefix.len()..]`
+    // slice in `open_in_ns`) assumes the stored prefix has no trailing slash.
+    // Storing `/mnt/` made the slice land one byte early and resolve a
+    // different path than the caller asked for.
+    let path = normalise_mount_path(path);
     if ns_id != zenus_ns::NS_ROOT {
         let mut tables = MNT_NS_TABLES.lock();
         for i in 0..tables.count {
