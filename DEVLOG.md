@@ -537,6 +537,52 @@ Ketiga test diverifikasi gagal sebelum fix (helper dikembalikan ke
 
 ---
 
+### BUG-011 — field `length` UDP dibaca lalu tidak pernah dipakai
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — data di luar datagram masuk ke DHCP/DNS; checksum diverifikasi atas panjang yang salah
+**Test:** `crates/zenus-net/src/udp.rs` → `udp::host_tests`
+- `the_length_field_bounds_the_payload`
+- `an_impossible_length_field_is_refused`
+- `short_buffers_are_refused`
+
+**Di mana:** `crates/zenus-net/src/udp.rs` — `parse`, `handle_receive`
+
+```rust
+// sebelum
+let header = UdpHeader { /* … */ length, checksum };
+let udp_payload = &packet[8..];      // packet adalah hasil parse IPv4
+```
+
+**Yang salah:** `packet` di sini adalah payload IPv4, yang bisa **lebih
+panjang** dari datagram UDP — padding, atau apa pun yang mengikuti di frame. Field
+`length` diparse ke `UdpHeader` lalu tidak pernah dibaca lagi. Dua konsekuensi
+dari satu field:
+
+1. `udp_payload` = `&packet[8..]`, jadi byte setelah batas datagram ikut
+   diteruskan. `dhcp::handle_receive`, `dhcp_server::handle_receive` dan
+   `dns::handle_receive` semuanya mengindeks header DHCP/DNS di offset tetap
+   dari payload itu — bytes tambahan itu jadi input untuk parser.
+2. `handle_receive` memverifikasi checksum atas `packet` utuh, sementara
+   pseudo-header UDP menyertakan `udp_len` di dalamnya. Dua panjang itu tidak
+   sama, jadi checksum **tidak pernah cocok** untuk datagram yang punya junk
+   setelahnya... atau lebih buruk: kebetulan cocok untuk data yang korup
+   tepat ketika ada trailing junk. Kelima parser DHCP/DNS/socket bergantung
+   pada hasil `handle_receive`.
+
+`dhcp.rs:150` sudah punya komentar bahwa ia re-parse `resp_buf` dengan
+`udp::parse()` dan mengindeks header DHCP di offset konstan — jadi jalur
+tersebut sekarang benar-benar dilindungi oleh batas length.
+
+**Fix:** `parse` memotong ke `&packet[..length as usize]` dan menolak length
+di bawah 8 (header) atau di atas `packet.len()`. Payload dikembalikan dari
+potongan itu, dan checksum diverifikasi atas potongan yang sama.
+
+Tiga test diverifikasi gagal sebelum fix (bound dikembalikan ke
+`&packet[8..]` → 3 FAILED).
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:
@@ -545,7 +591,6 @@ Prioritas menurut dampak × kemudahan diuji:
 |---|---|---|---|
 | 2 | `zenus-net/src/nic.rs:118-121` | Balasan ARP dihitung lalu dibuang (`arp::handle` return-nya diabaikan). Virtio NIC tidak pernah menjawab ARP → semua IPv4 outbound gagal | in-kernel |
 | 3 | `zenus-net/src/nic.rs:120` | `our_mac` yang dikirim adalah MAC peminta, dan IP di-hardcode `10.0.2.15`. Kalau #2 diperbaiki, hasilnya ARP poisoning yang sticky (`arp.rs:64-69` menolak mengubah MAC untuk IP yang sudah ada) | host (arg builder) |
-| 6 | `zenus-net/src/udp.rs:42` | Field `length` UDP dibaca lalu tidak pernah dipakai; checksum diverifikasi atas panjang yang salah → data di luar datagram masuk ke DHCP/DNS | host |
 | 7 | `zenus-syscall/src/syscall.rs:2681` | `8 * nfds` overflow → ukuran tervalidasi 0, ukuran terpakai 2^61 | host (helper) |
 | 8 | `zenus-syscall/src/syscall.rs:2459` | `sys_shmdt` `invlpg` tanpa menulis PTE → frame di-free sementara PTE masih hidup → UAF antar task. `shmat` juga tidak menaikkan `attached` | in-kernel |
 | 9 | `zenus-syscall/src/syscall.rs:1346` | `recv` alokasi `len` yang hanya dibatasi `USER_SPACE_LIMIT` (128 TiB), tidak seperti `sys_read`'s `MAX_READ` | host (helper) |
