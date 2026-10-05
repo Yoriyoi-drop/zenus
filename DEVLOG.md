@@ -1578,7 +1578,71 @@ benar-benar ada bugs-nya artefak bersama ini.
 
 ---
 
-## Lapisan verifikasi: apa yang benar-benar jalan
+### BUG-031 — in-kernel test menaruh 270 KiB frame di boot stack
+
+**Status:** sudah di-fix (commit ini) — tapi **bukan** penyebab `make test`
+yang masih macet. Lihat "Teori yang diuji dan ditolak" di bawah
+**Keparahan:** sedang — 270 KiB frame di stack yang paling sempit di kernel
+**Test:** tidak ada test; ini bentuk, bukan logika. `size_of::<BlockCache>()`
+yang dikunci di `test_cache_size_constant` sudah ada
+
+**Di mana:** `crates/zenus-fs/src/block_cache.rs` — modul `tests` (yang
+`#[cfg(feature = "testing")]`)
+
+`BlockCache` adalah 512 entri × 512 byte ≈ **270 KiB**. Empat dari lima test
+block-cache membuatnya sebagai `let`, jadi masing-masing mendorong frame
+sequarter megabyte ke stack.
+
+Yang membuatnya serius: suite in-kernel berjalan **di boot CPU, di boot
+stack** — satu-satunya stack yang dipakai suite itu, dan yang paling sempit
+(reserve 512 KiB di frame allocator, dan hanya sebesar yang Limine petakan di
+ bawahnya). Empat frame 270 KiB tidak muat, dan itu yang membuat
+ `make test` berhenti tepat setelah boot.
+
+**Fix:** `heap_cache()` mengembalikan `Box<BlockCache>`; heap sudah
+diinisialisasi sebelum suite jalan (`Heap: 8MB free-list allocator ready`).
+
+Host test suite tidak terpengaruh — modul ini memang `testing`-gated.
+
+### `make test` — apa yang sudah diketahui, dan teori yang ditolak
+
+Saya sudah berhasil attaching gdb ke build `testing` (caranya: `-smp 1`
+supaya tidak ada thread AP yang melaporkan stop di CPU lain, `-S` supaya
+`target remote` menerima dengan CPU ter-stop, dan breakpoint di **entry**
+page-fault handler supaya `CR2` masih fault yang asli — breakpoint di baris
+yang lebih akhir sudah melihat `CR2` yang tertimpa fault berikutnya).
+
+**Yang terverifikasi:**
+
+| | |
+|---|---|
+| `run_tests` tercapai? | **Ya.** Breakpoint di `apps/src/test_runner.rs:124` kena, dari `apps/src/lib.rs:780` |
+| Fault deterministik? | Ya. `cr2 = 0xffffffff8054a9e8` di beberapa boot berbeda |
+| CR3 benar? | Ya di boot terakhir (`cr3 = 0x7ff82000`, CR3 kernel) |
+| Kenapa tidak ada output? | `[TEST]` tidak pernah tercetak sama sekali; tidak ada satu pun baris `PAGE FAULT` di log |
+| Kenapa handler tidak melaporkan? | **Stack boot tidak bisa dibaca.** `x/12gx $rsp` → "Cannot access memory", dan `bt` berhenti di frame pertama. Handler-nya sendiri lalu fault, jadi tidak ada jejak apa pun — persis gejala yang membuat `make test` terlihat seperti hang |
+
+**Teori yang diuji dan ditolak:** stack boot habis dipakai frame 270 KiB.
+arlas MSI debug menunjukkan stack jadi tidak terbaca **sebelum** BUG-031
+diperbaiki, dan setelah diperbaiki `make test` **tetap** berhenti di tempat
+yang sama, tanpa satu pun baris `[TEST]`. Jadi BUG-031 adalah perbaikan
+yang benar (frame 270 KiB di stack boot memang salah) tetapi bukan penyebab
+gejalanya. Saya catat supaya tidak ada yang mengulangnya.
+
+**Dua kandidat yang tersisa, belum diuji:**
+
+1. `cr2 = 0xffffffff8054a9e8` ada di `.bss` dan tidak ada simbolnya, jadi
+   write ke `.bss` yang menabrak halaman tak ter-map. Siapa yang menulis ke
+   sana saat boot belum ditemukan.
+2. Halaman stack boot hilang sebelum `#PF` pertama, bukan sesudahnya.
+   Membedakan keduanya butuh breakpoint di `unmap_page_raw_keep_frame`,
+   `unmap_page_raw` dan `destroy_address_space`, lalu melihat yang mana yang
+   mengubah CR3 atau-what.
+
+Satu catatan penting untuk siapa pun yang melanjutkan: ** breakpoint harus di
+alam handler**, bukan di baris yang beberapa baris masuk. Fault pertama
+mengarah ke `0xffffffff8003edb0` (alamat `.text` yang tidak ter-map) — artinya
+fault yang kita lihat adalah fault kedua, dan `CR2`-nya sudah ditimpa.
 
 ---
 
@@ -1591,7 +1655,7 @@ benar-benar ada bugs-nya artefak bersama ini.
 | `make fuzz-smoke` | **hijau** | 2000 kasus, `crashes=0`, `EXIT code=0` |
 | `make fuzz-coverage` | **hijau** | **50 000 kasus**, `crashes=0`, `EXIT code=0`, `new_paths=978` |
 | `make fuzz-regression` | **hijau** | `NO-CORPUS`, `EXIT code=2` — benar, dan exit code-nya memang sudah benar sejak awal |
-| `make test` | **boot**, belum menyelesaikan test | Fixed BUG-018 dan BUG-019; mesin mencapai `run_tests` dan test pertama jalan, lalu beberapa kali page fault berturut-turut (handler-nya sendiri fault saat membaca stack) |
+| `make test` | **boot**, belum menyelesaikan test | `run_tests` **tercapai** (terverifikasi via gdb). Tidak ada satu pun baris `[TEST]` yang keluar. Handler page-fault tidak bisa melaporkan karena stack boot-nya tidak terbaca. Detail dan kandidat yang tersisa ada di BUG-031 |
 
 ### Yang belum selesai, dan kenapa saya tidak menebaknya
 

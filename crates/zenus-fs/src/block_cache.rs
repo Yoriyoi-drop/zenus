@@ -263,8 +263,24 @@ pub fn bc_invalidate_all() -> bool {
 pub mod tests {
     use super::*;
 
+/// A cache on the heap, not the stack.
+///
+/// `BlockCache::new()` is 512 entries of 512 bytes plus bookkeeping — 270 KiB.
+/// Four of these tests built one as a local, so the in-kernel suite was pushing
+/// a quarter-megabyte frame onto the *boot* stack, which has 512 KiB reserved in
+/// total and whatever Limine happened to have mapped below it. Running off the
+/// end made the stack unreadable, which in turn made the page-fault handler
+/// fault while trying to report the original fault — so the crash dump printed
+/// nothing and the run looked like a hang with no trace.
+///
+/// The heap is initialised before the suite runs, and the host test suite is
+/// unaffected: this is the `testing`-gated module only.
+fn heap_cache() -> Option<alloc::boxed::Box<BlockCache>> {
+    Some(alloc::boxed::Box::new(BlockCache::new()))
+}
+
     pub fn test_new_cache_empty() -> Result<(), &'static str> {
-        let cache = BlockCache::new();
+        let cache = heap_cache().ok_or("no memory for the test cache")?;
         if cache.hits != 0 || cache.misses != 0 {
             return Err("New cache should have zero stats");
         }
@@ -272,7 +288,7 @@ pub mod tests {
     }
 
     pub fn test_evict_on_empty_returns_index_0() -> Result<(), &'static str> {
-        let mut cache = BlockCache::new();
+        let mut cache = heap_cache().ok_or("no memory for the test cache")?;
         // Evict pada cache kosong harus mengembalikan index 0 (hash berdasarkan dev_id=0, block=0)
         let idx = cache.evict_one(0, 0);
         match idx {
@@ -282,7 +298,7 @@ pub mod tests {
     }
 
     pub fn test_find_entry_empty_returns_none() -> Result<(), &'static str> {
-        let cache = BlockCache::new();
+        let cache = heap_cache().ok_or("no memory for the test cache")?;
         if cache.find_entry(0, 0).is_some() {
             return Err("find_entry on empty cache should return None");
         }
@@ -290,7 +306,7 @@ pub mod tests {
     }
 
     pub fn test_stats_empty() -> Result<(), &'static str> {
-        let cache = BlockCache::new();
+        let cache = heap_cache().ok_or("no memory for the test cache")?;
         let (hits, misses) = cache.stats();
         if hits != 0 || misses != 0 {
             return Err("Empty cache stats should be (0, 0)");
@@ -299,7 +315,7 @@ pub mod tests {
     }
 
     pub fn test_lru_counter_increments_on_evict() -> Result<(), &'static str> {
-        let mut cache = BlockCache::new();
+        let mut cache = heap_cache().ok_or("no memory for the test cache")?;
         let idx1 = cache.evict_one(0, 0);
         let idx2 = cache.evict_one(0, 1);
         if idx1 == idx2 {
