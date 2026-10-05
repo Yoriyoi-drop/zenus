@@ -1580,76 +1580,110 @@ benar-benar ada bugs-nya artefak bersama ini.
 
 ### BUG-031 — in-kernel test menaruh 270 KiB frame di boot stack
 
-**Status:** sudah di-fix (commit ini) — tapi **bukan** penyebab `make test`
-yang masih macet. Lihat "Teori yang diuji dan ditolak" di bawah
-**Keparahan:** sedang — 270 KiB frame di stack yang paling sempit di kernel
-**Test:** tidak ada test; ini bentuk, bukan logika. `size_of::<BlockCache>()`
-yang dikunci di `test_cache_size_constant` sudah ada
+**Status:** diperbaiki dalam dua langkah — lihat "BUG-031 (bagian 2)" di bawah,
+yang merupakan penjelasan yang benar dan final
+**Keparahan:** tinggi — satu frame 270 KiB di stack yang paling sempit di kernel
 
-**Di mana:** `crates/zenus-fs/src/block_cache.rs` — modul `tests` (yang
-`#[cfg(feature = "testing")]`)
-
-`BlockCache` adalah 512 entri × 512 byte ≈ **270 KiB**. Empat dari lima test
-block-cache membuatnya sebagai `let`, jadi masing-masing mendorong frame
-sequarter megabyte ke stack.
-
-Yang membuatnya serius: suite in-kernel berjalan **di boot CPU, di boot
-stack** — satu-satunya stack yang dipakai suite itu, dan yang paling sempit
-(reserve 512 KiB di frame allocator, dan hanya sebesar yang Limine petakan di
- bawahnya). Empat frame 270 KiB tidak muat, dan itu yang membuat
- `make test` berhenti tepat setelah boot.
-
-**Fix:** `heap_cache()` mengembalikan `Box<BlockCache>`; heap sudah
-diinisialisasi sebelum suite jalan (`Heap: 8MB free-list allocator ready`).
-
-Host test suite tidak terpengaruh — modul ini memang `testing`-gated.
-
-### `make test` — apa yang sudah diketahui, dan teori yang ditolak
-
-Saya sudah berhasil attaching gdb ke build `testing` (caranya: `-smp 1`
-supaya tidak ada thread AP yang melaporkan stop di CPU lain, `-S` supaya
-`target remote` menerima dengan CPU ter-stop, dan breakpoint di **entry**
-page-fault handler supaya `CR2` masih fault yang asli — breakpoint di baris
-yang lebih akhir sudah melihat `CR2` yang tertimpa fault berikutnya).
-
-**Yang terverifikasi:**
-
-| | |
-|---|---|
-| `run_tests` tercapai? | **Ya.** Breakpoint di `apps/src/test_runner.rs:124` kena, dari `apps/src/lib.rs:780` |
-| Fault deterministik? | Ya. `cr2 = 0xffffffff8054a9e8` di beberapa boot berbeda |
-| CR3 benar? | Ya di boot terakhir (`cr3 = 0x7ff82000`, CR3 kernel) |
-| Kenapa tidak ada output? | `[TEST]` tidak pernah tercetak sama sekali; tidak ada satu pun baris `PAGE FAULT` di log |
-| Kenapa handler tidak melaporkan? | **Stack boot tidak bisa dibaca.** `x/12gx $rsp` → "Cannot access memory", dan `bt` berhenti di frame pertama. Handler-nya sendiri lalu fault, jadi tidak ada jejak apa pun — persis gejala yang membuat `make test` terlihat seperti hang |
-
-**Teori yang diuji dan ditolak:** stack boot habis dipakai frame 270 KiB.
-arlas MSI debug menunjukkan stack jadi tidak terbaca **sebelum** BUG-031
-diperbaiki, dan setelah diperbaiki `make test` **tetap** berhenti di tempat
-yang sama, tanpa satu pun baris `[TEST]`. Jadi BUG-031 adalah perbaikan
-yang benar (frame 270 KiB di stack boot memang salah) tetapi bukan penyebab
-gejalanya. Saya catat supaya tidak ada yang mengulangnya.
-
-**Dua kandidat yang tersisa, belum diuji:**
-
-1. `cr2 = 0xffffffff8054a9e8` ada di `.bss` dan tidak ada simbolnya, jadi
-   write ke `.bss` yang menabrak halaman tak ter-map. Siapa yang menulis ke
-   sana saat boot belum ditemukan.
-2. Halaman stack boot hilang sebelum `#PF` pertama, bukan sesudahnya.
-   Membedakan keduanya butuh breakpoint di `unmap_page_raw_keep_frame`,
-   `unmap_page_raw` dan `destroy_address_space`, lalu melihat yang mana yang
-   mengubah CR3 atau-what.
-
-Satu catatan penting untuk siapa pun yang melanjutkan: ** breakpoint harus di
-alam handler**, bukan di baris yang beberapa baris masuk. Fault pertama
-mengarah ke `0xffffffff8003edb0` (alamat `.text` yang tidak ter-map) — artinya
-fault yang kita lihat adalah fault kedua, dan `CR2`-nya sudah ditimpa.
+> **Koreksi.** Entri ini pernah ditulis sebagai "sudah di-fix, tapi bukan
+> penyebabnya". Itu **salah**. Arahnya benar, mechanismenya salah: `Box::new`
+> tidak mengurangi frame stack sama sedikit pun. Dan BUG-032 di sebelahnya
+> **tidak pernah diuji tanpa bug yang sebenarnya**, jadi klaim "ditolak"
+> atasnya juga tidak sah. Kedua koreksi itu ditulis di bagian 2.
 
 ---
 
+### BUG-031 (bagian 2) — `Box::new` tidak menolong; ini yang akhirnya berhasil
+
+**Status:** sudah di-fix (commit ini) — dan inilah penyebab sebenarnya `make test`
+**Keparahan:** tinggi — satu frame 270 KiB di boot stack, satu-satunya stack yang dipakai suite in-kernel
+**Test:** tidak ada test; ini bentuk, bukan logika. Ukuran cache sudah dipatok
+`test_cache_size_constant`
+
+**Di mana:** `crates/zenus-fs/src/block_cache.rs` — modul `tests`
+(`#[cfg(feature = "testing")]`)
+
+`BlockCache` adalah 512 entri × 512 byte ≈ **270 KiB**. Kelima test
+block-cache membuatnya sebagai `let`, jadi masing-masing mendorong frame
+quarter-megabyte ke boot stack.
+
+**Bagian pertama (sudah di-fix di commit sebelumnya)** memindahkannya ke heap
+lewat `Box::new(BlockCache::new())`. Itu **tidak menolong**, dan saya sempat
+menyimpulkan teorinya salah karena gejalanya tetap. Itu keliru.
+
+**Kenapa `Box::new` tidak menolong:** `BlockCache::new()` mengembalikan nilai
+(bukan `Box`), jadi compiler membangun **sementara 270 KiB di stack** lebih
+dulu, lalu menyalinnya ke dalam box. Alokasi heap-nya benar; frame stack-nya
+tetap ada.
+
+Yang membuktikannya adalah breakpoint, bukan penalaran:
+
+```
+Breakpoint 1, zenus::test_runner::run_tests      test_runner.rs:124   ← tercapai
+Breakpoint 2, zenus_fs::block_cache::BlockCache::new   block_cache.rs:37 ← masuk
+Breakpoint 3, zenus_arch::...::page_fault_handler      idt.rs:395        ← fault
+```
+
+Fault terjadi **tepat setelah** `BlockCache::new` — persis di frame sementara
+itu. Watchpoint di alamat fault (`0xffffffff8054a9e8`) tidak pernah fire,
+dan `cr2` **berbeda antar-build** (`0xffffffff8054a9e8` vs
+`0xffffffff80575488`), yang mengindikasikan dengan benar bahwa alamat itu bukan
+alamat statis tetap melainkan pointer liar yang reread dari memori yang sudah
+rusak.
+
+**Fix:** karena `BlockCache::new()` adalah `const fn`, satu `static mut
+TEST_CACHE: BlockCache = BlockCache::new();` menaruhnya di `.bss` — nol byte di
+stack, nol alokasi heap. `test_cache()` mengembalikan `&'static mut` ke
+salah satunya lewat `addr_of_mut!`.
+
+Satu cache bersama cukup: tidak ada test yang menyisipkan entri, jadi tidak
+satu pun bisa mengganggu state yang lain.
+
+**Hasil:** `make test` → **`=== Results: 25 passed, 0 failed, 25 total ===`**.
+Empat lapisan verifikasi sekarang hijau untuk pertama kalinya.
+
+### Koreksi atas catatan BUG-031 dan BUG-032 sebelumnya
+
+Saya menulis di `DEVLOG.md` bahwa BUG-031 dan BUG-032 "ditolak". Itu **salah
+untuk BUG-031** dan **tidak terbukti untuk BUG-032**:
+
+- **BUG-031 arahnya benar, mechanismenya salah.** Memindahkan ke heap tidak
+  cukup karena `Box::new(f())` tetap membuat sementara di stack. Gejala tetap
+  muncul, jadi saya menyimpulkan harusnya "ditolak". Pelajaran: uji
+  mekanismenya, bukan hanya gejalanya — `Box::new` kelihatan seperti alokasi,
+  padahal yang dialokasikan adalah yang sudah selesai di stack.
+- **BUG-032 tidak teruji bersih.** Waktu saya mengujinya, BUG-031 versi heap
+  masih ada. Jadi BUG-032 tidak pernah diuji tanpa bug yang sebenarnya. Itu
+  masih hardening yang benar (mekanismenya nyata: reservasi setelah
+  `global_init` memang tidak melindungi apa pun karena free stack sudah
+  terisi), tapi apakah ia memperbaiki sesuatu **tidak diketahui**. Saya tidak
+  akan mengklaim apa pun soal itu.
+
+---
+
+### `make test` — **SELESAI**
+
+Rinciannya ada di "BUG-031 (bagian 2)" di atas. Hasilnya:
+
+```
+[TEST] bc/new_cache_empty... OK          [TEST] ext2/magic_constant... OK
+… 25 baris …
+=== Results: 25 passed, 0 failed, 25 total ===
+```
+
+### Yang sudah diketahui
+
+| | |
+|---|---|
+| `run_tests` tercapai? | Ya — `run_tests` → `BlockCache::new` → fault, urutan itu yang membuktikan mekanismenya |
+| Alamat fault | Berbeda antar-build (`0xffffffff8054a9e8`, `0xffffffff80575488`) — jadi pointer liar, bukan alamat statis tetap |
+| Watchpoint di alamat itu | Tidak pernah fire, konsisten: yang written bukan address itu, tapi nilai pointer di suatu static |
+| Gejalanya | Nol baris `[TEST]`, nol baris `PAGE FAULT`, stack boot tidak terbaca sehingga handler tidak bisa melaporkan |
+
 ### BUG-032 — image kernel tidak pernah di-reserve dari frame allocator
 
-**Status:** sudah di-fix (commit ini) — hardening yang benar, tapi **bukan**
-penyebab `make test`. Lihat "Teori yang diuji dan ditolak"
+**Status:** sudah di-fix (commit ini) — hardening yang benar. **Apakah ia
+memperbaiki sesuatu tidak diketahui**: waktu diuji, BUG-031 versi heap masih
+ada, jadi pengujiannya tidak bersih
 **Keparahan:** tinggi — frame yang ditulis di atas static yang masih dipakai
 **Test:** tidak ada test; ini urutan pemanggilan, dan `global_init` tidak
 host-safe (terpakai `rsp`)
@@ -1691,8 +1725,90 @@ menyembuhkan gejala. Dicatat supaya tidak diulang.
 
 | Teori | Status | Hasil |
 |---|---|---|
-| BUG-031: frame 270 KiB di boot stack | ditolak | Stack tetap tidak terbaca; `make test` berhenti di tempat yang sama, nol baris `[TEST]` |
-| BUG-032: image kernel tidak di-reserve | ditolak | Gejala identik |
+| BUG-031: frame 270 KiB di boot stack | **benar**, tapi versi `Box::new`-nya tidak | Versi heap tetap gagal; versi `.bss` berhasil |
+| BUG-032: image kernel tidak di-reserve | **tidak teruji bersih** | Diuji saat BUG-031 masih ada. Mekanismenya nyata, tapi sebelum/sesudah belum terisolasi |
+
+Yang **tetap** terverifikasi:
+
+- `run_tests` tercapai (breakpoint di `test_runner.rs:124`, dari `apps/src/lib.rs:780`)
+- fault deterministik: `cr2 = 0xffffffff8054a9e8`
+- `cr2` itu `console::error::ERR_BUF + 0x3e10`, yaitu **~1 KiB di luar**
+  `ERR_BUF`, di halaman yang tidak ter-map, dan **tidak ada simbol** di sana
+- `ErrorBuf::push` sudah bounded di semua cabangnya (`min(15)`, `min(23)`,
+  `min(127)`, `min(47)`), jadi ini **bukan** overflow `ERR_BUF` — ini pointer
+  liar yang nilainya diambil dari static yang sudah rusak
+- `CR3` adalah CR3 kernel; stack boot tidak terbaca saat fault
+- nol baris `[TEST]`, nol baris `PAGE FAULT` di log
+
+### Yang belum terverifikasi
+
+BUG-032 belum diuji dalam bentuk yang bersih (tanpa BUG-031). Untuk
+memastikannya: kembalikan keempat test ke `Box::new(BlockCache::new())` dalam
+satu commit terpisah, jalankan `make test`, bandingkan — supaya satu
+perubahan saja yang diukur.
+
+### Catatan metodologi
+
+Tiga dari empat kesimpulan yang salah pada tick-tick terakhir berasal dari satu
+hal yang sama: menguji **gejala** alih-alih **mekanismenya**.
+
+1. `-smp 4` membuat gdb melaporkan stop di thread AP yang duduk di state
+   reset-nya, dengan `CR2` yang menyesatkan.
+2. Breakpoint beberapa baris di dalam page-fault handler sudah melihat
+   `CR2` milik fault berikutnya.
+3. `Box::new(f())` terlihat seperti "dipindahkan ke heap", padahal `f()`
+   sudah selesai membangun 270 KiB di stack lebih dulu. Gejalanya tetap,
+   jadi teorinya saya nyatakan salah — padahal mekanismenya yang salah, bukan
+   teorinya.
+
+### BUG-032 — image kernel tidak pernah di-reserve dari frame allocator
+
+**Status:** sudah di-fix (commit ini) — hardening yang benar. **Apakah ia
+memperbaiki sesuatu tidak diketahui**: waktu diuji, BUG-031 versi heap masih
+ada, jadi pengujiannya tidak bersih
+**Keparahan:** tinggi — frame yang ditulis di atas static yang masih dipakai
+**Test:** tidak ada test; ini urutan pemanggilan, dan `global_init` tidak
+host-safe (terpakai `rsp`)
+
+**Di mana:** `crates/zenus-mem/src/frame_allocator.rs` — `global_init`,
+`reserve_boot_stack`; `apps/src/linker.ld`; `apps/src/lib.rs`
+
+Tidak ada apa pun di tree yang mengembalikan image kernel dari frame
+allocator. `linker.ld` tidak punya simbol batas sama sekali, jadi tidak ada
+yang bisa mengembalikannya. Limine memang mengetahui di mana ia memuat kernel dan
+meninggalkan halaman itu di luar peta *usable* — tapi itu bookkeeping bootloader,
+dan `.bss` **tidak ada di berkas yang dibaca Limine** (di-nol-kan saat load),
+sehingga setiap static di `.bss` bergantung sepenuhnya pada Limine mereservasi
+rentang yang benar.
+
+Dua cacat yang lebih halus, keduanya soal **urutan**:
+
+1. `reserve_boot_stack()` dipanggil **setelah** `global_init`. Reservasi hanya
+   mengecilkan daftar region; free stack sudah diisi dari region itu di dalam
+   `global_init`. Frame yang sudah masuk free stack tetap keluar nanti —
+   reservasi belakangan melindungi **tidak apa-apa**.
+2. Pemanggilan reservasi gambar sendiri harus berada di dalam `global_init`,
+   sebelum free stack diisi, bukan sebagai `reserve_region` sesudahnya.
+
+**Fix:**
+- `linker.ld` menandai `__kernel_start` dan `__kernel_end` (mencakup `.bss`,
+  yang di-align ke 4 KiB)
+- `global_init(memory_map, hhdm_offset)` mencadangkan gambar kernel **dan**
+  boot stack sebelum free stack diisi
+- Both `entry()` call sites memperbarui argumennya
+
+**Bug yang sama berlaku untuk boot stack**, dan sekarang ikut diperbaiki di
+tempat yang benar.
+
+### Teori yang diuji dan ditolak untuk `make test`
+
+Dua-duanya saya terapkan, bangun ulang, dan jalankan. Keduanya **tidak**
+menyembuhkan gejala. Dicatat supaya tidak diulang.
+
+| Teori | Status | Hasil |
+|---|---|---|
+| BUG-031: frame 270 KiB di boot stack | **benar**, tapi versi `Box::new`-nya tidak | Versi heap tetap gagal; versi `.bss` berhasil |
+| BUG-032: image kernel tidak di-reserve | **tidak teruji bersih** | Diuji saat BUG-031 masih ada. Mekanismenya nyata, tapi sebelum/sesudah belum terisolasi |
 
 Yang **tetap** terverifikasi:
 
@@ -1739,7 +1855,7 @@ dalam, `CR2` yang dibaca sudah milik fault berikutnya.
 | `make fuzz-smoke` | **hijau** | 2000 kasus, `crashes=0`, `EXIT code=0` |
 | `make fuzz-coverage` | **hijau** | **50 000 kasus**, `crashes=0`, `EXIT code=0`, `new_paths=978` |
 | `make fuzz-regression` | **hijau** | `NO-CORPUS`, `EXIT code=2` — benar, dan exit code-nya memang sudah benar sejak awal |
-| `make test` | **boot**, belum menyelesaikan test | `run_tests` **tercapai** (terverifikasi via gdb). Tidak ada satu pun baris `[TEST]` yang keluar. Handler page-fault tidak bisa melaporkan karena stack boot-nya tidak terbaca. Detail dan kandidat yang tersisa ada di BUG-031 |
+| `make test` | **hijau** | **25 dari 25 lulus** di QEMU. Lihat BUG-031 bagian 2 |
 
 ### Yang belum selesai, dan kenapa saya tidak menebaknya
 

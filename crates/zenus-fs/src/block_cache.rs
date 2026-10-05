@@ -263,24 +263,34 @@ pub fn bc_invalidate_all() -> bool {
 pub mod tests {
     use super::*;
 
-/// A cache on the heap, not the stack.
+/// A cache in `.bss` — not on the stack, and not on the heap either.
 ///
-/// `BlockCache::new()` is 512 entries of 512 bytes plus bookkeeping — 270 KiB.
-/// Four of these tests built one as a local, so the in-kernel suite was pushing
-/// a quarter-megabyte frame onto the *boot* stack, which has 512 KiB reserved in
-/// total and whatever Limine happened to have mapped below it. Running off the
-/// end made the stack unreadable, which in turn made the page-fault handler
-/// fault while trying to report the original fault — so the crash dump printed
-/// nothing and the run looked like a hang with no trace.
+/// `BlockCache::new()` is 512 entries of 512 bytes plus bookkeeping: 270 KiB.
+/// That is fine for the kernel's real cache, which is a `static`
+/// (`BLOCK_CACHE`) initialised in place. It is not fine anywhere else:
 ///
-/// The heap is initialised before the suite runs, and the host test suite is
-/// unaffected: this is the `testing`-gated module only.
-fn heap_cache() -> Option<alloc::boxed::Box<BlockCache>> {
-    Some(alloc::boxed::Box::new(BlockCache::new()))
+/// * On the stack it blows the boot stack, which is the only stack the
+///   in-kernel suite runs on.
+/// * `Box::new(BlockCache::new())` does **not** fix that. The function returns
+///   by value, so the compiler materialises a 270 KiB temporary on the stack
+///   first and then copies it into the box. Verified with a breakpoint, which
+///   stopped inside `BlockCache::new` at the first test, i.e. the frame was
+///   still on the stack.
+///
+/// `BlockCache::new()` is a `const fn`, so a `static` can hold one directly and
+/// nothing is ever built on the stack. One shared cache is enough: none of
+/// these tests insert an entry, so none of them can disturb another's state.
+static mut TEST_CACHE: BlockCache = BlockCache::new();
+
+fn test_cache() -> &'static mut BlockCache {
+    // SAFETY: the in-kernel suite is single-threaded on the boot CPU and these
+    // tests are registered to run in sequence, so there is no aliasing. The
+    // `&raw mut` avoids creating a second reference to the same place.
+    unsafe { &mut *core::ptr::addr_of_mut!(TEST_CACHE) }
 }
 
     pub fn test_new_cache_empty() -> Result<(), &'static str> {
-        let cache = heap_cache().ok_or("no memory for the test cache")?;
+        let cache = test_cache();
         if cache.hits != 0 || cache.misses != 0 {
             return Err("New cache should have zero stats");
         }
@@ -288,7 +298,7 @@ fn heap_cache() -> Option<alloc::boxed::Box<BlockCache>> {
     }
 
     pub fn test_evict_on_empty_returns_index_0() -> Result<(), &'static str> {
-        let mut cache = heap_cache().ok_or("no memory for the test cache")?;
+        let mut cache = test_cache();
         // Evict pada cache kosong harus mengembalikan index 0 (hash berdasarkan dev_id=0, block=0)
         let idx = cache.evict_one(0, 0);
         match idx {
@@ -298,7 +308,7 @@ fn heap_cache() -> Option<alloc::boxed::Box<BlockCache>> {
     }
 
     pub fn test_find_entry_empty_returns_none() -> Result<(), &'static str> {
-        let cache = heap_cache().ok_or("no memory for the test cache")?;
+        let cache = test_cache();
         if cache.find_entry(0, 0).is_some() {
             return Err("find_entry on empty cache should return None");
         }
@@ -306,7 +316,7 @@ fn heap_cache() -> Option<alloc::boxed::Box<BlockCache>> {
     }
 
     pub fn test_stats_empty() -> Result<(), &'static str> {
-        let cache = heap_cache().ok_or("no memory for the test cache")?;
+        let cache = test_cache();
         let (hits, misses) = cache.stats();
         if hits != 0 || misses != 0 {
             return Err("Empty cache stats should be (0, 0)");
@@ -315,7 +325,7 @@ fn heap_cache() -> Option<alloc::boxed::Box<BlockCache>> {
     }
 
     pub fn test_lru_counter_increments_on_evict() -> Result<(), &'static str> {
-        let mut cache = heap_cache().ok_or("no memory for the test cache")?;
+        let mut cache = test_cache();
         let idx1 = cache.evict_one(0, 0);
         let idx2 = cache.evict_one(0, 1);
         if idx1 == idx2 {
