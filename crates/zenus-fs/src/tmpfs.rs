@@ -410,8 +410,15 @@ mod host_tests {
     /// The same guard, exercised through the real `FileSystem` entry point so
     /// the test fails if someone reintroduces the unchecked add in `write`
     /// while leaving the helper correct.
+    ///
+    /// Takes the crate-wide test lock: this creates a node in the *shared*
+    /// tmpfs table, and `host_tests::fresh_fs()` in `lib.rs` calls
+    /// `TmpFs::reset()`. Without the lock, a concurrent reset wiped the inode
+    /// out from under this test and it failed intermittently with
+    /// "create a file" — a flake that had nothing to do with what it tests.
     #[test]
     fn tmpfs_write_with_a_wrapping_offset_returns_none() {
+        let _serial = crate::host_tests::serial();
         let fs = TmpFs;
         let root = fs.root_inode();
 

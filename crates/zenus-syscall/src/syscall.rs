@@ -1579,12 +1579,14 @@ fn sys_chown(path_ptr: u64, owner: u64, group: u64, _a4: u64, _a5: u64, _a6: u64
     }
 }
 
-fn sys_access(path_ptr: u64, _mode: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+fn sys_access(path_ptr: u64, mode: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     let path = match read_user_cstr(path_ptr, 256) {
         Some(p) => p,
         None => return -1i64 as u64,
     };
-    if fd::vfs_access(&path) {
+    // The mode is part of the question. It used to be dropped, which turned
+    // `access(path, W_OK)` into `access(path, F_OK)`.
+    if fd::vfs_access(&path, mode as u32) {
         0
     } else {
         -1i64 as u64

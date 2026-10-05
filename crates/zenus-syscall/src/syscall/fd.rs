@@ -502,14 +502,31 @@ pub fn current_task() -> u64 {
     zenus_sched::scheduler::current_task_id()
 }
 
+/// The calling task's credentials, read once so a permission decision sees a
+/// consistent identity rather than four separate task-table lookups.
+fn cred() -> vfs::Credentials {
+    vfs::Credentials::new(
+        zenus_sched::scheduler::current_uid(),
+        zenus_sched::scheduler::current_gid(),
+        zenus_sched::scheduler::current_euid(),
+        zenus_sched::scheduler::current_egid(),
+    )
+}
+
+/// `mkdir(2)`. The permission check is on the *parent* directory: creating
+/// `d` modifies `parentof(d)`, not `d`. This call used to reach
+/// `vfs::create_dir` with no check at all, so any task could create entries in
+/// a directory it could not write.
 pub fn vfs_mkdir(path: &str) -> bool {
-    vfs::create_dir(path)
+    vfs::create_dir_permitted(zenus_ns::NS_ROOT, path, &cred())
 }
 
+/// `unlink(2)` — same parent-directory rule as `mkdir`.
 pub fn vfs_unlink(path: &str) -> bool {
-    vfs::remove(path)
+    vfs::remove_permitted(zenus_ns::NS_ROOT, path, &cred())
 }
 
+/// `rmdir(2)` — the parent's permission applies, plus "must be empty".
 pub fn vfs_rmdir(path: &str) -> bool {
     let node = match vfs::open(path) {
         Some(n) => n,
@@ -519,29 +536,33 @@ pub fn vfs_rmdir(path: &str) -> bool {
     if !entries.is_empty() {
         return false;
     }
-    vfs::remove(path)
+    vfs::remove_permitted(zenus_ns::NS_ROOT, path, &cred())
 }
 
 pub fn vfs_rename(_old: &str, _new: &str) -> bool {
     false
 }
 
+/// `chmod(2)` — owner or root only. The permission bits say nothing about who
+/// may change them.
 pub fn vfs_chmod(path: &str, mode: u16) -> bool {
-    let node = match vfs::open(path) {
-        Some(n) => n,
-        None => return false,
-    };
-    node.fs.chmod(node.inode, mode)
+    vfs::chmod_permitted(zenus_ns::NS_ROOT, path, mode, &cred())
 }
 
-pub fn vfs_chown(path: &str, _owner: u32, _group: u32) -> bool {
-    let _node = match vfs::open(path) {
-        Some(n) => n,
-        None => return false,
-    };
-    true
+/// `chown(2)`. This used to resolve the node, throw it away and return `true`
+/// unconditionally, so `chown` on any existing path reported success without
+/// doing anything. `FileSystem::chown` has been implemented all along and was
+/// never reached from here.
+pub fn vfs_chown(path: &str, owner: u32, group: u32) -> bool {
+    // `-1` is "leave unchanged" in the syscall ABI, and arrives as `u32::MAX`.
+    let owner = if owner == u32::MAX { -1i64 } else { owner as i64 };
+    let group = if group == u32::MAX { -1i64 } else { group as i64 };
+    vfs::chown_permitted(zenus_ns::NS_ROOT, path, owner, group, &cred())
 }
 
-pub fn vfs_access(path: &str) -> bool {
-    vfs::open(path).is_some()
+/// `access(2)`. The `mode` argument used to be discarded: the function only
+/// asked whether the path resolved, so `access("/etc/shadow", W_OK)` returned
+/// success for a mode-000 file.
+pub fn vfs_access(path: &str, mode: u32) -> bool {
+    vfs::access_permitted(zenus_ns::NS_ROOT, path, mode, &cred())
 }

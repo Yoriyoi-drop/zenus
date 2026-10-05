@@ -40,9 +40,17 @@ mod host_tests {
     use alloc::vec::Vec;
     use zenus_sync::spinlock::{SpinLock, SpinLockGuard};
 
-    static SERIAL: SpinLock<()> = SpinLock::new(());
+    /// Serialises every test in the crate that touches module-global state.
+    ///
+    /// tmpfs nodes, the VFS root and the mount table are all process-global,
+    /// and `fresh_fs()` calls `TmpFs::reset()`. A test in `tmpfs::host_tests`
+    /// that creates a node without holding this lock races with a `fresh_fs()`
+    /// in another thread and silently loses its inode. `pub(crate)` so the
+    /// per-module `host_tests` submodules can take the same lock instead of
+    /// declaring a second one that guards nothing.
+    pub(crate) static SERIAL: SpinLock<()> = SpinLock::new(());
 
-    fn serial() -> SpinLockGuard<'static, ()> {
+    pub(crate) fn serial() -> SpinLockGuard<'static, ()> {
         SERIAL.lock()
     }
 
@@ -832,6 +840,285 @@ mod host_tests {
         let mut truncated = zpk_image("demo", "1.0", "/bin/demo", b"0123456789");
         truncated.truncate(truncated.len() - 4);
         assert!(!crate::pkg::pkg_install(&truncated, 0));
+    }
+
+    // ── mutating VFS paths need a permission check ────────────────────────
+
+    fn cred(uid: u32, gid: u32) -> vfs::Credentials {
+        vfs::Credentials::new(uid, gid, uid, gid)
+    }
+
+    const ROOT_CRED: vfs::Credentials = vfs::Credentials {
+        uid: 0,
+        gid: 0,
+        euid: 0,
+        egid: 0,
+    };
+
+    /// Regression: `fd_open` was the only VFS caller that ran `access_check`.
+    /// `mkdir`, `unlink`, `rmdir`, `chmod` and `chown` all reached the
+    /// filesystem with no check at all, so any task could create and delete
+    /// entries in a directory it could not write — and the kernel runs its
+    /// shell as one task, so this was "any program gets root's filesystem
+    /// rights".
+    #[test]
+    fn mutating_paths_are_refused_without_permission_on_the_parent() {
+        let _serial = serial();
+        fresh_fs();
+
+        // A directory owned by uid 1000, mode 0700: only 1000 may enter it.
+        assert!(vfs::create_dir("/private"));
+        let dir = vfs::open("/private").expect("/private exists");
+        assert!(dir.fs.chmod(dir.inode, vfs::S_IFDIR | 0o700));
+        assert!(dir.fs.chown(dir.inode, 1000, 1000));
+
+        let stranger = cred(2000, 2000);
+        assert_eq!(
+            dir.fs.stat(dir.inode).uid,
+            1000,
+            "setup: the directory belongs to 1000"
+        );
+
+        // Creating inside it: refused, and nothing was created.
+        assert!(
+            !vfs::create_dir_permitted(zenus_ns::NS_ROOT, "/private/new", &stranger),
+            "mkdir in a 0700 directory owned by someone else must be refused"
+        );
+        assert!(vfs::open("/private/new").is_none());
+
+        // The owner may.
+        assert!(
+            vfs::create_dir_permitted(zenus_ns::NS_ROOT, "/private/mine", &cred(1000, 1000)),
+            "the owner must still be able to create entries"
+        );
+
+        // Removing an entry inside it: also refused for the stranger.
+        assert!(
+            !vfs::remove_permitted(zenus_ns::NS_ROOT, "/private/mine", &stranger),
+            "unlink in a directory you cannot write must be refused"
+        );
+        assert!(vfs::open("/private/mine").is_some());
+        assert!(vfs::remove_permitted(
+            zenus_ns::NS_ROOT,
+            "/private/mine",
+            &cred(1000, 1000)
+        ));
+
+        // Root is not subject to any of it.
+        assert!(vfs::create_dir_permitted(
+            zenus_ns::NS_ROOT,
+            "/private/root-made",
+            &ROOT_CRED
+        ));
+    }
+
+    /// The permission bits on the *target* say nothing about whether a name may
+    /// be created or removed — the parent directory does. A writable file in a
+    /// read-only directory still cannot be unlinked.
+    #[test]
+    fn the_parent_directory_is_what_gets_checked_not_the_target() {
+        let _serial = serial();
+        fresh_fs();
+
+        // A writable file inside a directory the stranger cannot write.
+        assert!(vfs::create_dir("/ro"));
+        let dir = vfs::open("/ro").expect("/ro exists");
+        assert!(dir.fs.chmod(dir.inode, vfs::S_IFDIR | 0o750));
+        assert!(dir.fs.chown(dir.inode, 1000, 1000));
+        assert!(vfs::create_file("/ro/file"), "setup: the file exists");
+
+        let stranger = cred(2000, 2000);
+        let target = vfs::open("/ro/file").expect("/ro/file exists");
+        assert!(target.fs.chmod(target.inode, vfs::S_IFREG | 0o666));
+        assert_ne!(
+            target.fs.stat(target.inode).mode & vfs::S_IWOTH,
+            0,
+            "setup: the file itself is world-writable"
+        );
+
+        assert!(
+            !vfs::remove_permitted(zenus_ns::NS_ROOT, "/ro/file", &stranger),
+            "a writable file in a read-only directory still cannot be unlinked"
+        );
+        assert!(
+            vfs::remove_permitted(zenus_ns::NS_ROOT, "/ro/file", &cred(1000, 1000)),
+            "the directory's owner may unlink it"
+        );
+    }
+
+    /// `chmod`/`chown` are owner-or-root operations. The old `vfs_chown`
+    /// resolved the node, discarded it and returned `true`, so it reported
+    /// success without touching anything.
+    #[test]
+    fn chmod_and_chown_are_owner_or_root_only() {
+        let _serial = serial();
+        fresh_fs();
+
+        assert!(vfs::create_file("/f"));
+        let node = vfs::open("/f").expect("/f exists");
+        assert!(node.fs.chown(node.inode, 1000, 1000));
+
+        let stranger = cred(2000, 2000);
+        let owner = cred(1000, 1000);
+
+        // tmpfs stamps new nodes with uid 0, so the entry the owner just created
+        // needs to be handed over before "the owner" means anything.
+        assert!(vfs::create_file("/owned"));
+        let owned = vfs::open("/owned").expect("/owned exists");
+        assert!(owned.fs.chown(owned.inode, 1000, 1000));
+
+        // A stranger cannot change the mode bits.
+        assert!(
+            !vfs::chmod_permitted(zenus_ns::NS_ROOT, "/f", 0o777, &stranger),
+            "chmod by a non-owner must be refused"
+        );
+        assert_eq!(node.fs.stat(node.inode).mode & 0o777, 0o644, "mode unchanged");
+
+        // …but the owner can.
+        assert!(vfs::chmod_permitted(
+            zenus_ns::NS_ROOT,
+            "/f",
+            0o600,
+            &owner
+        ));
+        assert_eq!(node.fs.stat(node.inode).mode & 0o777, 0o600);
+
+        // Changing the owner requires root, whoever asks.
+        assert!(
+            !vfs::chown_permitted(zenus_ns::NS_ROOT, "/f", 2000, -1, &owner),
+            "changing the owner requires root"
+        );
+        assert_eq!(node.fs.stat(node.inode).uid, 1000, "owner unchanged");
+        assert!(
+            vfs::chown_permitted(zenus_ns::NS_ROOT, "/f", 2000, -1, &ROOT_CRED),
+            "root may change the owner"
+        );
+        assert_eq!(node.fs.stat(node.inode).uid, 2000);
+
+        // -1 means "leave unchanged" and must not be written as u32::MAX.
+        assert!(vfs::chown_permitted(
+            zenus_ns::NS_ROOT,
+            "/f",
+            -1,
+            4242,
+            &cred(2000, 2000)
+        ));
+        let after = node.fs.stat(node.inode);
+        assert_eq!(after.uid, 2000, "-1 must not become u32::MAX");
+        assert_eq!(after.gid, 4242);
+    }
+
+    /// `vfs_access` used to discard its `mode` argument and only ask whether
+    /// the path resolved, so `access("/etc/shadow", W_OK)` succeeded on a
+    /// mode-000 file.
+    #[test]
+    fn access_honours_its_mode_argument() {
+        let _serial = serial();
+        fresh_fs();
+
+        assert!(vfs::create_file("/secret"));
+        let node = vfs::open("/secret").expect("/secret exists");
+        assert!(node.fs.chmod(node.inode, vfs::S_IFREG | 0o000));
+        assert!(node.fs.chown(node.inode, 1000, 1000));
+
+        let stranger = cred(2000, 2000);
+
+        // F_OK is existence only.
+        assert!(vfs::access_permitted(
+            zenus_ns::NS_ROOT,
+            "/secret",
+            0,
+            &stranger
+        ));
+        // R_OK / W_OK / X_OK must all fail on a mode-000 file.
+        for (mode, name) in [(4u32, "R_OK"), (2, "W_OK"), (1, "X_OK")] {
+            assert!(
+                !vfs::access_permitted(zenus_ns::NS_ROOT, "/secret", mode, &stranger),
+                "{name} must be denied on a mode-000 file"
+            );
+        }
+        // And a mode with bits outside R_OK|W_OK|X_OK is refused, not ignored.
+        assert!(!vfs::access_permitted(
+            zenus_ns::NS_ROOT,
+            "/secret",
+            8,
+            &stranger
+        ));
+
+        // Give it away and the readable modes start succeeding. 0o644 leaves
+        // "other" without write, which is the point: the mode argument, not
+        // mere existence, is what decides.
+        assert!(node.fs.chmod(node.inode, vfs::S_IFREG | 0o644));
+        assert!(vfs::access_permitted(
+            zenus_ns::NS_ROOT,
+            "/secret",
+            4,
+            &stranger
+        ));
+        assert!(
+            !vfs::access_permitted(zenus_ns::NS_ROOT, "/secret", 2, &stranger),
+            "0o644 does not grant write to other"
+        );
+        assert!(
+            !vfs::access_permitted(zenus_ns::NS_ROOT, "/secret", 1, &stranger),
+            "a non-executable file must not pass X_OK"
+        );
+
+        // 0o666 and the owner both pass W_OK.
+        assert!(node.fs.chmod(node.inode, vfs::S_IFREG | 0o666));
+        assert!(vfs::access_permitted(
+            zenus_ns::NS_ROOT,
+            "/secret",
+            2,
+            &stranger
+        ));
+        assert!(node.fs.chmod(node.inode, vfs::S_IFREG | 0o644));
+        assert!(vfs::access_permitted(
+            zenus_ns::NS_ROOT,
+            "/secret",
+            2,
+            &cred(1000, 1000)
+        ));
+
+        // A missing path fails every mode, including F_OK.
+        assert!(!vfs::access_permitted(
+            zenus_ns::NS_ROOT,
+            "/nope",
+            0,
+            &stranger
+        ));
+    }
+
+    /// Pure decode test for `access(2)`'s mode argument.
+    #[test]
+    fn access_mode_bits_are_decoded_or_refused() {
+        assert_eq!(vfs::decode_access_mode(0), Some((false, false, false))); // F_OK
+        assert_eq!(vfs::decode_access_mode(4), Some((true, false, false))); // R_OK
+        assert_eq!(vfs::decode_access_mode(2), Some((false, true, false))); // W_OK
+        assert_eq!(vfs::decode_access_mode(1), Some((false, false, true))); // X_OK
+        assert_eq!(vfs::decode_access_mode(6), Some((true, true, false))); // R|W
+        assert_eq!(vfs::decode_access_mode(7), Some((true, true, true)));
+        assert_eq!(vfs::decode_access_mode(5), Some((true, false, true))); // R|X
+        assert_eq!(vfs::decode_access_mode(3), Some((false, true, true))); // W|X
+
+        for bad in [8u32, 0xFF, 1 << 31] {
+            assert_eq!(
+                vfs::decode_access_mode(bad),
+                None,
+                "{bad:#x} must be refused, not silently reduced"
+            );
+        }
+    }
+
+    /// `owns` is what `chmod`/`chown` rest on: root always, the owner otherwise.
+    #[test]
+    fn ownership_is_root_or_the_owner() {
+        let file = stat(1000, 1000, 0o644, vfs::FileType::File);
+        assert!(vfs::owns(1000, 1000, &file));
+        assert!(vfs::owns(2000, 0, &file), "root owns everything");
+        assert!(!vfs::owns(2000, 2000, &file));
+        // The *real* uid does not confer ownership; only the effective one.
+        assert!(!vfs::owns(1000, 2000, &file));
     }
 
     // ── uninstall confinement ────────────────────────────────────────────

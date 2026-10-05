@@ -368,6 +368,84 @@ Test end-to-end sudah diverifikasi gagal sebelum fix (guard
 
 ---
 
+### BUG-008 — `chmod`/`chown`/`access` tanpa cek, dan `chown` yang tidak pernah jalan
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — kerentanan pada semua jalur mutating VFS
+**Test:** `crates/zenus-fs/src/lib.rs`
+- `host_tests::mutating_paths_are_refused_without_permission_on_the_parent`
+- `host_tests::the_parent_directory_is_what_gets_checked_not_the_target`
+- `host_tests::chmod_and_chown_are_owner_or_root_only`
+- `host_tests::access_honours_its_mode_argument`
+- `host_tests::access_mode_bits_are_decoded_or_refused`
+- `host_tests::ownership_is_root_or_the_owner`
+
+**Di mana:** `crates/zenus-syscall/src/syscall/fd.rs` — `vfs_mkdir`,
+`vfs_unlink`, `vfs_rmdir`, `vfs_chmod`, `vfs_chown`, `vfs_access`;
+`crates/zenus-fs/src/vfs.rs`
+
+**Yang salah:** `fd_open` adalah satu-satunya pemanggil `access_check`.
+Empat jalur lain masuk ke filesystem tanpa cek apa pun.
+
+- `vfs_mkdir`/`vfs_unlink` → `vfs::create_dir`/`vfs::remove` langsung
+- `vfs_chmod` → `node.fs.chmod` tanpa cek kepemilikan
+- `vfs_chown` → me-*resolve* node, membuangnya, `return true` tanpa syarat
+- `vfs_access` → membuang argumen `mode`, hanya menanyakan "path ini
+  resolve?" sehingga `access("/etc/shadow", W_OK)` sukses untuk file mode 000
+
+`FileSystem::chown` sudah diimplementasi di tmpfs sejak awal dan tidak pernah
+dipanggil dari mana pun. Jadi `chown` melaporkan sukses sambil tidak melakukan
+apa-apa — lebih buruk dari gagal, karena program tidak tahu harus mencari
+niat lain.
+
+Karena kernel menjalankan shell-nya sebagai satu task dan `current_euid()`
+adalah 0 untuk semua task yang tidak menetapkannya, dampaknya praktis: setiap
+program mendapat hak filesystem root.
+
+**Fix:** permission check pindah ke `zenus-fs` supaya bisa diuji di host.
+
+- `Credentials` — identitas dilewatkan masuk, bukan dibaca dari scheduler,
+  supaya setiap keputusan bisa diuji tanpa VM
+- `decode_access_mode(u32) -> Option<(read, write, exec)>` — `None` untuk bit
+  di luar `R_OK|W_OK|X_OK`, ditolak bukan direduksi diam-diam
+- `access_check_bits(...)` — bentuk umum dengan ketiga bit berdiri sendiri.
+  `access_check` lama hanya bisa "baca atau tulis", jadi tidak bisa
+  menyatakan `X_OK` alone maupun "baca tanpa tulis" — persis yang ditanyakan
+  `access(2)`. `access_check` tetap ada sebagai shorthand untuk `fd_open`
+- `owns(uid, euid, stat)` — root atau owner
+- `may_modify_parent(parent_stat, cred)` — untuk `mkdir`/`unlink`/`rmdir`
+
+Empat entry point namespace-aware: `create_dir_permitted`,
+`remove_permitted`, `chmod_permitted`, `chown_permitted`, plus
+`access_permitted`. `sys_access` sekarang meneruskan `mode`-nya.
+
+** object's yang dicek adalah parent, bukan target.** `mkdir d` memodifikasi
+**Objek yang dicek adalah parent, bukan target.** `mkdir d` memodifikasi
+`parentof(d)`, bukan `d`. Bit pada file target tidak berperan apa pun untuk
+unlink: file read-only di dalam direktori yang bisa ditulis tetap boleh
+dihapus — itu POSIX. Test
+`the_parent_directory_is_what_gets_checked_not_the_target` yang mengunci arah
+ini, sekaligus menahan versi yang terlalu ketat (yang akan menolak
+menghapus file read-only sendiri).
+
+**`chown` memakai `i64`, bukan `u32`.** ABI-nya `-1` berarti "tidak diubah",
+dan selama ini diteruskan sebagai `u32::MAX` — yang akan ditulis ke `uid`/
+`gid` sebagai 4294967295. `fd::vfs_chown` yang menerjemahkan `u32::MAX` → `-1`.
+
+**Bug kedua yang ketemu: race di test suite.** Setelah check masuk,
+`cargo test -p zenus-fs` gagal 1 dari ~200 jalan:
+`tmpfs_write_with_a_wrapping_offset_returns_none` gagal di
+`tmpfs.rs:441` ("create a file"). Penyebabnya `tmpfs::host_tests` membuat node
+di tabel tmpfs global tanpa lock yang sama dengan `fresh_fs()` di `lib.rs`
+yang memanggil `TmpFs::reset()` — reset dari thread lain menghapus inode-nya.
+`SERIAL` sekarang `pub(crate)` dan dipakai kedua modul. Diuji 200× tanpa lock
+(1 gagal) vs 200× dengan lock (0 gagal).
+
+Keempat test lain diverifikasi gagal sebelum fix (guard di `vfs.rs`
+dikembalikan ke "tidak ada cek" → 4 FAILED).
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:
@@ -382,9 +460,6 @@ Prioritas menurut dampak × kemudahan diuji:
 | 7 | `zenus-syscall/src/syscall.rs:2681` | `8 * nfds` overflow → ukuran tervalidasi 0, ukuran terpakai 2^61 | host (helper) |
 | 8 | `zenus-syscall/src/syscall.rs:2459` | `sys_shmdt` `invlpg` tanpa menulis PTE → frame di-free sementara PTE masih hidup → UAF antar task. `shmat` juga tidak menaikkan `attached` | in-kernel |
 | 9 | `zenus-syscall/src/syscall.rs:1346` | `recv` alokasi `len` yang hanya dibatasi `USER_SPACE_LIMIT` (128 TiB), tidak seperti `sys_read`'s `MAX_READ` | host (helper) |
-| 10 | `zenus-syscall/src/syscall/fd.rs:545` | `vfs_access` mengabaikan mode dan melewati `access_check` → `access("/etc/shadow", W_OK)` = 0 untuk file mode 000 | host |
-| 11 | `zenus-syscall/src/syscall/fd.rs:537` | `vfs_chown` resolve node lalu membuangnya, selalu `true`. `FileSystem::chown` sudah diimplementasi tapi tidak pernah dipanggil | host |
-| 12 | `zenus-fs/src/vfs.rs:335-380` | Semua jalur mutating VFS (mkdir/unlink/chmod/chown) tanpa permission check; hanya `fd_open` yang memanggil `access_check` | host |
 | 13 | `zenus-syscall/src/syscall.rs:2034` | `sys_mount` menerima `MS_RDONLY\|MS_NOSUID\|MS_NODEV\|MS_NOEXEC` lalu mengabaikan semuanya, return 0. `vfs::Mount` tidak punya field flag sama sekali. Tidak ada cek `euid == 0` | host |
 | 14 | `zenus-syscall/src/syscall.rs:708` | `brk(small)` menjalankan `unmap_heap_pages` yang menelusuri *semua* halaman di `[addr, heap_brk)` lalu `free_frame` tiap yang ter-map → program membebaskan frame ELF-nya sendiri, dan menelusuri 6.4e9 entri page table (hang). `heap_brk = loaded.heap_base ≈ 0x6000_0000_0000` | host |
 | 18 | `zenus-net/src/tcp.rs:894` | `KEEPALIVE_PROBE_INTERVAL` dihitung lalu dibuang (`let _probe_interval = ...`) → probe 96× lebih lambat dari yang didokumentasikan | host |

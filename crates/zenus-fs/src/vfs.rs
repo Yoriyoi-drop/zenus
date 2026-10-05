@@ -693,6 +693,226 @@ pub fn access_check(
     }
 }
 
+/// Decoded `mode` argument of `access(2)`: `F_OK == 0`, `R_OK == 4`,
+/// `W_OK == 2`, `X_OK == 1`.
+///
+/// `None` for any bit outside that set. The old `vfs_access` ignored the mode
+/// entirely and only asked whether the path resolved, so `access("/etc/shadow",
+/// W_OK)` returned success for a mode-000 file. Pure.
+pub fn decode_access_mode(mode: u32) -> Option<(bool, bool, bool)> {
+    const R_OK: u32 = 4;
+    const W_OK: u32 = 2;
+    const X_OK: u32 = 1;
+    if mode & !(R_OK | W_OK | X_OK) != 0 {
+        return None;
+    }
+    Some((mode & R_OK != 0, mode & W_OK != 0, mode & X_OK != 0))
+}
+
+/// Does the caller own `stat`? Only the owner (or root) may `chmod`/`chown`.
+///
+/// Pure. POSIX puts `chmod` and `chown` on a different footing from `open`:
+/// the permission bits say nothing about who may *change* them.
+pub fn owns(uid: u32, euid: u32, stat: &FileStat) -> bool {
+    let _ = uid;
+    euid == 0 || euid == stat.uid
+}
+
+/// `access(2)` permission check with all three bits stated independently.
+///
+/// `access_check` only ever took "read or write", so it could not express a
+/// bare `X_OK`, and it could not express "read without write" — which is
+/// exactly what `access(2)` asks for. This is the general form; `access_check`
+/// stays as the two-argument shorthand `fd_open` uses.
+pub fn access_check_bits(
+    uid: u32,
+    gid: u32,
+    euid: u32,
+    egid: u32,
+    stat: &FileStat,
+    want_read: bool,
+    want_write: bool,
+    want_exec: bool,
+) -> bool {
+    let mode = stat.mode;
+    if euid == 0 {
+        return true;
+    }
+    // The class to test: owner bits when the caller is the owner, group bits
+    // when the effective group matches, otherwise the world bits.
+    let (r, w, x) = if euid == stat.uid {
+        (mode & S_IRUSR != 0, mode & S_IWUSR != 0, mode & S_IXUSR != 0)
+    } else if egid == stat.gid {
+        (mode & S_IRGRP != 0, mode & S_IWGRP != 0, mode & S_IXGRP != 0)
+    } else {
+        (mode & S_IROTH != 0, mode & S_IWOTH != 0, mode & S_IXOTH != 0)
+    };
+    let _ = (uid, gid);
+    if want_read && !r {
+        return false;
+    }
+    if want_write && !w {
+        return false;
+    }
+    if want_exec && !x {
+        return false;
+    }
+    true
+}
+
+/// The identity a permission decision is made against. Passed in rather than
+/// read from the scheduler so every decision is testable on the host.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Credentials {
+    pub uid: u32,
+    pub gid: u32,
+    pub euid: u32,
+    pub egid: u32,
+}
+
+impl Credentials {
+    pub fn new(uid: u32, gid: u32, euid: u32, egid: u32) -> Self {
+        Credentials {
+            uid,
+            gid,
+            euid,
+            egid,
+        }
+    }
+
+    fn may(&self, stat: &FileStat, want_read: bool, want_write: bool, want_exec: bool) -> bool {
+        access_check_bits(
+            self.uid,
+            self.gid,
+            self.euid,
+            self.egid,
+            stat,
+            want_read,
+            want_write,
+            want_exec,
+        )
+    }
+}
+
+/// May `cred` modify the *contents* of `path`'s parent directory?
+///
+/// `mkdir`, `unlink` and `rmdir` do not modify their argument — they modify
+/// the directory the name lives in. Checking the target's own mode bit is the
+/// wrong object: a writable file inside a read-only directory can still not be
+/// unlinked. Pure, given the parent stat.
+pub fn may_modify_parent(parent_stat: &FileStat, cred: &Credentials) -> bool {
+    if cred.euid == 0 {
+        return true;
+    }
+    if parent_stat.file_type != FileType::Directory {
+        return false;
+    }
+    // POSIX: creating or removing a name needs write *and* search on the
+    // directory. `access_check` only ever tested "+x" as part of its write
+    // branch, so this states both bits.
+    cred.may(parent_stat, false, true, true)
+}
+
+/// `mkdir(2)` with the parent-directory permission check applied.
+pub fn create_dir_permitted(ns_id: zenus_ns::NsId, path: &str, cred: &Credentials) -> bool {
+    let parent = match parent_dir(path) {
+        Some(p) => p,
+        None => return false,
+    };
+    match stat_in_ns(ns_id, &parent) {
+        Some(stat) if may_modify_parent(&stat, cred) => create_dir_in_ns(ns_id, path),
+        _ => false,
+    }
+}
+
+/// `unlink(2)` / `rmdir(2)` with the parent-directory permission check applied.
+pub fn remove_permitted(ns_id: zenus_ns::NsId, path: &str, cred: &Credentials) -> bool {
+    let parent = match parent_dir(path) {
+        Some(p) => p,
+        None => return false,
+    };
+    // The name has to exist: `unlink` on a missing path is ENOENT, not a
+    // silent success.
+    if stat_in_ns(ns_id, path).is_none() {
+        return false;
+    }
+    let parent_stat = match stat_in_ns(ns_id, &parent) {
+        Some(s) => s,
+        None => return false,
+    };
+    if !may_modify_parent(&parent_stat, cred) {
+        return false;
+    }
+    // Note what is *not* checked: the target's own mode. POSIX gates removal on
+    // the parent directory only (plus the sticky bit, which this filesystem
+    // does not model), so unlinking a read-only file is legal and must stay
+    // legal. Requiring write on the target would have been a plausible-looking
+    // extra rule that breaks ordinary cleanup.
+    remove_in_ns(ns_id, path)
+}
+
+/// `chmod(2)`: the owner, or root. Everyone else is refused.
+pub fn chmod_permitted(ns_id: zenus_ns::NsId, path: &str, mode: u16, cred: &Credentials) -> bool {
+    let stat = match stat_in_ns(ns_id, path) {
+        Some(s) => s,
+        None => return false,
+    };
+    if !owns(cred.uid, cred.euid, &stat) {
+        return false;
+    }
+    let node = match open_in_ns(ns_id, path) {
+        Some(n) => n,
+        None => return false,
+    };
+    node.fs.chmod(node.inode, mode)
+}
+
+/// `chown(2)`: changing the owner requires root; changing only the group is
+/// allowed for the owner. `-1` means "leave unchanged".
+pub fn chown_permitted(
+    ns_id: zenus_ns::NsId,
+    path: &str,
+    owner: i64,
+    group: i64,
+    cred: &Credentials,
+) -> bool {
+    let stat = match stat_in_ns(ns_id, path) {
+        Some(s) => s,
+        None => return false,
+    };
+    let changes_owner = owner >= 0 && owner as u32 != stat.uid;
+    if changes_owner && cred.euid != 0 {
+        return false;
+    }
+    if !changes_owner && !owns(cred.uid, cred.euid, &stat) {
+        return false;
+    }
+    let new_uid = if owner >= 0 { owner as u32 } else { stat.uid };
+    let new_gid = if group >= 0 { group as u32 } else { stat.gid };
+    let node = match open_in_ns(ns_id, path) {
+        Some(n) => n,
+        None => return false,
+    };
+    node.fs.chown(node.inode, new_uid, new_gid)
+}
+
+/// `access(2)`: does the path exist, and may the caller use it that way?
+pub fn access_permitted(ns_id: zenus_ns::NsId, path: &str, mode: u32, cred: &Credentials) -> bool {
+    let (want_read, want_write, want_exec) = match decode_access_mode(mode) {
+        Some(m) => m,
+        None => return false,
+    };
+    match stat_in_ns(ns_id, path) {
+        Some(stat) => cred.may(&stat, want_read, want_write, want_exec),
+        None => false,
+    }
+}
+
+fn stat_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<FileStat> {
+    let node = open_in_ns(ns_id, path)?;
+    Some(node.fs.stat(node.inode))
+}
+
 pub fn perm_str(mode: u16) -> [u8; 10] {
     let mut buf = *b"----------";
     let ft = (mode >> 12) & 0xF;
