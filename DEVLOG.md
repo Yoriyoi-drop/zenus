@@ -194,6 +194,65 @@ lapisan kedua.
 
 ---
 
+### BUG-005 — journal menulis redo image ke blok ext2 yang hidup
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — korupsi data. 15 blok journal, 123 entri diterima
+**Test:** `crates/zenus-fs/src/lib.rs`
+- `host_tests::journal_write_refuses_to_leave_its_own_block_range`
+- `host_tests::journal_replay_clamps_a_num_entries_field_from_the_disk`
+- `host_tests::journal_write_stops_at_the_end_of_the_journal`
+
+**Di mana:** `crates/zenus-fs/src/journal.rs` — `journal_write`,
+`journal_commit`, `journal_replay`
+
+```rust
+// sebelum
+if hdr.num_entries as usize >= MAX_ENTRIES { return false; }
+let max_data_block = start_block + 1 + MAX_ENTRIES as u64 - 1;
+let data_block = start_block + 1 + idx as u64;
+if data_block > max_data_block { return false; }
+```
+
+**Yang salah:** batas entri memakai `MAX_ENTRIES` (123) — ukuran array
+`targets[]` di memori — padahal yang terbatas adalah ukuran journal di
+device. Boot mengonfigurasi `journal_init(0, 3000, 16)`: 1 blok header + 15
+blok redo. Entri #15 menulis redo image ke blok `3000 + 1 + 15` = **3016**,
+yaitu blok ext2 yang masih hidup. Tidak ada `#DE`, tidak ada panic: journal
+yang seharusnya melindungi filesystem justru menulis ke dalam filesystem.
+
+`JNL_NUM_BLOCKS` sudah disimpan oleh `journal_init` tapi tidak pernah
+dibaca di mana pun — di HEAD, satu-satunya kemunculannya adalah penulisan
+di `journal_init` sendiri.
+
+Bug kedua di jalur yang sama: `num_entries` dibaca dari disk lalu dipakai
+sebagai batas loop di `journal_commit` dan `journal_replay`. Field itu
+attacker-reachable, dan `MAX_ENTRIES` (123) tidak menggambarkan ukuran
+journal, sehingga header yang sudah dimodifikasi bisa membuat replay
+mengambil `targets[]` dan blok redo di luar jangkauan journal.
+
+**Fix:** tiga helper murni, semuanya tanpa device:
+- `capacity_for_blocks(num_blocks) -> usize` = `min(MAX_ENTRIES, num_blocks - 1)`
+- `data_block_for(start, num_blocks, idx) -> Option<u64>` — `None` berarti di luar
+- `replay_entry_limit(num_entries, num_blocks) -> usize` — clamp ke array **dan**
+  ke ukuran device
+
+`journal_write` dan `journal_commit` memakai `data_block_for`;
+`journal_replay` memakai `replay_entry_limit`.
+
+**Kenapa `journal_replay` dapat parameter baru:** ukuran journal tidak
+direkam di header, jadi caller harus menyediakannya. Jadi
+`journal_replay(dev, start, num_blocks)` — nilai yang sama dengan
+`journal_init`. Menebaknya dari `MAX_ENTRIES` akan mengembalikan bug yang
+sama. Kedua call site production sudah diperbarui
+(`apps/src/lib.rs`, `apps/src/shell.rs`).
+
+**Bug bonus yang diperbaiki sekalian:** `journal_replay` mengeset
+`JNL_NUM_BLOCKS` ke 0 di akhir, jadi `journal_init` berikutnya yang gagal
+tidak meninggalkan batas yang benar.
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:

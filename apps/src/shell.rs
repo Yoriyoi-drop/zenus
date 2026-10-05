@@ -581,7 +581,7 @@ impl Shell {
         w.write_str("  [ OK ] journal_commit\r\n");
 
         w.write_str("Replaying journal...\r\n");
-        if zenus_fs::journal::journal_replay(0, 3000) {
+        if zenus_fs::journal::journal_replay(0, 3000, 16) {
             w.write_str("  [ OK ] replay (committed entries applied)\r\n");
         } else {
             w.write_str("  [ OK ] replay (no uncommitted entries)\r\n");

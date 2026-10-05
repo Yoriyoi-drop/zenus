@@ -358,12 +358,12 @@ mod host_tests {
         const START: u64 = 20;
         plant_committed_journal(START, &[55, 56], &[&[0x77u8; 4][..], &[0x88u8; 4][..]]);
 
-        assert!(crate::journal::journal_replay(dev as u8, START));
+        assert!(crate::journal::journal_replay(dev as u8, START, 16));
         assert_eq!(fake_sector(55)[0], 0x77, "replay must redo block 55");
         assert_eq!(fake_sector(56)[0], 0x88, "replay must redo block 56");
 
         // The header is retired, so a second replay has nothing to do.
-        assert!(crate::journal::journal_replay(dev as u8, START));
+        assert!(crate::journal::journal_replay(dev as u8, START, 16));
     }
 
     #[test]
@@ -385,8 +385,96 @@ mod host_tests {
         data[..4].copy_from_slice(&[0x99u8; 4]);
         assert!(fake_write(START + 1, &data));
 
-        assert!(crate::journal::journal_replay(dev as u8, START));
+        assert!(crate::journal::journal_replay(dev as u8, START, 16));
         assert_eq!(fake_sector(57)[0], 0, "a torn transaction must not be redone");
+    }
+
+    /// Regression: `journal_write` bounded entries by `MAX_ENTRIES` (123), the
+    /// size of the in-memory `targets[]` array, instead of by the journal size
+    /// the device was given. A 16-block journal therefore accepted 123 entries
+    /// and entry #16 wrote its redo image to `start_block + 17` — a live ext2
+    /// block. Bounding by `MAX_ENTRIES` means the redo image corrupts the very
+    /// filesystem it was journalling.
+    #[test]
+    fn journal_write_refuses_to_leave_its_own_block_range() {
+        use crate::journal::{capacity_for_blocks, data_block_for};
+
+        // The boot configuration: 1 header block + 15 redo blocks.
+        assert_eq!(capacity_for_blocks(16), 15);
+        assert_eq!(data_block_for(3000, 16, 14), Some(3015));
+        assert_eq!(
+            data_block_for(3000, 16, 15),
+            None,
+            "entry 15 would land on block 3016, outside the journal"
+        );
+
+        // One-block journal: header only, no room for redo at all.
+        assert_eq!(capacity_for_blocks(1), 0);
+        assert_eq!(capacity_for_blocks(0), 0);
+        assert_eq!(data_block_for(3000, 0, 0), None);
+
+        // A journal larger than the targets[] array is still capped by it, so
+        // `hdr.targets[idx]` can never go out of bounds.
+        assert_eq!(capacity_for_blocks(1000), 123);
+        assert_eq!(data_block_for(0, 1000, 122), Some(123));
+        assert_eq!(data_block_for(0, 1000, 123), None);
+    }
+
+    /// `num_entries` is read back off the device and used as a loop bound in
+    /// both `journal_commit` and `journal_replay`, so it must be clamped to
+    /// the array bound *and* the journal's real size before it is used.
+    #[test]
+    fn journal_replay_clamps_a_num_entries_field_from_the_disk() {
+        use crate::journal::replay_entry_limit;
+
+        // Honest header on a 16-block journal.
+        assert_eq!(replay_entry_limit(15, 16), 15);
+        assert_eq!(replay_entry_limit(0, 16), 0);
+
+        // A tampered header claiming 123 entries on a 16-block journal must
+        // replay only the 15 that physically exist.
+        assert_eq!(replay_entry_limit(123, 16), 15);
+        assert_eq!(replay_entry_limit(u32::MAX, 16), 15);
+
+        // Beyond the array bound even on a huge journal.
+        assert_eq!(replay_entry_limit(u32::MAX, 100_000), 123);
+    }
+
+    /// End-to-end: the on-device limit, not just the helper. A 4-block journal
+    /// (1 header + 3 redo) must refuse the 4th entry and leave the sector past
+    /// the journal untouched — that sector stands in for live filesystem data.
+    #[test]
+    fn journal_write_stops_at_the_end_of_the_journal() {
+        let _serial = serial();
+        let dev = fake_device();
+        wipe_fake_device();
+
+        const START: u64 = 30;
+        assert!(crate::journal::journal_init(dev as u8, START, 4));
+        assert!(crate::journal::journal_begin());
+
+        // Three entries fit.
+        for t in 40..43 {
+            assert!(
+                crate::journal::journal_write(t, &[0x5A; 8]),
+                "entry for block {t} must fit"
+            );
+        }
+
+        // The fourth would write to START + 4, one past the journal.
+        assert!(
+            !crate::journal::journal_write(43, &[0x5A; 8]),
+            "a 4-block journal holds 3 redo entries, not 4"
+        );
+        assert!(crate::journal::journal_commit());
+
+        assert_eq!(fake_sector(40)[0], 0x5A);
+        assert_eq!(fake_sector(42)[0], 0x5A);
+        assert_eq!(
+            fake_sector(43)[0],
+            0,
+            "the refused entry must not have touched the block past the journal"
+        );
     }
 
     #[test]
@@ -403,7 +491,7 @@ mod host_tests {
         // must not touch a single sector.
         let before: Vec<[u8; SECTOR]> = (0..FAKE_SECTORS as u64).map(fake_sector).collect();
         assert!(
-            crate::journal::journal_replay(dev as u8, START),
+            crate::journal::journal_replay(dev as u8, START, 16),
             "an empty journal is not an error"
         );
         for (lba, sector) in before.iter().enumerate() {

@@ -613,7 +613,12 @@ pub extern "C" fn entry() -> ! {
         zenus_fs::journal::set_device_flush(zenus_virtio::blk::blk_flush);
 
         if zenus_arch::ata::device_count() > 0 {
-            zenus_fs::journal::journal_replay(0, 3000);
+            // The journal is 16 blocks (1 header + 15 redo). `journal_replay`
+            // takes that geometry explicitly because it is not recorded in the
+            // header, and clamping against `MAX_ENTRIES` instead would let a
+            // stale `num_entries` read back off the disk address blocks past
+            // the end of the journal — into live ext2.
+            zenus_fs::journal::journal_replay(0, 3000, 16);
             if zenus_fs::journal::journal_init(0, 3000, 16) {}
         }
 
