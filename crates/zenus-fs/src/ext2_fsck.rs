@@ -499,6 +499,30 @@ fn read_bgd(
     Some(unsafe { *ptr })
 }
 
+/// How many 512-byte sectors have to be read to hold an inode of `inode_size`
+/// bytes that begins `offset_in_sector` bytes into its first sector, or `None`
+/// if that does not fit in `buf_len`.
+///
+/// `inode_size` comes from the superblock and the buffer here is a fixed 1024
+/// bytes on the stack. The count used to be computed as
+/// `(offset_in_sector + inode_size + 511) / 512` with no check that it was
+/// still within the buffer, so `s_inode_size = 0xFFFF` asked for 130 sectors
+/// and wrote `buf[1024..1536]` — 512 bytes past the end of a stack array, from
+/// a superblock field. `Ext2Fs::mount` has always rejected `inode_size`
+/// outside 128..=256, but `fsck` never had the same check: it recorded
+/// `inode_size < 128` as a message and walked on with whatever the field said,
+/// which is the whole point of running fsck on a filesystem you suspect.
+///
+/// `None` means "does not fit", and the caller reports a root-inode read
+/// failure rather than overrunning its own frame.
+pub fn inode_read_sectors(offset_in_sector: usize, inode_size: usize, buf_len: usize) -> Option<usize> {
+    let needed = offset_in_sector.checked_add(inode_size)?;
+    if needed > buf_len {
+        return None;
+    }
+    Some(needed.div_ceil(512))
+}
+
 fn read_inode(
     dev_id: u8,
     inode_size: u16,
@@ -506,6 +530,9 @@ fn read_inode(
     inodes_per_group: u32,
     inode_no: u64,
 ) -> Option<RawInode> {
+    if inodes_per_group == 0 || inode_no == 0 {
+        return None;
+    }
     let group = ((inode_no - 1) / inodes_per_group as u64) as u32;
     let local_idx = ((inode_no - 1) % inodes_per_group as u64) as u32;
 
@@ -518,7 +545,7 @@ fn read_inode(
     let offset_in_sector = (inode_offset % 512) as usize;
 
     let mut buf = [0u8; 1024];
-    let needed_sectors = (offset_in_sector + inode_size as usize + 511) / 512;
+    let needed_sectors = inode_read_sectors(offset_in_sector, inode_size as usize, buf.len())?;
     for i in 0..needed_sectors {
         let base = i * 512;
         if !bc_read(dev_id, sector + i as u64, &mut buf[base..base + 512]) {

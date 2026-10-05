@@ -151,13 +151,55 @@ bukan alasan untuk berhenti memeriksa sisa groupnya.
 
 ---
 
+### BUG-004 — `fsck` menulis melewati stack buffer karena `s_inode_size` tidak divalidasi
+
+**Status:** sudah di-fix
+**Keparahan:** tinggi — 512 byte melewati array stack, dari satu field superblock.
+`fsck` adalah perintah shell, jadi image crafted sudah cukup untuk memicu
+**Test:** `crates/zenus-fs/src/lib.rs`
+- `host_tests::ext2_fsck_refuses_to_read_an_inode_that_does_not_fit_its_buffer`
+
+**Di mana:** `crates/zenus-fs/src/ext2_fsck.rs`, `read_inode()`
+
+```rust
+// sebelum
+let mut buf = [0u8; 1024];
+let needed_sectors = (offset_in_sector + inode_size as usize + 511) / 512;
+for i in 0..needed_sectors {
+    let base = i * 512;
+    bc_read(dev_id, sector + i as u64, &mut buf[base..base + 512]);
+}
+```
+
+**Yang salah:** `needed_sectors` dihitung dari `s_inode_size` — field `u16`
+biasa di superblock — lalu dipakai untuk menulis ke `buf` yang besarnya tetap
+1024 byte. Tidak ada cek bahwa hitungannya masih di dalam buffer.
+
+Superblock dengan `s_inode_size = 0xFFFF` dan inode yang mulai 511 byte di
+dalam sector meminta 130 sector, lalu menulis `buf[1024..1536]`: 512 byte
+melewati akhir array stack.
+
+Yang membuatnyaironis: `Ext2Fs::mount` **sudah** menolak `inode_size` di luar
+128..=256 sejak dulu (`ext2.rs:181`), tapi `fsck` hanya mencatat
+`"inode_size < 128"` sebagai pesan lalu berjalan dengan nilai whatever yang
+ada di field. Menjalankan fsck pada filesystem yang dicurigai persis alasan
+kenapa validasi batas tidak boleh dilewati.
+
+**Fix:** helper murni `ext2_fsck::inode_read_sectors(offset_in_sector, inode_size,
+buf_len) -> Option<usize>` memakai `checked_add` dan membandingkan terhadap
+`buf_len` sebelum slicing. `None` berarti tidak muat, dan pemanggil melaporkan
+kegagalan baca inode root alih-alih melampaui frame-nya sendiri.
+`read_inode` juga menolak `inodes_per_group == 0` dan `inode_no == 0` sebagai
+lapisan kedua.
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:
 
 | # | Lokasi | Bug | Uji |
 |---|---|---|---|
-| 1 | `zenus-fs/src/ext2_fsck.rs:466` | `inode_size` dari superblock menentukan loop sector; `buf` cuma 1024 byte → tulis melewati stack buffer. `fsck` di shell reachable. `Ext2Fs::mount` **sudah** validasi field ini (`ext2.rs:181`), jadi fsck yang belum | host |
 | 2 | `zenus-net/src/nic.rs:118-121` | Balasan ARP dihitung lalu dibuang (`arp::handle` return-nya diabaikan). Virtio NIC tidak pernah menjawab ARP → semua IPv4 outbound gagal | in-kernel |
 | 3 | `zenus-net/src/nic.rs:120` | `our_mac` yang dikirim adalah MAC peminta, dan IP di-hardcode `10.0.2.15`. Kalau #2 diperbaiki, hasilnya ARP poisoning yang sticky (`arp.rs:64-69` menolak mengubah MAC untuk IP yang sudah ada) | host (arg builder) |
 | 4 | `zenus-net/src/tcp.rs:681` | Window rx dihitung di ruang 65535 padahal buffer 4096 byte → zero-window tak pernah diumumkan, payload masuk sack_blocks lalu hilang. `recv_window` juga dipakai untuk *window yang kita umumkan*, diisi dari window yang di-peer-advertise | host (helper) |

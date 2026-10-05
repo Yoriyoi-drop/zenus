@@ -23,7 +23,7 @@ It is **pre-alpha**. The core is real; the security model is not finished.
 | Block cache | 512 sectors, 4-way, write-back |
 | Kernel heap | 8 MiB static arena |
 | Namespaces | 16 each: PID, UTS, mount, net, user, IPC |
-| Host unit tests | 151 |
+| Host unit tests | 158 |
 | In-kernel tests | 25 |
 | `unsafe` blocks | 465 in the kernel, 472 tree-wide, plus 11 `unsafe impl` |
 
@@ -41,7 +41,7 @@ It is **pre-alpha**. The core is real; the security model is not finished.
 ## Testing
 
 ```bash
-make test-host   # 157 host unit tests, no VM
+make test-host   # 158 host unit tests, no VM
 make test        # 25 in-kernel tests in QEMU
 make fuzz-smoke  # in-kernel fuzzing campaign
 ```

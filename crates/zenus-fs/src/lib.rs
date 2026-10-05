@@ -887,6 +887,61 @@ mod host_tests {
         assert_eq!(last_group_size(0, 8192, 0), 0);
     }
 
+    /// Regression: `fsck`'s `read_inode` sized its sector loop from the
+    /// superblock's `s_inode_size` and wrote into a fixed 1024-byte stack
+    /// buffer with no check that the count still fit:
+    ///
+    /// ```ignore
+    /// let needed_sectors = (offset_in_sector + inode_size as usize + 511) / 512;
+    /// for i in 0..needed_sectors {
+    ///     bc_read(dev_id, sector + i as u64, &mut buf[base..base + 512])
+    /// }
+    /// ```
+    ///
+    /// `s_inode_size = 0xFFFF` with an inode starting 511 bytes into a sector
+    /// asked for 130 sectors and wrote `buf[1024..1536]` — 512 bytes past the
+    /// end of a stack array. `Ext2Fs::mount` has always rejected an inode size
+    /// outside 128..=256, but `fsck` only *recorded* `inode_size < 128` as a
+    /// message and carried on, which is the entire reason to run fsck on a
+    /// filesystem you suspect.
+    #[test]
+    fn ext2_fsck_refuses_to_read_an_inode_that_does_not_fit_its_buffer() {
+        use crate::ext2_fsck::inode_read_sectors;
+
+        // The reported crash: 1024 bytes of buffer, an inode size of 0xFFFF.
+        assert_eq!(
+            inode_read_sectors(511, 0xFFFF, 1024),
+            None,
+            "an inode larger than the buffer must be refused, not read past it"
+        );
+        assert_eq!(inode_read_sectors(0, 0xFFFF, 1024), None);
+
+        // An inode that fits in the buffer but not on a sector boundary still
+        // needs the second sector, and that is allowed.
+        assert_eq!(inode_read_sectors(400, 256, 1024), Some(2));
+        assert_eq!(inode_read_sectors(0, 256, 1024), Some(1));
+
+        // The largest start offset and size that still fit exactly.
+        assert_eq!(inode_read_sectors(768, 256, 1024), Some(2));
+        assert_eq!(inode_read_sectors(768, 257, 1024), None, "one byte over");
+
+        // Every real ext2 inode size is accepted, so the guard is not
+        // over-broad for a healthy filesystem.
+        for size in [128usize, 256] {
+            for offset in [0usize, 1, 255, 256, 511] {
+                assert!(
+                    inode_read_sectors(offset, size, 1024).is_some(),
+                    "inode size {size} at offset {offset} must stay readable"
+                );
+            }
+        }
+
+        // The addition itself cannot overflow, so the bounds check is reached
+        // rather than bypassed by wrapping.
+        assert_eq!(inode_read_sectors(usize::MAX, 2, 1024), None);
+        assert_eq!(inode_read_sectors(usize::MAX - 1, usize::MAX, 1024), None);
+    }
+
     /// Regression: the fixed-size on-disk decoders did
     /// `copy_nonoverlapping(size_of::<T>())` without checking `buf.len()`, so a
     /// short read (truncated image, fuzz case) read past the end of the slice.

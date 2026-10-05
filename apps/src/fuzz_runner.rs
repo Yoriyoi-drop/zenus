@@ -208,12 +208,27 @@ pub fn run_regression_and_exit() -> ! {
     zenus_fuzz::print_stats();
     zenus_fuzz::print_report();
 
+    let verdict = zenus_fuzz::regression_verdict(recorded, still_bad);
+    match verdict {
+        zenus_fuzz::RegressionVerdict::NothingToReplay => {
+            // The crash log is kernel memory and `zenus_fuzz::init()` clears
+            // it, so an empty corpus is the normal case today. Say so instead
+            // of reporting "clean" for a run that replayed nothing.
+            zenus_console::kwarn!(
+                "[FUZZ] NO-CORPUS nothing was replayed; this run proves nothing \
+                 (the crash log is not persisted yet)"
+            );
+        }
+        zenus_fuzz::RegressionVerdict::Reproduces => {
+            zenus_console::kinfo!("[FUZZ] REGRESSION {} crash(s) still reproduce", still_bad);
+        }
+        zenus_fuzz::RegressionVerdict::Clean => {
+            zenus_console::kinfo!("[FUZZ] REGRESSION all {} crash(es) fixed", recorded);
+        }
+    }
+
     flush();
-    let s = SerialPort::new(0x3F8);
-    s.write_str("[FUZZ] EXIT code=");
-    s.write_u64(if still_bad == 0 { 0 } else { 1 });
-    s.write_str("\n");
-    flush();
+    emit_exit(zenus_fuzz::regression_exit_code(verdict));
 
     poweroff()
 }

@@ -3061,69 +3061,85 @@ fn sys_fchdir(_fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
 
 // ── Process control ──
 
-fn sys_prctl(option: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+/// What Zenus can actually do with a `prctl` option.
+///
+/// The kernel used to answer `0` for every option, including
+/// `PR_SET_SECCOMP`, `PR_SET_NO_NEW_PRIVS` and `PR_SET_MEMBARRIER`. A program
+/// that checks `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)` to decide whether it
+/// may still gain privileges through `execve` was told "yes", and was wrong:
+/// Zenus enforces nothing either way. Silence there is a security bug, so the
+/// options are now classified and the unsupported ones fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrctlSupport {
+    /// Implemented: the call does what it says.
+    Name,
+    /// Accepted and honoured as a no-op because there is nothing to honour:
+    /// `PR_SET_PDEATHSIG` on a kernel with no `execve`-time reaping, and
+    /// `PR_SET/GET_KEEPCAPS` on a kernel with no capabilities.
+    NoOp,
+    /// Not implemented. Must fail with `-EINVAL` so callers cannot rely on it.
+    Unsupported,
+    /// Not a prctl option at all.
+    Unknown,
+}
+
+pub const PR_SET_PDEATHSIG: u64 = 1;
+pub const PR_GET_PDEATHSIG: u64 = 2;
+pub const PR_SET_NAME: u64 = 15; // Linux value
+pub const PR_GET_NAME: u64 = 16;
+pub const PR_SET_SECCOMP: u64 = 22;
+pub const PR_SET_KEEPCAPS: u64 = 8;
+pub const PR_GET_KEEPCAPS: u64 = 9;
+pub const PR_SET_NO_NEW_PRIVS: u64 = 38;
+pub const PR_GET_NO_NEW_PRIVS: u64 = 39;
+
+/// Classify a `prctl` option. Pure, so the host tests can pin the answer for
+/// every option the kernel claims.
+pub fn prctl_support(option: u64) -> PrctlSupport {
     match option {
-        1 => {
-            // PR_SET_PDEATHSIG
-            0
+        PR_SET_NAME | PR_GET_NAME => PrctlSupport::Name,
+        PR_SET_PDEATHSIG | PR_GET_PDEATHSIG | PR_SET_KEEPCAPS | PR_GET_KEEPCAPS => {
+            PrctlSupport::NoOp
         }
-        2 => {
-            // PR_GET_PDEATHSIG
-            0
+        PR_SET_SECCOMP | PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => PrctlSupport::Unsupported,
+        _ => PrctlSupport::Unsupported,
+    }
+}
+
+fn sys_prctl(option: u64, arg2: u64, arg3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    match prctl_support(option) {
+        PrctlSupport::Name => {
+            let task_id = scheduler::current_task_id();
+            match option {
+                PR_SET_NAME => {
+                    match read_user_cstr(arg2, 32) {
+                        Some(name) => {
+                            scheduler::set_task_name(task_id, &name);
+                            0
+                        }
+                        None => -1i64 as u64,
+                    }
+                }
+                _ => {
+                    // PR_GET_NAME writes the name into arg2.
+                    if arg2 == 0 || !validate_user_range(arg2, 32) {
+                        return -1i64 as u64;
+                    }
+                    let task = match scheduler::get_task(task_id) {
+                        Some(t) => t,
+                        None => return -1i64 as u64,
+                    };
+                    let buf = task.name.as_ptr() as *mut u8;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(buf, arg2 as *mut u8, 32);
+                    }
+                    let _ = arg3;
+                    0
+                }
+            }
         }
-        4 => {
-            // PR_SET_NAME
-            0
-        }
-        5 => {
-            // PR_GET_NAME
-            0
-        }
-        9 => {
-            // PR_SET_SECCOMP
-            0
-        }
-        12 => {
-            // PR_SET_KEEPCAPS
-            0
-        }
-        13 => {
-            // PR_GET_KEEPCAPS
-            0
-        }
-        14 => {
-            // PR_SET_NO_NEW_PRIVS
-            0
-        }
-        15 => {
-            // PR_GET_NO_NEW_PRIVS
-            0
-        }
-        23 => {
-            // PR_SET_TIMING
-            0
-        }
-        36 => {
-            // PR_SET_TAGGED_ADDR_CTRL
-            0
-        }
-        38 => {
-            // PR_SET_IO_FLUSHER
-            0
-        }
-        40 => {
-            // PR_SET_MDWE
-            0
-        }
-        42 => {
-            // PR_SET_MEMBARRIER
-            0
-        }
-        57 => {
-            // PR_SET_VMA
-            0
-        }
-        _ => 0,
+        PrctlSupport::NoOp => 0,
+        PrctlSupport::Unsupported | PrctlSupport::Unknown => -22i64 as u64, // -EINVAL
     }
 }
 

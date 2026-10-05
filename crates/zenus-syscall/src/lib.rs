@@ -72,6 +72,52 @@ mod host_tests {
         }
     }
 
+    /// Regression: `sys_prctl` returned 0 for *every* option, so
+    /// `PR_SET_NO_NEW_PRIVS` and `PR_SET_SECCOMP` "succeeded" while doing
+    /// nothing. A program that checks the return value to decide whether it
+    /// can still gain privileges was told it was protected.
+    #[test]
+    fn prctl_does_not_claim_to_enforce_security() {
+        use crate::syscall::{prctl_support, PrctlSupport};
+
+        for option in [
+            crate::syscall::PR_SET_SECCOMP,
+            crate::syscall::PR_SET_NO_NEW_PRIVS,
+            crate::syscall::PR_GET_NO_NEW_PRIVS,
+        ] {
+            assert_eq!(
+                prctl_support(option),
+                PrctlSupport::Unsupported,
+                "option {option} must be reported as unsupported"
+            );
+        }
+
+        // The options that are actually implemented.
+        assert_eq!(prctl_support(crate::syscall::PR_SET_NAME), PrctlSupport::Name);
+        assert_eq!(prctl_support(crate::syscall::PR_GET_NAME), PrctlSupport::Name);
+
+        // Options with nothing to honour, kept as no-ops.
+        assert_eq!(
+            prctl_support(crate::syscall::PR_SET_PDEATHSIG),
+            PrctlSupport::NoOp
+        );
+        assert_eq!(
+            prctl_support(crate::syscall::PR_SET_KEEPCAPS),
+            PrctlSupport::NoOp
+        );
+
+        // Anything else is unsupported, not silently accepted.
+        for option in [0u64, 4, 7, 11, 12, 23, 36, 38, 42, 57, u64::MAX] {
+            assert_ne!(
+                prctl_support(option),
+                PrctlSupport::Name,
+                "option {option} must not be treated as implemented"
+            );
+        }
+    }
+
+    /// Regression coverage: the four conflicting slots moved when the table was
+    /// renumbered, and `userspace/` had to follow.
     #[test]
     fn the_four_conflicting_slots_are_the_ones_that_moved() {
         // Slots 22, 32, 35, 37 were each claimed by two syscalls at some

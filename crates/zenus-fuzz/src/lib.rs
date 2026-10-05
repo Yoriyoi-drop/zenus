@@ -331,6 +331,44 @@ pub fn run_campaign(mode: Mode, cases: u64, seed: u64) -> FuzzStats {
 
 /// Replay every crash currently in the crash log and report whether each one
 /// still reproduces. Used by `make fuzz-regression`.
+/// Verdict of a regression run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegressionVerdict {
+    /// Every recorded crash was replayed and none of them reproduces.
+    Clean,
+    /// At least one recorded crash still reproduces.
+    Reproduces,
+    /// Nothing was replayed, so the run proves nothing.
+    NothingToReplay,
+}
+
+/// Turn a replay run into a verdict — and into the process exit code.
+///
+/// The crash log lives in kernel memory only and `init()` clears it, so at boot
+/// the corpus is always empty and the run replays zero cases. Reporting that as
+/// "clean" (exit 0) is the worst possible answer: CI would go green on a
+/// regression run that tested nothing. An empty corpus is therefore its own
+/// outcome, and it uses the same exit code as an untrustworthy campaign.
+pub fn regression_verdict(recorded: u64, still_reproducing: u64) -> RegressionVerdict {
+    if recorded == 0 {
+        RegressionVerdict::NothingToReplay
+    } else if still_reproducing > 0 {
+        RegressionVerdict::Reproduces
+    } else {
+        RegressionVerdict::Clean
+    }
+}
+
+/// Process exit code for a regression verdict: 0 clean, 1 reproducing,
+/// 2 could not conclude.
+pub fn regression_exit_code(verdict: RegressionVerdict) -> u32 {
+    match verdict {
+        RegressionVerdict::Clean => 0,
+        RegressionVerdict::Reproduces => 1,
+        RegressionVerdict::NothingToReplay => 2,
+    }
+}
+
 pub fn run_regression(replays: u64) -> u64 {
     init();
     let mut reproduced = 0u64;
@@ -589,6 +627,32 @@ mod host_tests {
         let pct = coverage::coverage_percent();
         assert!((0..=100).contains(&pct), "percent out of range: {pct}");
         assert_eq!(pct, (coverage::edge_count() * 100 / 65_536) as u32);
+    }
+
+    // ── regression verdicts ───────────────────────────────────────────────
+
+    /// Regression: an empty crash corpus used to produce exit code 0, i.e. CI
+    /// went green on a run that replayed nothing. The crash log lives in kernel
+    /// memory and `init()` clears it, so that is the *normal* case today.
+    #[test]
+    fn an_empty_corpus_is_not_a_clean_regression_run() {
+        use crate::{regression_exit_code, regression_verdict, RegressionVerdict};
+
+        assert_eq!(
+            regression_verdict(0, 0),
+            RegressionVerdict::NothingToReplay
+        );
+        assert_eq!(regression_exit_code(RegressionVerdict::NothingToReplay), 2);
+
+        assert_eq!(regression_verdict(3, 0), RegressionVerdict::Clean);
+        assert_eq!(regression_exit_code(RegressionVerdict::Clean), 0);
+
+        assert_eq!(regression_verdict(3, 1), RegressionVerdict::Reproduces);
+        assert_eq!(regression_exit_code(RegressionVerdict::Reproduces), 1);
+
+        // "Nothing replayed" wins over any other count, so a miscount cannot
+        // turn an empty run green.
+        assert_eq!(regression_verdict(0, 5), RegressionVerdict::NothingToReplay);
     }
 
     // ── corpus ────────────────────────────────────────────────────────────

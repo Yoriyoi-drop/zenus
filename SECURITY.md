@@ -47,9 +47,11 @@ read or write all of user memory**, and a `#PF` handler that trusts its own
 
 ### 2. No privilege separation beyond uid/gid
 
-- No capabilities. `prctl` accepts `PR_SET_SECCOMP` and `PR_SET_NO_NEW_PRIVS`
-  and returns success without doing anything — a program that believes it is
-  sandboxed is not.
+- No capabilities. `prctl` answers `-EINVAL` for `PR_SET_SECCOMP`,
+  `PR_SET_NO_NEW_PRIVS`, `PR_SET_MEMBARRIER` and friends — it used to return
+  success and do nothing, which let a program believe it was sandboxed.
+  `PR_SET_NAME`/`PR_GET_NAME` are implemented; `PR_SET_PDEATHSIG` and
+  `PR_SET_KEEPCAPS` are accepted as documented no-ops.
 - `root` (euid 0) bypasses every permission check.
 - No LSM, no audit log of security decisions. `syslog` and the error-code
   counters record *events*, not *decisions*.

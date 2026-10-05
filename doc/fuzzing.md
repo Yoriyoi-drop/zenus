@@ -225,9 +225,11 @@ Jujur soal apa yang benar-benar bekerja:
 - **Coverage berbasis edge counter**, bukan instrumentasi LLVM: nilainya kasar, dan
   "jalur baru" berarti counter edge yang belum pernah naik.
 - **Mode regression kosong.** Log crash hanya ada di memori kernel dan
-  `zenus_fuzz::init()` memanggil `crash::clear()`, jadi saat boot `get_crash_count()`
-  selalu 0, loop tidak pernah jalan, dan target mencetak `[FUZZ] EXIT code=0`.
-  Butuh corpus crash di disk lebih dulu.
+  `zenus_fuzz::init()` memanggil `crash::clear()`, jadi saat boot
+  `get_crash_count()` selalu 0 dan loop tidak pernah jalan. Runner sekarang
+  mencetak `[FUZZ] NO-CORPUS` dan keluar dengan kode 2 ("tidak bisa menarik
+  kesimpulan"), bukan melaporkan `[FUZZ] EXIT code=0` untuk run yang tidak
+  menguji apa pun. Butuh corpus crash di disk lebih dulu.
 
 ## Urutan Implementasi
 
