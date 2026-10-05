@@ -395,7 +395,7 @@ pub extern "C" fn entry() -> ! {
     let mem_regions = &regions[..region_count];
 
     cpu::init();
-    frame_allocator::global_init(mem_regions);
+    frame_allocator::global_init(mem_regions, hhdm_offset);
     paging::init(hhdm_offset);
     frame_allocator::reserve_boot_stack(hhdm_offset);
     interrupts::init();
@@ -714,7 +714,7 @@ pub extern "C" fn entry() -> ! {
     let mem_regions = &regions[..region_count];
 
     cpu::init();
-    frame_allocator::global_init(mem_regions);
+    frame_allocator::global_init(mem_regions, hhdm_offset);
     paging::init(hhdm_offset);
     frame_allocator::reserve_boot_stack(hhdm_offset);
     interrupts::init();

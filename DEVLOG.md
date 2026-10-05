@@ -1646,6 +1646,90 @@ fault yang kita lihat adalah fault kedua, dan `CR2`-nya sudah ditimpa.
 
 ---
 
+### BUG-032 — image kernel tidak pernah di-reserve dari frame allocator
+
+**Status:** sudah di-fix (commit ini) — hardening yang benar, tapi **bukan**
+penyebab `make test`. Lihat "Teori yang diuji dan ditolak"
+**Keparahan:** tinggi — frame yang ditulis di atas static yang masih dipakai
+**Test:** tidak ada test; ini urutan pemanggilan, dan `global_init` tidak
+host-safe (terpakai `rsp`)
+
+**Di mana:** `crates/zenus-mem/src/frame_allocator.rs` — `global_init`,
+`reserve_boot_stack`; `apps/src/linker.ld`; `apps/src/lib.rs`
+
+Tidak ada apa pun di tree yang mengembalikan image kernel dari frame
+allocator. `linker.ld` tidak punya simbol batas sama sekali, jadi tidak ada
+yang bisa mengembalikannya. Limine memang mengetahui di mana ia memuat kernel dan
+meninggalkan halaman itu di luar peta *usable* — tapi itu bookkeeping bootloader,
+dan `.bss` **tidak ada di berkas yang dibaca Limine** (di-nol-kan saat load),
+sehingga setiap static di `.bss` bergantung sepenuhnya pada Limine mereservasi
+rentang yang benar.
+
+Dua cacat yang lebih halus, keduanya soal **urutan**:
+
+1. `reserve_boot_stack()` dipanggil **setelah** `global_init`. Reservasi hanya
+   mengecilkan daftar region; free stack sudah diisi dari region itu di dalam
+   `global_init`. Frame yang sudah masuk free stack tetap keluar nanti —
+   reservasi belakangan melindungi **tidak apa-apa**.
+2. Pemanggilan reservasi gambar sendiri harus berada di dalam `global_init`,
+   sebelum free stack diisi, bukan sebagai `reserve_region` sesudahnya.
+
+**Fix:**
+- `linker.ld` menandai `__kernel_start` dan `__kernel_end` (mencakup `.bss`,
+  yang di-align ke 4 KiB)
+- `global_init(memory_map, hhdm_offset)` mencadangkan gambar kernel **dan**
+  boot stack sebelum free stack diisi
+- Both `entry()` call sites memperbarui argumennya
+
+**Bug yang sama berlaku untuk boot stack**, dan sekarang ikut diperbaiki di
+tempat yang benar.
+
+### Teori yang diuji dan ditolak untuk `make test`
+
+Dua-duanya saya terapkan, bangun ulang, dan jalankan. Keduanya **tidak**
+menyembuhkan gejala. Dicatat supaya tidak diulang.
+
+| Teori | Status | Hasil |
+|---|---|---|
+| BUG-031: frame 270 KiB di boot stack | ditolak | Stack tetap tidak terbaca; `make test` berhenti di tempat yang sama, nol baris `[TEST]` |
+| BUG-032: image kernel tidak di-reserve | ditolak | Gejala identik |
+
+Yang **tetap** terverifikasi:
+
+- `run_tests` tercapai (breakpoint di `test_runner.rs:124`, dari `apps/src/lib.rs:780`)
+- fault deterministik: `cr2 = 0xffffffff8054a9e8`
+- `cr2` itu `console::error::ERR_BUF + 0x3e10`, yaitu **~1 KiB di luar**
+  `ERR_BUF`, di halaman yang tidak ter-map, dan **tidak ada simbol** di sana
+- `ErrorBuf::push` sudah bounded di semua cabangnya (`min(15)`, `min(23)`,
+  `min(127)`, `min(47)`), jadi ini **bukan** overflow `ERR_BUF` — ini pointer
+  liar yang nilainya diambil dari static yang sudah rusak
+- `CR3` adalah CR3 kernel; stack boot tidak terbaca saat fault
+- nol baris `[TEST]`, nol baris `PAGE FAULT` di log
+
+### Yang harus dilakukan berikutnya
+
+`cr2` diambil dari **static yang nilainya sudah rusak** — itu yang membuat saya menduga frame menimpa `.bss`. Tapi BUG-032 menunjukkan mekanisme yang paling
+wajar untuk itu tidak cukup untuk menjelaskan gejala. Yang belum dicoba:
+
+1. Hardware **watchpoint** di `0xffffffff8054a9e8` lewat gdb — gdb akan
+   memberi tahu instruksi mana yang menulis ke sana.Alamat itu tidak
+   ter-map, jadi `awatch` mungkin harus dipasang lewat alamat fisik, atau
+   lewat HHDM (`hhdm + 0x8054a9e8`) yang ter-map.
+2. Breakpoint di `alloc_frame` dengan kondisi — cari frame pertama yang
+   jatuh di `[__kernel_start, __kernel_end)` atau di boot stack. Jika
+   tidak pernah ada, BUG-032 menutup jalur itu sepenuhnya dan jawabannya
+   ada di tempat lain.
+3. Watchpoint di beberapa static `.bss` yang nilainya dipakai sebagai pointer
+   (`OUTPUT_BUF`, `ERR_BUF`, `TCP_STATE`, `TASKS`) untuk menangkap saat
+   nilainya berubah menjadi alamat liar.
+
+Catatan metodologi yang sudah terngi untuk semua ini: **QEMU harus `-smp 1`**
+dan **`-S`**, dan breakpoint harus di **entry** page-fault handler. Dengan
+`-smp 4` gdb melaporkan stop di thread AP; dengan breakpoint beberapa baris
+dalam, `CR2` yang dibaca sudah milik fault berikutnya.
+
+---
+
 ## Lapisan verifikasi: apa yang benar-benar jalan
 
 | Lapisan | Status | Catatan |

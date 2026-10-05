@@ -275,7 +275,38 @@ pub fn reserve_boot_stack(hhdm_offset: u64) {
     fa.reserve_region(stack_page_base, 524288 + PAGE_SIZE as u64);
 }
 
-pub fn global_init(memory_map: &[MemoryRegion]) {
+/// Excluded from the frame allocator so it can never hand out a page the kernel
+/// is still using. `__kernel_start`/`__kernel_end` come from `linker.ld` and
+/// cover `.text`, `.rodata`, `.data` **and** `.bss`.
+extern "C" {
+    static __kernel_start: u8;
+    static __kernel_end: u8;
+}
+
+/// Reserve the kernel's own image.
+///
+/// Nothing in the tree reserved it. Limine knows where it loaded the kernel and
+/// leaves those pages out of the *usable* map, but that is the bootloader's
+/// bookkeeping: `.bss` in particular is not in the file Limine read (it is
+/// zeroed at load time), so any static living there depends entirely on
+/// Limine having reserved the right range.
+///
+/// The failure mode is quiet and severe: a frame handed out that overlaps a
+/// static makes every later write through it land somewhere else. `make test`
+/// died exactly that way — a write to `0xffffffff8054a9e8`, about a kilobyte past
+/// `console::error::ERR_BUF`, with the boot stack unreadable at the same time.
+pub fn reserve_kernel_image() {
+    let start = unsafe { core::ptr::addr_of!(__kernel_start) as u64 } & !PAGE_SIZE_U64;
+    let end = unsafe { core::ptr::addr_of!(__kernel_end) as u64 };
+    if end <= start {
+        return;
+    }
+    FRAME_ALLOCATOR.lock().reserve_region(start, end - start);
+}
+
+const PAGE_SIZE_U64: u64 = 4096;
+
+pub fn global_init(memory_map: &[MemoryRegion], hhdm_offset: u64) {
     let mut fa = FRAME_ALLOCATOR.lock();
     for entry in memory_map {
         if entry.is_usable() && entry.length > 0 {
@@ -301,6 +332,32 @@ pub fn global_init(memory_map: &[MemoryRegion]) {
             fa.reserve_region(entry.base, entry.length);
         }
     }
+    // The kernel's own image too. This has to happen *here*, inside
+    // `global_init`, not as a `reserve_region` call afterwards: the reservation
+    // only shrinks the region list, and the free stack is filled from those
+    // regions further down. A frame that was already queued when the
+    // reservation lands is still handed out later, so reserving the image after
+    // the fact protects nothing.
+    {
+        let start = unsafe { core::ptr::addr_of!(__kernel_start) as u64 } & !PAGE_SIZE_U64;
+        let end = unsafe { core::ptr::addr_of!(__kernel_end) as u64 };
+        if end > start {
+            fa.reserve_region(start, end - start);
+        }
+    }
+    // The boot stack, for the same reason as the image above: `reserve_boot_stack`
+    // runs after this function, by which point the free stack is already full of
+    // frames taken from the very region the boot stack is standing in.
+    {
+        let rsp_phys: u64;
+        unsafe {
+            core::arch::asm!("mov {}, rsp", out(reg) rsp_phys, options(nostack, preserves_flags));
+        }
+        let rsp_phys = rsp_phys.wrapping_sub(hhdm_offset);
+        let stack_page_base = rsp_phys.saturating_sub(524288) & !PAGE_SIZE_U64;
+        fa.reserve_region(stack_page_base, 524288 + PAGE_SIZE_U64);
+    }
+
     // Update total_memory to only count truly usable frames
     fa.total_memory = 0;
     for i in 0..fa.region_count {

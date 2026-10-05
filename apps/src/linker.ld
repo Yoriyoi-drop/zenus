@@ -10,6 +10,8 @@ PHDRS {
 SECTIONS {
     . = 0xffffffff80000000 + SIZEOF_HEADERS;
 
+    __kernel_start = .;
+
     __text_start = .;
     .text : ALIGN(4K) {
         KEEP(*(.limine_reqs))
@@ -35,6 +37,15 @@ SECTIONS {
         *(.bss .bss.*)
         . = ALIGN(4K);
     } :bss
+
+    /* One past the last byte the kernel owns, including `.bss`.
+     *
+     * Limine knows which pages it loaded the kernel into and leaves them out of
+     * the usable memory map — but `.bss` is not in the file Limine reads (it is
+     * zeroed at load time), so nothing in the tree had a way to reserve the
+     * kernel's own image. These symbols give the frame allocator something to
+     * reserve without depending on the bootloader's bookkeeping being right. */
+    __kernel_end = .;
 
     /DISCARD/ : {
         *(.note.gnu.build-id)
