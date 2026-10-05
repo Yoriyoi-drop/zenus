@@ -446,6 +446,97 @@ dikembalikan ke "tidak ada cek" → 4 FAILED).
 
 ---
 
+### BUG-009 — TCP: window yang diumumkan salah ruang, dan overflow sequence number
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — kehilangan data TCP diam-diam; panic di debug build
+**Test:** `crates/zenus-net/src/tcp.rs` → `tcp::host_tests`
+- `the_advertised_window_is_the_free_space_in_the_receive_buffer`
+- `sequence_numbers_advance_modulo_two_to_the_32`
+- `keepalive_probes_are_spaced_by_the_documented_interval` (BUG-010, sekalian)
+
+**Di mana:** `crates/zenus-net/src/tcp.rs`
+
+### BUG-009a — window rx dihitung di ruang 65535, bukan 4096
+
+```rust
+// sebelum
+let window = 65535u16.saturating_sub(tcb.rx_data_len as u16);
+```
+
+Field window itu `u16`, jadi 65535 adalah nilai tertingginya — **bukan**
+kapasitas. Buffer receive 4096 byte. Dengan buffer penuh, window yang
+diumumkan adalah `65535 - 4096 = 61439`: buffer penuh tapi peer diberi tahu
+masih ada 61 KiB ruang. Akibatnya:
+
+1. Peer terus mengirim
+2. `copy_len = min(payload.len(), rx_data.len() - rx_data_len)` = **0**
+3. Payload dibuang
+4. `recv_nxt` tetap maju melewati payload itu
+5. Kita mengirim ACK yang menyatakan data itu diterima
+
+Data hilang permanen, dan peer believes we've got it. Tidak ada timeout yang
+pernah memicunya:Sequence number sudah lewat, jadi retransmitor peer menganggap
+sudah sampai.
+
+**Fix:** `advertised_window(rx_data_len)` = ruang kosong di buffer, dan
+`Tcb::win()` memanggilnya setiap kali segment dibangun. Field `recv_window`
+dihapus total — penyimpanannya berarti harus menyegarkan di setiap site yang
+mengisi atau mengosongkan buffer, dan satu yang terlewat berarti
+mengumumkan ruang yang sudah terpakai.
+
+### BUG-009b — `recv_window` diisi dari window milik peer
+
+Satu field dipakai untuk dua hal: window yang **kita** umumkan, dan window yang
+**peer** umumkan. Tiga site menulis `tcb.recv_window = window` dari header
+ACK peer. Jadi window yang kita kirim =whatever peer terakhir bilang. Dua
+field dipisah: field yang dihapus, dan `peer_window` yang baru — sekarang
+dipakai sungguhan untuk membatasi `limit` di jalur kirim, bersama `cwnd`.
+
+### BUG-009c — `seq + payload.len()` overflow
+
+`seq` datang dari header paket, bebas dipilih peer. Empat site melakukan
+`seq + payload.len() as u32 (+1)` tanpa cek. Untuk `seq` dekat `u32::MAX`,
+build debug **panic** — dari satu segmen tak terautentikasi ke port tertutup.
+Release wrap diam-diam, dan itu kebetulan *benar*: aritmetika sequence TCP
+didefinisikan modulo 2^32 (RFC 793). Jadi ini hanya crash, pernah nilai salah.
+
+**Fix:** `seq_advance(seq, len, extra)` memakai `wrapping_add` dan menyatakan
+niatnya. `len as u32` juga benar untuk tujuan ini: truncation ke u32 adalah
+mod 2^32 yang sama.
+
+### BUG-010 — `KEEPALIVE_PROBE_INTERVAL` dihitung lalu dibuang
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** sedang — keepalive tidak berfungsi seperti terdokumentasi
+**Test:** `keepalive_probes_are_spaced_by_the_documented_interval`
+
+```rust
+// sebelum
+tcb.keepalive_time += 1;
+if tcb.keepalive_time >= KEEPALIVE_IDLE { ... tcb.keepalive_probes += 1;
+let _probe_interval = KEEPALIVE_PROBE_INTERVAL;   // dibuang
+```
+
+**Yang salah:** dua hal. Interval probe **dihitung lalu dibuang**, jadi
+sembilan probe keluar beruntun pada call berturut-turut, bukan 75 detik
+apartinya. Dan `keepalive_time` menghitung **call ke
+`poll_retransmit`**, bukan detik — `poll_retransmit` dipanggil dari jalur
+accept/connect socket, bukan dari timer. Jadi "2 jam idle" sebenarnya
+"7200 kali seseorang menerima koneksi".
+
+**Fix:** keepalive dijadwalkan dalam PIT tick (`get_ticks()`, 100 Hz sesuai
+`uptime`). `keepalive_action(ticks, next_due, probes_sent) -> Keepalive`
+murni, plus `keepalive_idle_deadline` / `keepalive_probe_deadline`. Field
+`keepalive_time` diganti `keepalive_due` (tick absolut). Trafik apa pun
+menyetel ulang ke `keepalive_idle_deadline(now)`; probe yang tidak dijawab
+menyetel ke `keepalive_probe_deadline(now)` — nilai yang dulu dibuang.
+
+Ketiga test diverifikasi gagal sebelum fix (helper dikembalikan ke
+`65535 - len`, `+` biasa, dan gating dimatikan → 3 FAILED).
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:
@@ -454,12 +545,9 @@ Prioritas menurut dampak × kemudahan diuji:
 |---|---|---|---|
 | 2 | `zenus-net/src/nic.rs:118-121` | Balasan ARP dihitung lalu dibuang (`arp::handle` return-nya diabaikan). Virtio NIC tidak pernah menjawab ARP → semua IPv4 outbound gagal | in-kernel |
 | 3 | `zenus-net/src/nic.rs:120` | `our_mac` yang dikirim adalah MAC peminta, dan IP di-hardcode `10.0.2.15`. Kalau #2 diperbaiki, hasilnya ARP poisoning yang sticky (`arp.rs:64-69` menolak mengubah MAC untuk IP yang sudah ada) | host (arg builder) |
-| 4 | `zenus-net/src/tcp.rs:681` | Window rx dihitung di ruang 65535 padahal buffer 4096 byte → zero-window tak pernah diumumkan, payload masuk sack_blocks lalu hilang. `recv_window` juga dipakai untuk *window yang kita umumkan*, diisi dari window yang di-peer-advertise | host (helper) |
-| 5 | `zenus-net/src/tcp.rs:446` | `seq + payload.len()` overflow u32 → panic dari satu paket tak terautentikasi ke port tertutup. Sama di `:768`, `:790` | host (helper) |
 | 6 | `zenus-net/src/udp.rs:42` | Field `length` UDP dibaca lalu tidak pernah dipakai; checksum diverifikasi atas panjang yang salah → data di luar datagram masuk ke DHCP/DNS | host |
 | 7 | `zenus-syscall/src/syscall.rs:2681` | `8 * nfds` overflow → ukuran tervalidasi 0, ukuran terpakai 2^61 | host (helper) |
 | 8 | `zenus-syscall/src/syscall.rs:2459` | `sys_shmdt` `invlpg` tanpa menulis PTE → frame di-free sementara PTE masih hidup → UAF antar task. `shmat` juga tidak menaikkan `attached` | in-kernel |
 | 9 | `zenus-syscall/src/syscall.rs:1346` | `recv` alokasi `len` yang hanya dibatasi `USER_SPACE_LIMIT` (128 TiB), tidak seperti `sys_read`'s `MAX_READ` | host (helper) |
 | 13 | `zenus-syscall/src/syscall.rs:2034` | `sys_mount` menerima `MS_RDONLY\|MS_NOSUID\|MS_NODEV\|MS_NOEXEC` lalu mengabaikan semuanya, return 0. `vfs::Mount` tidak punya field flag sama sekali. Tidak ada cek `euid == 0` | host |
 | 14 | `zenus-syscall/src/syscall.rs:708` | `brk(small)` menjalankan `unmap_heap_pages` yang menelusuri *semua* halaman di `[addr, heap_brk)` lalu `free_frame` tiap yang ter-map → program membebaskan frame ELF-nya sendiri, dan menelusuri 6.4e9 entri page table (hang). `heap_brk = loaded.heap_base ≈ 0x6000_0000_0000` | host |
-| 18 | `zenus-net/src/tcp.rs:894` | `KEEPALIVE_PROBE_INTERVAL` dihitung lalu dibuang (`let _probe_interval = ...`) → probe 96× lebih lambat dari yang didokumentasikan | host |

@@ -30,6 +30,82 @@ const KEEPALIVE_IDLE: u64 = 7200;
 /// Seconds between keepalive probes once the idle timer has fired.
 const KEEPALIVE_PROBE_INTERVAL: u64 = 75;
 const KEEPALIVE_PROBES: u8 = 9;
+/// PIT rate, which is also the unit `zenus_arch::interrupts::pit::get_ticks`
+/// counts in. The keepalive timers below are expressed in these so they are
+/// wall-clock seconds rather than "calls to `poll_retransmit`", which is not a
+/// clock.
+const TICKS_PER_SEC: u64 = 100;
+
+/// Receive buffer size, per connection. The window we advertise is this minus
+/// what is already buffered — never the 65535 of the 16-bit field.
+pub const RX_BUF_LEN: usize = 4096;
+
+/// Window to advertise: free space in the receive buffer.
+///
+/// `window` is 16 bits wide, so the 65535 in the field is not capacity. The
+/// old code computed `65535 - rx_data_len`, which is ~61439 for a full buffer:
+/// a zero window was never announced, so a peer kept sending into a full
+/// buffer, the copy was clamped to zero bytes, and the payload was dropped
+/// while `recv_nxt` advanced past it — permanently lost, with an ACK saying it
+/// had been received.
+pub fn rx_free(rx_data_len: usize) -> usize {
+    RX_BUF_LEN.saturating_sub(rx_data_len)
+}
+
+pub fn advertised_window(rx_data_len: usize) -> u16 {
+    core::cmp::min(rx_free(rx_data_len), u16::MAX as usize) as u16
+}
+
+/// Advance a TCP sequence number.
+///
+/// RFC 793 sequence arithmetic is modulo 2^32, so wrapping here is not a
+/// concession to overflow — it *is* the specification. The unchecked `+` made
+/// a debug build panic on a packet carrying a sequence number near `u32::MAX`,
+/// reachable from a single unauthenticated segment to a closed port.
+pub fn seq_advance(seq: u32, len: usize, extra: u32) -> u32 {
+    seq.wrapping_add(len as u32).wrapping_add(extra)
+}
+
+/// What the keepalive timer wants to do. Pure, so the schedule is testable
+/// without a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keepalive {
+    /// Not due yet.
+    Wait,
+    /// Send one probe.
+    Probe,
+    /// The probe budget is spent; the peer is considered gone.
+    GiveUp,
+}
+
+/// Keepalive schedule, in PIT ticks.
+///
+/// `next_due` is a tick, and `probes_sent` is how many of
+/// [`KEEPALIVE_PROBES`] have already gone out unanswered. Before this was
+/// expressed in ticks, the "seconds" counter counted calls to
+/// `poll_retransmit` — which is called from the socket accept/connect paths, not
+/// on a timer — and `KEEPALIVE_PROBE_INTERVAL` was computed and thrown away
+/// (`let _probe_interval = ...`), so the nine probes went out back to back
+/// instead of 75 seconds apart.
+pub fn keepalive_action(ticks: u64, next_due: u64, probes_sent: u8) -> Keepalive {
+    if ticks < next_due {
+        return Keepalive::Wait;
+    }
+    if probes_sent >= KEEPALIVE_PROBES {
+        return Keepalive::GiveUp;
+    }
+    Keepalive::Probe
+}
+
+/// Tick at which the first keepalive probe is due after `last` activity.
+pub fn keepalive_idle_deadline(last: u64) -> u64 {
+    last.saturating_add(KEEPALIVE_IDLE.saturating_mul(TICKS_PER_SEC))
+}
+
+/// Tick at which the next probe after an unanswered one is due.
+pub fn keepalive_probe_deadline(last: u64) -> u64 {
+    last.saturating_add(KEEPALIVE_PROBE_INTERVAL.saturating_mul(TICKS_PER_SEC))
+}
 
 #[derive(Clone, Copy)]
 struct Tcb {
@@ -41,9 +117,12 @@ struct Tcb {
     send_una: u32,
     send_nxt: u32,
     recv_nxt: u32,
-    recv_window: u16,
+    /// The window the **peer** advertised. This is a different quantity from
+    /// the window we send and used to be written into `recv_window`, which
+    /// meant the window we advertised was whatever the peer last told us.
+    peer_window: u16,
     listening: bool,
-    rx_data: [u8; 4096],
+    rx_data: [u8; RX_BUF_LEN],
     rx_data_len: usize,
     tx_data: [u8; 4096],
     tx_data_len: usize,
@@ -55,8 +134,20 @@ struct Tcb {
     dupack_count: u8,
     last_ack_seq: u32,
     keepalive_probes: u8,
-    keepalive_time: u64,
+    /// Tick at which the next keepalive action is due. See `keepalive_action`.
+    keepalive_due: u64,
     sack_blocks: [(u32, u32); 4],
+}
+
+impl Tcb {
+    /// The window to put in the next segment we send.
+    ///
+    /// Always derived from the receive buffer rather than stored: a stored
+    /// field has to be refreshed at every site that fills or drains the
+    /// buffer, and missing one means advertising space that is already used.
+    fn win(&self) -> u16 {
+        advertised_window(self.rx_data_len)
+    }
 }
 
 struct TcpState {
@@ -285,9 +376,9 @@ pub fn listen(port: u16) -> Option<usize> {
         send_una: 0,
         send_nxt: 0,
         recv_nxt: 0,
-        recv_window: 4096,
+        peer_window: 0,
         listening: true,
-        rx_data: [0; 4096],
+        rx_data: [0; RX_BUF_LEN],
         rx_data_len: 0,
         tx_data: [0; 4096],
         tx_data_len: 0,
@@ -299,7 +390,7 @@ pub fn listen(port: u16) -> Option<usize> {
         dupack_count: 0,
         last_ack_seq: 0,
         keepalive_probes: 0,
-        keepalive_time: 0,
+        keepalive_due: 0,
         sack_blocks: [(0, 0); 4],
     });
     Some(idx)
@@ -334,9 +425,9 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
         send_una: isn,
         send_nxt: isn + 1,
         recv_nxt: 0,
-        recv_window: 4096,
+        peer_window: 0,
         listening: false,
-        rx_data: [0; 4096],
+        rx_data: [0; RX_BUF_LEN],
         rx_data_len: 0,
         tx_data: [0; 4096],
         tx_data_len: 0,
@@ -348,7 +439,7 @@ pub fn connect(iface_idx: usize, local_port: u16, dst_ip: [u8; 4], dst_port: u16
         dupack_count: 0,
         last_ack_seq: 0,
         keepalive_probes: 0,
-        keepalive_time: 0,
+        keepalive_due: 0,
         sack_blocks: [(0, 0); 4],
     });
 
@@ -443,7 +534,11 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                     dst_port,
                     src_port,
                     rst_seq,
-                    seq + payload.len() as u32 + if (flags & TCP_FLAG_FIN) != 0 { 1 } else { 0 },
+                    seq_advance(
+                        seq,
+                        payload.len(),
+                        if (flags & TCP_FLAG_FIN) != 0 { 1 } else { 0 },
+                    ),
                     TCP_FLAG_RST | TCP_FLAG_ACK,
                     0,
                     &[],
@@ -480,7 +575,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                     dst_port,
                     src_port,
                     isn,
-                    seq + 1,
+                    seq_advance(seq, 0, 1),
                     TCP_FLAG_SYN | TCP_FLAG_ACK,
                     65535,
                     &[],
@@ -499,10 +594,10 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                         remote_port: src_port,
                         send_una: isn,
                         send_nxt: isn + 1,
-                        recv_nxt: seq + 1,
-                        recv_window: 4096,
+                        recv_nxt: seq_advance(seq, 0, 1),
+        peer_window: 0,
                         listening: false,
-                        rx_data: [0; 4096],
+                        rx_data: [0; RX_BUF_LEN],
                         rx_data_len: 0,
                         tx_data: [0; 4096],
                         tx_data_len: 0,
@@ -514,7 +609,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                         dupack_count: 0,
                         last_ack_seq: 0,
                         keepalive_probes: 0,
-                        keepalive_time: 0,
+                        keepalive_due: 0,
                         sack_blocks: [(0, 0); 4],
                     });
                 }
@@ -523,9 +618,9 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
 
         TCP_SYN_SENT => {
             if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) != 0 {
-                tcb.recv_nxt = seq + 1;
+                tcb.recv_nxt = seq_advance(seq, 0, 1);
                 tcb.send_una = ack;
-                tcb.recv_window = window;
+                tcb.peer_window = window;
 
                 let mut ack_seg = build_segment(
                     dst_port,
@@ -533,7 +628,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                     tcb.send_nxt,
                     tcb.recv_nxt,
                     TCP_FLAG_ACK,
-                    tcb.recv_window,
+                    tcb.win(),
                     &[],
                 );
                 let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
@@ -551,9 +646,9 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                     dst_port,
                     src_port,
                     tcb.send_nxt,
-                    seq + 1,
+                    seq_advance(seq, 0, 1),
                     TCP_FLAG_SYN | TCP_FLAG_ACK,
-                    tcb.recv_window,
+                    tcb.win(),
                     &[],
                 );
                 let csum = checksum(dst_ip, src_ip, &syn_ack[..20]);
@@ -572,7 +667,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                         tcb.send_nxt,
                         tcb.recv_nxt,
                         TCP_FLAG_ACK,
-                        tcb.recv_window,
+                        tcb.win(),
                         &[],
                     );
                     let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
@@ -582,7 +677,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                 } else {
                     tcb.state = TCP_ESTABLISHED;
                     tcb.send_una = ack;
-                    tcb.recv_window = window;
+                    tcb.peer_window = window;
                     tcb.retry_count = 0;
                     tcb.retry_ticks = 0;
 
@@ -590,13 +685,13 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
 
                     if !payload.is_empty() {
                         let copy_len =
-                            core::cmp::min(payload.len(), tcb.rx_data.len() - tcb.rx_data_len);
+                            core::cmp::min(payload.len(), rx_free(tcb.rx_data_len));
                         if copy_len > 0 {
                             tcb.rx_data[tcb.rx_data_len..tcb.rx_data_len + copy_len]
                                 .copy_from_slice(&payload[..copy_len]);
                             tcb.rx_data_len += copy_len;
                         }
-                        tcb.recv_nxt = seq + copy_len as u32;
+                        tcb.recv_nxt = seq_advance(seq, copy_len, 0);
 
                         let mut ack_seg = build_segment(
                             dst_port,
@@ -604,7 +699,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                             tcb.send_nxt,
                             tcb.recv_nxt,
                             TCP_FLAG_ACK,
-                            tcb.recv_window,
+                            tcb.win(),
                             &[],
                         );
                         let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
@@ -620,7 +715,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                     tcb.send_una,
                     tcb.recv_nxt,
                     TCP_FLAG_SYN | TCP_FLAG_ACK,
-                    tcb.recv_window,
+                    tcb.win(),
                     &[],
                 );
                 let csum = checksum(dst_ip, src_ip, &syn_ack[..20]);
@@ -665,9 +760,11 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                         tcb.retry_ticks = 0;
                     }
                 }
-                // Traffic on the connection means the peer is alive.
+                // Traffic on the connection means the peer is alive: the idle timer
+                // restarts from *now*, which is why this needs a clock rather
+                // than the old counter of `poll_retransmit` calls.
                 tcb.keepalive_probes = 0;
-                tcb.keepalive_time = 0;
+                tcb.keepalive_due = keepalive_idle_deadline(zenus_arch::interrupts::pit::get_ticks());
                 // Additive increase: +MSS per RTT below ssthresh (slow
                 // start), +1 MSS per RTT above it (congestion avoidance).
                 if tcb.cwnd < tcb.ssthresh {
@@ -675,19 +772,19 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                 } else if acked_bytes > 0 {
                     tcb.cwnd = tcb.cwnd.saturating_add(1);
                 }
-                tcb.recv_window = window;
+                tcb.peer_window = window;
             }
 
             if !payload.is_empty() && (flags & TCP_FLAG_ACK) != 0 {
                 if seq == tcb.recv_nxt {
                     let copy_len =
-                        core::cmp::min(payload.len(), tcb.rx_data.len() - tcb.rx_data_len);
+                        core::cmp::min(payload.len(), rx_free(tcb.rx_data_len));
                     if copy_len > 0 {
                         tcb.rx_data[tcb.rx_data_len..tcb.rx_data_len + copy_len]
                             .copy_from_slice(&payload[..copy_len]);
                         tcb.rx_data_len += copy_len;
                     }
-                    tcb.recv_nxt = seq + copy_len as u32;
+                    tcb.recv_nxt = seq_advance(seq, copy_len, 0);
                     // Anything the SACK list held at or below the new
                     // cumulative ACK is now covered by it.
                     for i in 0..tcb.sack_blocks.len() {
@@ -696,7 +793,13 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                         }
                     }
 
-                    let window = 65535u16.saturating_sub(tcb.rx_data_len as u16);
+                    // Free space in the *receive buffer*, not 65535 minus what is
+                    // buffered. A 16-bit window field is not a buffer, and
+                    // subtracting from 65535 meant the advertised window was
+                    // ~61439 for a full 4096-byte buffer: the peer was never
+                    // told to stop, so payload was silently discarded while
+                    // `recv_nxt` moved past it.
+                    let window = advertised_window(tcb.rx_data_len);
 
                     let mut ack_seg = build_segment(
                         dst_port,
@@ -729,7 +832,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                         src_port,
                         tcb.send_nxt,
                         tcb.recv_nxt,
-                        tcb.recv_window,
+                        tcb.win(),
                         &tcb.sack_blocks,
                     );
                 }
@@ -746,7 +849,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                     tcb.send_nxt,
                     tcb.recv_nxt,
                     TCP_FLAG_ACK,
-                    tcb.recv_window,
+                    tcb.win(),
                     &[],
                 );
                 let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
@@ -765,14 +868,14 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                 }
             }
             if (flags & TCP_FLAG_FIN) != 0 {
-                tcb.recv_nxt = seq + payload.len() as u32 + 1;
+                tcb.recv_nxt = seq_advance(seq, payload.len(), 1);
                 let mut ack_seg = build_segment(
                     dst_port,
                     src_port,
                     tcb.send_nxt,
                     tcb.recv_nxt,
                     TCP_FLAG_ACK,
-                    tcb.recv_window,
+                    tcb.win(),
                     &[],
                 );
                 let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
@@ -787,14 +890,14 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
             if (flags & TCP_FLAG_RST) != 0 {
                 tcb.state = TCP_CLOSED;
             } else if (flags & TCP_FLAG_FIN) != 0 {
-                tcb.recv_nxt = seq + payload.len() as u32 + 1;
+                tcb.recv_nxt = seq_advance(seq, payload.len(), 1);
                 let mut ack_seg = build_segment(
                     dst_port,
                     src_port,
                     tcb.send_nxt,
                     tcb.recv_nxt,
                     TCP_FLAG_ACK,
-                    tcb.recv_window,
+                    tcb.win(),
                     &[],
                 );
                 let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
@@ -814,7 +917,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                     tcb.send_nxt,
                     tcb.recv_nxt,
                     TCP_FLAG_ACK,
-                    tcb.recv_window,
+                    tcb.win(),
                     &[],
                 );
                 let csum = checksum(dst_ip, src_ip, &ack_seg[..20]);
@@ -881,37 +984,41 @@ pub fn poll_retransmit(iface_idx: usize) {
             // Nothing in flight: this is where keepalive belongs. An
             // established connection with no traffic for KEEPALIVE_IDLE
             // seconds gets a probe; after KEEPALIVE_PROBES unanswered probes
-            // the peer is considered gone and the TCB is torn down.
+            // spaced KEEPALIVE_PROBE_INTERVAL apart, the peer is considered
+            // gone and the TCB is torn down.
             if tcb.state == TCP_ESTABLISHED {
-                tcb.keepalive_time += 1;
-                if tcb.keepalive_time >= KEEPALIVE_IDLE {
-                    tcb.keepalive_time = 0;
-                    if tcb.keepalive_probes >= KEEPALIVE_PROBES {
+                let now = zenus_arch::interrupts::pit::get_ticks();
+                match keepalive_action(now, tcb.keepalive_due, tcb.keepalive_probes) {
+                    Keepalive::Wait => {}
+                    Keepalive::GiveUp => {
                         zenus_console::kwarn!("TCP keepalive exhausted, closing conn {}", i);
                         tcb.state = TCP_CLOSED;
                         continue;
                     }
-                    tcb.keepalive_probes += 1;
-                    let _probe_interval = KEEPALIVE_PROBE_INTERVAL;
+                    Keepalive::Probe => {
+                        tcb.keepalive_probes += 1;
+                        // The deadline the old code computed and threw away.
+                        tcb.keepalive_due = keepalive_probe_deadline(now);
 
-                    let remote_ip = tcb.remote_ip;
-                    let local_ip = tcb.local_ip;
-                    let src_port = tcb.local_port;
-                    let dst_port = tcb.remote_port;
-                    let mut seg = build_segment(
-                        src_port,
-                        dst_port,
-                        tcb.send_nxt,
-                        tcb.recv_nxt,
-                        TCP_FLAG_ACK,
-                        tcb.recv_window,
-                        &[],
-                    );
-                    let csum = checksum(local_ip, remote_ip, &seg[..20]);
-                    seg[16] = (csum >> 8) as u8;
-                    seg[17] = (csum & 0xFF) as u8;
-                    ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..20]);
-                    continue;
+                        let remote_ip = tcb.remote_ip;
+                        let local_ip = tcb.local_ip;
+                        let src_port = tcb.local_port;
+                        let dst_port = tcb.remote_port;
+                        let mut seg = build_segment(
+                            src_port,
+                            dst_port,
+                            tcb.send_nxt,
+                            tcb.recv_nxt,
+                            TCP_FLAG_ACK,
+                            tcb.win(),
+                            &[],
+                        );
+                        let csum = checksum(local_ip, remote_ip, &seg[..20]);
+                        seg[16] = (csum >> 8) as u8;
+                        seg[17] = (csum & 0xFF) as u8;
+                        ipv4::send(iface_idx, remote_ip, ipv4::PROTO_TCP, &seg[..20]);
+                        continue;
+                    }
                 }
             }
             continue;
@@ -941,7 +1048,7 @@ pub fn poll_retransmit(iface_idx: usize) {
                 } else {
                     TCP_FLAG_SYN | TCP_FLAG_ACK
                 },
-                tcb.recv_window,
+                tcb.win(),
                 &[],
             );
             let csum = checksum(local_ip, remote_ip, &seg[..20]);
@@ -958,7 +1065,7 @@ pub fn poll_retransmit(iface_idx: usize) {
                 send_una,
                 tcb.recv_nxt,
                 TCP_FLAG_FIN | TCP_FLAG_ACK,
-                tcb.recv_window,
+                tcb.win(),
                 &[],
             );
             let csum = checksum(local_ip, remote_ip, &seg[..20]);
@@ -970,8 +1077,13 @@ pub fn poll_retransmit(iface_idx: usize) {
             // code always sent a full MSS regardless of `cwnd`, so the window
             // was pure bookkeeping and never affected the wire.
             let in_flight = tcb.send_nxt.wrapping_sub(tcb.send_una);
+            // Two independent limits: our congestion window, and what the peer
+            // said it can accept. The peer's window used to be stored in the
+            // field we advertised our own from, so neither number was applied
+            // where it belonged.
             let budget = (tcb.cwnd as u32).saturating_sub(in_flight);
-            let limit = core::cmp::min(MSS as u32, budget) as usize;
+            let peer_budget = core::cmp::max(0, tcb.peer_window as i32 - in_flight as i32) as u32;
+            let limit = core::cmp::min(MSS as u32, core::cmp::min(budget, peer_budget)) as usize;
             if limit == 0 {
                 // Window is full; wait for ACKs rather than overshooting.
                 tcb.retry_ticks = 1;
@@ -985,7 +1097,7 @@ pub fn poll_retransmit(iface_idx: usize) {
                 send_una,
                 tcb.recv_nxt,
                 TCP_FLAG_ACK | TCP_FLAG_PSH,
-                tcb.recv_window,
+                tcb.win(),
                 payload,
             );
             let csum = checksum(local_ip, remote_ip, &seg[..seg_len]);
@@ -1052,7 +1164,7 @@ pub fn flush_tx(conn: usize, iface_idx: usize) -> bool {
         tcb.send_nxt,
         tcb.recv_nxt,
         TCP_FLAG_ACK | TCP_FLAG_PSH,
-        tcb.recv_window,
+        tcb.win(),
         payload,
     );
     let seg_len = 20 + payload_len;
@@ -1106,7 +1218,7 @@ pub fn close(conn: usize, iface_idx: usize) -> bool {
         tcb.send_nxt,
         tcb.recv_nxt,
         TCP_FLAG_FIN | TCP_FLAG_ACK,
-        tcb.recv_window,
+        tcb.win(),
         &[],
     );
     let csum = checksum(tcb.local_ip, tcb.remote_ip, &fin[..20]);
@@ -1260,4 +1372,117 @@ pub fn connection_count() -> usize {
         }
     }
     count
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::{
+        advertised_window, keepalive_action, keepalive_idle_deadline, keepalive_probe_deadline,
+        rx_free, seq_advance, Keepalive, RX_BUF_LEN, KEEPALIVE_PROBES,
+    };
+
+    /// Regression: the advertised window was computed in the 65535 space of the
+    /// 16-bit field rather than the 4096-byte space of the receive buffer. A
+    /// full buffer therefore advertised ~61439 bytes of space, so a zero window
+    /// was never announced, the peer kept sending, `copy_len` was clamped to 0
+    /// and the payload was dropped while `recv_nxt` advanced past it. The data
+    /// was gone and the peer had been told it was received.
+    #[test]
+    fn the_advertised_window_is_the_free_space_in_the_receive_buffer() {
+        assert_eq!(advertised_window(0), RX_BUF_LEN as u16);
+        assert_eq!(advertised_window(1), RX_BUF_LEN as u16 - 1);
+        assert_eq!(advertised_window(RX_BUF_LEN - 1), 1);
+
+        // Full: this is the case the old arithmetic got wrong. It must be zero,
+        // and it must fit in the u16 the segment header has.
+        assert_eq!(advertised_window(RX_BUF_LEN), 0);
+        assert_eq!(
+            65535u16.saturating_sub(RX_BUF_LEN as u16),
+            61439,
+            "the old value: a non-zero window on a full buffer"
+        );
+
+        // Over-full cannot happen, but it must not wrap into a huge window.
+        assert_eq!(advertised_window(RX_BUF_LEN * 2), 0);
+        assert_eq!(advertised_window(usize::MAX), 0);
+
+        // The window can never exceed what a u16 field holds.
+        assert!(advertised_window(0) <= u16::MAX);
+        assert_eq!(rx_free(0), RX_BUF_LEN);
+        assert_eq!(rx_free(RX_BUF_LEN), 0);
+        assert_eq!(rx_free(usize::MAX), 0);
+    }
+
+    /// Regression: `seq + payload.len() as u32 + 1` overflowed for any segment
+    /// whose sequence number was near `u32::MAX`, which a peer chooses freely.
+    /// In a debug build that is a panic; in release it wrapped, which happens to
+    /// be the right answer — TCP sequence arithmetic is defined modulo 2^32 —
+    /// so the overflow was only ever a crash, never a wrong value. Writing it
+    /// as `wrapping_add` states the intent instead of relying on the profile.
+    #[test]
+    fn sequence_numbers_advance_modulo_two_to_the_32() {
+        assert_eq!(seq_advance(0, 10, 0), 10);
+        assert_eq!(seq_advance(10, 5, 1), 16, "SYN/FIN consumes one");
+
+        // The wrapping cases that used to panic in debug builds.
+        assert_eq!(seq_advance(u32::MAX, 1, 0), 0);
+        assert_eq!(seq_advance(u32::MAX, 0, 1), 0);
+        assert_eq!(seq_advance(u32::MAX - 100, 200, 1), 100);
+        assert_eq!(seq_advance(u32::MAX, 4096, 1), 4096);
+        assert_eq!(seq_advance(u32::MAX, usize::MAX, u32::MAX), u32::MAX - 2);
+
+        // The largest legal in-flight amount: a full receive buffer's worth.
+        assert_eq!(seq_advance(0, RX_BUF_LEN, 0), RX_BUF_LEN as u32);
+    }
+
+    /// Regression: `KEEPALIVE_PROBE_INTERVAL` was computed and dropped
+    /// (`let _probe_interval = ...`), so the nine probes went out back to back
+    /// on consecutive calls instead of 75 seconds apart. The "seconds" counter
+    /// it was compared against also counted calls to `poll_retransmit`, which
+    /// the socket accept/connect paths invoke — not a clock.
+    #[test]
+    fn keepalive_probes_are_spaced_by_the_documented_interval() {
+        let idle_deadline = keepalive_idle_deadline(0);
+        // 7200 s at 100 Hz.
+        assert_eq!(idle_deadline, 720_000);
+
+        // Not due yet.
+        assert_eq!(keepalive_action(idle_deadline - 1, idle_deadline, 0), Keepalive::Wait);
+        // Due, budget left.
+        assert_eq!(keepalive_action(idle_deadline, idle_deadline, 0), Keepalive::Probe);
+
+        // After the first probe the next one is 75 s out, not immediately.
+        let probe_deadline = keepalive_probe_deadline(idle_deadline);
+        assert_eq!(probe_deadline - idle_deadline, 75 * 100);
+        assert_eq!(
+            keepalive_action(probe_deadline - 1, probe_deadline, 1),
+            Keepalive::Wait,
+            "the second probe must not follow the first immediately"
+        );
+        assert_eq!(
+            keepalive_action(probe_deadline, probe_deadline, 1),
+            Keepalive::Probe
+        );
+
+        // Budget spent.
+        assert_eq!(
+            keepalive_action(0, 0, KEEPALIVE_PROBES),
+            Keepalive::GiveUp,
+            "the ninth unanswered probe must close the connection"
+        );
+        assert_eq!(keepalive_action(0, 0, KEEPALIVE_PROBES + 1), Keepalive::GiveUp);
+
+        // Probes are due at increasing deadlines, never all at one instant:
+        // this is what the discarded constant would have produced.
+        let mut due = keepalive_idle_deadline(0);
+        for sent in 0..KEEPALIVE_PROBES {
+            assert_eq!(keepalive_action(due, due, sent), Keepalive::Probe);
+            due = keepalive_probe_deadline(due);
+        }
+        assert_eq!(keepalive_action(due, due, KEEPALIVE_PROBES), Keepalive::GiveUp);
+
+        // Deadlines saturate rather than wrapping on a saturated tick counter.
+        assert_eq!(keepalive_idle_deadline(u64::MAX), u64::MAX);
+        assert_eq!(keepalive_probe_deadline(u64::MAX), u64::MAX);
+    }
 }
