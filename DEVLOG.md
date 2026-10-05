@@ -1465,15 +1465,132 @@ instansiasi, atau `rbreak` setelah symbol statiknya ditemukan.
 
 ---
 
+### BUG-029 — `heap_floor` tidak pernah di-set untuk task kernel, jadi check `brk` jadi tak berguna
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** sangat tinggi — satu syscallwedges seluruh CPU
+**Ditemukan oleh:** `make fuzz-coverage`, dengan gdb
+**Test:** `crates/zenus-sched/src/lib.rs` → `a_kernel_task_gets_a_heap_floor_too`
+
+**Ini complementos langsung BUG-013.** Check `brk` yang saya tambahkan di sana
+hanya berlaku untuk task yang dibuat lewat `create_user_task` dan
+`clone_task`. `create_task_named` — yang dipakai untuk **setiap** task kernel,
+termasuk init dan task campaign fuzzing — **tidak pernah mengisi `heap_brk`
+maupun `heap_floor` sama sekali**. Keduanya tetap 0.
+
+Dan dua accessor itu tidak memperlakukan 0 secara sama:
+
+```rust
+// get_task_heap_brk:  brk == 0  →  pakai default  (aman)
+pub fn get_task_heap_brk(id: u64) -> u64 {
+    … if brk == 0 { return 0x6000_0000_0000u64; } …
+
+// get_task_heap_floor: floor == 0  →  dikembalikan apa adanya (BERBAHAYA)
+pub fn get_task_heap_floor(id: u64) -> u64 {
+    … return task.heap_floor; …        // 0 lolos
+}
+```
+
+Jadi untuk task kernel: `current = 0x6000_0000_0000`, `floor = 0`.
+`brk_action(0x61706e69, 0x6000_0000_0000, 0, USER_SPACE_LIMIT)` →
+`addr >= floor` (karena `0x61706e69 >= 0`) → **Shrink**. Dan `Shrink`
+menjalankan `unmap_heap_pages(cr3, 0x61706e69, 0x6000_0000_0000)`: 6,4 miliar
+halaman, tiap iterasi mengambil lock frame allocator.
+
+**Cara saya memastikan.** `gdb` tidak bisa attach ke QEMU yang sedang berjalan
+dengan `interrupt` setelah `continue &` — QEMU gdbstub menolaknya ("Selected
+thread is running"). Yang berhasil: QEMU dijalankan dengan monitor socket
+(`-monitor unix:…`), CPU di-`stop` lewat monitor, lalu gdb di-attach (all-stop
+menghentikan CPU saat connect). Backtrace-nya langsung:
+
+```
+#0 zenus_mem::paging::virt_to_phys_raw (…) at crates/zenus-mem/src/paging.rs:238
+#1 zenus_syscall::syscall::unmap_heap_pages (cr3=…, start=1633771873,
+      end=105553116266496)            at crates/zenus-syscall/src/syscall.rs:775
+#2 zenus_syscall::syscall::sys_brk (addr=1633771873, …) at …:898
+#3 zenus_syscall::syscall::syscall_dispatch6 (num=12, arg1=1633771873, …)
+#4 zenus_fuzz::syscall_fuzz::execute (input=…)
+#7 zenus_fuzz::run_campaign (mode=Coverage, cases=50000, seed=…)
+```
+
+`1633771873 = 0x61706e69` — empat byte ASCII dari path fuzzer. `end =
+105553116266496 = 0x6000_0000_0000` — default break. Dan `unmap_heap_pages`
+tidak pernah melakukan `yield_now()`, jadi campaign task tidak pernah
+menyerahkan CPU:Inilah kenapa watchdog ikut mati (BUG-028) — bukan karena
+lock, tapi karena loop-nya tidak pernah preemptible.
+
+Sebelum fix, **RIP identik 8 dari 8 sampel** (`Atomic<u64>::load` yang
+dari dalam loop), dan `RSP` berada di dalam loop — bukan di lock. Jadi ini
+bukan deadlock spinlock seperti yang saya duga; itu loop murni yang tidak pernah
+preemptible.
+
+**Fix:**
+1. `DEFAULT_HEAP_BRK` jadi konstanta tunggal, dipakai oleh kedua accessor —
+   supaya tidak bisa menyimpang lagi.
+2. `get_task_heap_floor` memperlakukan `floor == 0` sebagai "belum
+   diinisialisasi" dan memakai default, sama seperti `get_task_heap_brk`
+   sudah memperlakukan `brk == 0`.
+3. `create_task_named` mengisi `heap_brk` **dan** `heap_floor` dengan default.
+
+**Test:** membuat task bukan host-safe (`create_task_named` membaca CR8 dan
+mengalokasikan stack asli), jadi test-nya memeriksa **invariant**-nya: body
+`create_task_named` harus berisi kedua assignment, accessor harus mengecek
+nol, dan alamat brk yang di-fuzz harus jatuh di bawah default. Diverifikasi
+gagal sebelum fix (dua assignment dihapus → 1 FAILED).
+
+### BUG-021 Closed: anggaran watchdog ternyata sudah cukup
+
+Saya sempat mencatat throughput campaign sebagai "2,6 kasus/detik, satu kasus
+~380 ms, tidak jelas mengapa". **Ternyata itu `brk`**: setiap kasus fuzzer yang
+menyentuh task kernel menjalankan loop 6,4 miliar halaman itu, dan campaign
+hanya bisa sedalam 313 kasus dalam 120 detik karena itu. Setelah BUG-029, kedua
+mode menyelesaikan_cases-nya di bawah watchdog:
+
+| | Sebelum | Sesudah |
+|---|---|---|
+| `make fuzz-smoke` | tidak bisa dikompilasi | 2000 kasus, `crashes=0`, `EXIT code=0` |
+| `make fuzz-coverage` | tidak bisa dikompilasi | **50 000 kasus**, `crashes=0`, `EXIT code=0` |
+| `make fuzz-regression` | tidak bisa dikompilasi | `NO-CORPUS`, `EXIT code=2` |
+
+Ketiganya menjalankan Verdikt yang benar untuk pertama kalinya.
+
+### BUG-030 — satu set artefak dipakai semua mode fuzzing
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** sedang — laporan hasil bisa dibaca salah
+**Test:** tidak ada test; ini konfigurasi build
+
+`fuzz_build` menulis `build/fuzz/zenus-fuzz`, `zenus-fuzz.iso` dan
+`fuzz.log` — nama yang sama untuk smoke, coverage **dan** regression. Mode yang
+dibangun terakhir menang.
+
+Jadi `make fuzz-regression` menimpa ISO coverage, dan `make fuzz-coverage`
+berikutnya membaca log yang isinya campaign berbeda. Saya tersesat dua kali
+karena ini dan sempat hampir melaporkan `EXIT code=3` yang salah sebagai bug.
+
+**Fix:** `FUZZ_KERNEL`/`FUZZ_ISO`/`FUZZ_LOG` jadi fungsi dari nama mode
+(`zenus-fuzz-coverage.iso`, `fuzz-coverage.log`, dst), dan setiap grep memakai
+log yang cocok dengan mode-nya.
+
+**Catatan:** `EXIT code=3` yang saya laporkan untuk regression di tick
+sebelumnya **salah baca** — exit code-nya memang sudah benar (`2`). Yang
+benar-benar ada bugs-nya artefak bersama ini.
+
+---
+
+## Lapisan verifikasi: apa yang benar-benar jalan
+
+---
+
 ## Lapisan verifikasi: apa yang benar-benar jalan
 
 | Lapisan | Status | Catatan |
 |---|---|---|
-| `make test-host` | **hijau**, 198 test | Sepanjang sesi ini |
+| `make test-host` | **hijau**, 199 test | Sepanjang sesi ini |
 | `cargo build` (default / testing / fuzz-smoke / fuzz-coverage / fuzz-regression) | **hijau** | Semua kombinasi feature |
-| `make fuzz-smoke` | **hijau** | 2000 kasus, `crashes=0`, `EXIT code=0`, ~10 s |
-| `make fuzz-regression` | jalan, verdict salah | Lihat catatan di atas: harusnya `code=2`, selalu `code=3` |
-| `make fuzz-coverage` | `crashes=0`, masih **macet** | Seluruh CPU tersendat di kasus ~2560; watchdog ikut mati. Lihat catatan BUG-027/028 |
+| `make fuzz-smoke` | **hijau** | 2000 kasus, `crashes=0`, `EXIT code=0` |
+| `make fuzz-coverage` | **hijau** | **50 000 kasus**, `crashes=0`, `EXIT code=0`, `new_paths=978` |
+| `make fuzz-regression` | **hijau** | `NO-CORPUS`, `EXIT code=2` — benar, dan exit code-nya memang sudah benar sejak awal |
 | `make test` | **boot**, belum menyelesaikan test | Fixed BUG-018 dan BUG-019; mesin mencapai `run_tests` dan test pertama jalan, lalu beberapa kali page fault berturut-turut (handler-nya sendiri fault saat membaca stack) |
 
 ### Yang belum selesai, dan kenapa saya tidak menebaknya
@@ -1495,10 +1612,14 @@ regression test — catatan saja").
 
 Kalau ada yang mau diambil berikutnya, urutannya:
 
-1. **Wedge di `fuzz-coverage`** — sekarang `crashes=0`, jadi tidak ada
-   `#PF` yang tersisa; yang tersisa adalah CPU yang tersendat total, dengan
-   watchdog ikut mati. Butuh breakpoint di `SpinLock::lock` per-instansiasi
-   (nama generiknya tidak bisa di-breakpoint) lalu `bt` saat macet.
+Ketiga target fuzz sekarang hijau, jadi tidak ada lagi item yang perlu
+dikejar dari sisi itu. Yang tersisa:
+
+1. **`make test`** — masih page fault setelah test pertama, dan handler
+   page-fault-nya sendiri ikut fault saat membaca stack sehingga tidak ada
+   jejak. Butuh QEMU + gdb; mekanismenya sudah diketahui (attach gdb
+   menghentikan CPU saat connect, monitor socket untuk menghentikan VM yang
+   sedang berjalan) tapi belum dijalankan terhadap build `testing`.
 2. **`make test`** — butuh QEMU + gdb, dan jejak yang sudah ada tidak
    cukup untuk menemukan penyebabnya sendiri.
 3. **SMAP/SMEP** — tidak berubah; masih item #1 di `ROADMAP.md`, dan masih

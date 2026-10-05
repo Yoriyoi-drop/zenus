@@ -42,7 +42,7 @@ RTL8139, virtio-net.
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 198 host unit tests (`make test-host`), 25 in-kernel tests
+**Testing** — 199 host unit tests (`make test-host`), 25 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), CI running both.
 
 ## Partially done

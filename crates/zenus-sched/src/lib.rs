@@ -21,8 +21,60 @@ pub mod task;
 #[cfg(test)]
 mod host_tests {
     use crate::scheduler::{
-        frame_base, stack_size_is_valid, FRAME_BYTES, ISR_DESCENT, MIN_TASK_STACK, STACK_GUARD,
+        frame_base, stack_size_is_valid, DEFAULT_HEAP_BRK, FRAME_BYTES, ISR_DESCENT,
+        MIN_TASK_STACK, STACK_GUARD,
     };
+
+    /// A kernel task — one made by `create_task_named`, which is *every*
+    /// kernel task including init and the fuzzing campaign task — must still
+    /// have a heap floor.
+    ///
+    /// `sys_brk` consults the floor, and `create_task_named` set neither
+    /// `heap_brk` nor `heap_floor`, so both read as 0. `get_task_heap_brk`
+    /// already treated a stored 0 as "use the default break" — but
+    /// `get_task_heap_floor` returned the stored 0 verbatim, so the floor check
+    /// was inert for every kernel task and `brk(0x61706e69)` shrank from a page
+    /// near the bottom of user space all the way up to 0x6000_0000_0000.
+    ///
+    /// Creating a task is not host-safe — `create_task_named` reads CR8 and
+    /// allocates a real stack — so what is checked here is that the field is
+    /// assigned, and that the accessors cannot hand back a zero floor.
+    #[test]
+    fn a_kernel_task_gets_a_heap_floor_too() {
+        let source = include_str!("scheduler.rs");
+        let body = source
+            .split_once("pub fn create_task_named(")
+            .and_then(|(_, rest)| rest.split("\npub fn ").next())
+            .expect("create_task_named exists");
+        assert!(
+            body.contains("task.heap_brk = DEFAULT_HEAP_BRK;"),
+            "create_task_named must give a kernel task a break"
+        );
+        assert!(
+            body.contains("task.heap_floor = DEFAULT_HEAP_BRK;"),
+            "create_task_named must give a kernel task a floor — without one, \\
+             sys_brk's floor check is inert for every kernel task"
+        );
+
+        // The accessor must treat a stored 0 as "never initialised" rather than
+        // as a floor, because a floor of 0 makes every shrink legal.
+        let accessor = source
+            .split_once("pub fn get_task_heap_floor(")
+            .and_then(|(_, rest)| rest.split("\npub fn ").next())
+            .expect("get_task_heap_floor exists");
+        assert!(
+            accessor.contains("if task.heap_floor == 0"),
+            "a stored zero floor must fall back to the default break, not be \\
+             returned verbatim"
+        );
+
+        // And the exact call the fuzzing campaign made has to be below it.
+        assert!(
+            0x6170_6e69u64 < DEFAULT_HEAP_BRK,
+            "the fuzzed brk address must land below the default floor, which is \\
+             the whole point of the check"
+        );
+    }
 
     /// Regression: `create_user_task` built its frame at `stack_top`, exactly
     /// where `TSS.RSP0` points, so the first timer tick pushed the CPU frame

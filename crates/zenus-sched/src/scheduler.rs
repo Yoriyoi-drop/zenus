@@ -950,6 +950,15 @@ pub fn create_task_named(entry: fn(), stack_size: usize, name: &str) -> u64 {
         task.stack_size = stack_size as u64;
         task.kernel_rsp_top = stack_top;
         task.cpu = cpu;
+        // A kernel task has no user address space, but `sys_brk` still reaches
+        // it: the fuzzing campaign calls `brk(0x61706e69)` like any other task.
+        // With `heap_floor` left at 0 the floor check in `sys_brk` was inert for
+        // every kernel task, so that call shrank from 0x61706e69 all the way up
+        // to the default break — 6.4 billion pages, each one taking the frame
+        // allocator lock, wedging the whole CPU (the watchdog could not even
+        // report it, because the loop never yielded).
+        task.heap_brk = DEFAULT_HEAP_BRK;
+        task.heap_floor = DEFAULT_HEAP_BRK;
 
         let mut tasks = TASKS.lock();
         match tasks.find_free() {
@@ -1440,6 +1449,13 @@ pub fn set_current_gid(gid: u32) -> bool {
     false
 }
 
+/// Where a task's heap starts when nothing else says otherwise.
+///
+/// The default for *both* the break and the floor. They have to be the same
+/// value: a break with no floor makes every shrink legal, which is the unsafe
+/// direction to fail in.
+pub const DEFAULT_HEAP_BRK: u64 = 0x6000_0000_0000;
+
 pub fn get_task_heap_brk(id: u64) -> u64 {
     let tasks = TASKS.lock();
     for t in tasks.tasks.iter() {
@@ -1448,13 +1464,13 @@ pub fn get_task_heap_brk(id: u64) -> u64 {
                 let brk = task.heap_brk;
                 if brk == 0 {
                     // Default fallback
-                    return 0x6000_0000_0000u64;
+                    return DEFAULT_HEAP_BRK;
                 }
                 return brk;
             }
         }
     }
-    0x6000_0000_0000u64
+    DEFAULT_HEAP_BRK
 }
 
 /// Lowest address `brk` may shrink this task's heap to.
@@ -1467,13 +1483,18 @@ pub fn get_task_heap_floor(id: u64) -> u64 {
     for t in tasks.tasks.iter() {
         if let Some(ref task) = t {
             if task.id == id {
+                // A stored 0 means "this task never had its heap initialised".
+                // Returning it would make *every* shrink legal, which is the
+                // unsafe direction to fail in — so it is treated exactly like an
+                // unknown task and falls back to the default break.
+                if task.heap_floor == 0 {
+                    return DEFAULT_HEAP_BRK;
+                }
                 return task.heap_floor;
             }
         }
     }
-    // Same fallback as `get_task_heap_brk`, and deliberately not 0: a floor of 0
-    // would make *every* shrink legal, which is the unsafe direction to fail in.
-    0x6000_0000_0000u64
+    DEFAULT_HEAP_BRK
 }
 
 /// Move the heap floor, for `exec` which loads a different image.

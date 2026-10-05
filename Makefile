@@ -221,27 +221,36 @@ clean:
 # the CPU that armed it may recover (zenus_arch::fuzz_guard::should_recover).
 
 FUZZ_BUILD_DIR := $(BUILD_DIR)/fuzz
-FUZZ_KERNEL := $(FUZZ_BUILD_DIR)/zenus-fuzz
-FUZZ_ISO := $(FUZZ_BUILD_DIR)/zenus-fuzz.iso
-FUZZ_LOG := $(FUZZ_BUILD_DIR)/fuzz.log
+# Per-mode artifacts. These used to be one set (`zenus-fuzz`, `zenus-fuzz.iso`,
+# `fuzz.log`) shared by all three modes, so whichever mode was built last won.
+# That is not a cosmetic problem: running `make fuzz-regression` overwrites the
+# coverage ISO, and the next `make fuzz-coverage` then greps a log describing a
+# different campaign. Two of these were mistaken for real results before the
+# naming was fixed.
+#
+# $(1) is the mode name (smoke / coverage / regression).
+FUZZ_KERNEL = $(FUZZ_BUILD_DIR)/zenus-fuzz-$(1)
+FUZZ_ISO = $(FUZZ_BUILD_DIR)/zenus-fuzz-$(1).iso
+FUZZ_LOG = $(FUZZ_BUILD_DIR)/fuzz-$(1).log
 FUZZ_SMP ?= 1
 FUZZ_MEM ?= 2G
 # Hard wall-clock cap per campaign so a wedged fuzz case cannot hang the target.
 FUZZ_TIMEOUT ?= 300
 
 # $(1) cargo feature selecting the campaign mode
+# $(1) cargo feature selecting the campaign mode, $(2) mode name
 define fuzz_build
 	@mkdir -p $(FUZZ_BUILD_DIR)
 	$(CARGO) build --package zenus --target $(TARGET) --no-default-features \
 		--features $(1) $(CARGO_FLAGS)
-	$(LD) -T apps/src/linker.ld -o $(FUZZ_KERNEL) \
+	$(LD) -T apps/src/linker.ld -o $(call FUZZ_KERNEL,$(2)) \
 		--nmagic -n --gc-sections \
 		--whole-archive \
 		target/$(TARGET)/$(PROFILE_DIR)/libzenus.a \
 		--no-whole-archive
 	rm -rf $(ISO_DIR)
 	mkdir -p $(ISO_DIR)/boot/limine
-	cp $(FUZZ_KERNEL) $(ISO_DIR)/boot/zenus
+	cp $(call FUZZ_KERNEL,$(2)) $(ISO_DIR)/boot/zenus
 	cp $(INITRD) $(ISO_DIR)/boot/
 	cp limine.conf $(ISO_DIR)/boot/limine/
 	cp $(LIMINE_DIR)/limine-bios.sys $(ISO_DIR)/boot/limine/
@@ -254,51 +263,50 @@ define fuzz_build
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		$(ISO_DIR) -o $(FUZZ_ISO)
-	$(LIMINE_DIR)/limine bios-install $(FUZZ_ISO)
+		$(ISO_DIR) -o $(call FUZZ_ISO,$(2))
+	$(LIMINE_DIR)/limine bios-install $(call FUZZ_ISO,$(2))
 endef
 
-# Run a campaign and store its serial output in $(FUZZ_LOG).
-# $(1) make target to build (recursive call), $(2) human label
+# Run a campaign and store its serial output in $(call FUZZ_LOG,$(2)).
+# $(1) make target to build (recursive call), $(2) mode name, $(3) human label
 define fuzz_run
 	$(MAKE) $(1)
-	@echo "=== running fuzzing campaign ($(2)) ==="
-	@rm -f $(FUZZ_LOG)
+	@echo "=== running fuzzing campaign ($(3)) ==="
+	@rm -f $(call FUZZ_LOG,$(2))
 	@timeout $(FUZZ_TIMEOUT) qemu-system-x86_64 \
 		-display none -serial stdio -no-reboot \
-		-m $(FUZZ_MEM) -smp $(FUZZ_SMP) -cdrom $(FUZZ_ISO) \
-		-cpu max 2>&1 | tee $(FUZZ_LOG) | grep -a '\[FUZZ\]' || true
+		-m $(FUZZ_MEM) -smp $(FUZZ_SMP) -cdrom $(call FUZZ_ISO,$(2)) \
+		-cpu max 2>&1 | tee $(call FUZZ_LOG,$(2)) | grep -a '\[FUZZ\]' || true
 	@echo "--- crash list ---"
-	@grep -a '\[FUZZ\] CRASH' $(FUZZ_LOG) || echo "(no crash reported)"
+	@grep -a '\[FUZZ\] CRASH' $(call FUZZ_LOG,$(2)) || echo "(no crash reported)"
 	@echo "--- summary ---"
-	@grep -a '\[FUZZ\] SUMMARY' $(FUZZ_LOG) || echo "(campaign produced no summary)"
-	@grep -a '\[FUZZ\] EXIT' $(FUZZ_LOG) || echo "(campaign did not finish: timeout or reset)"
+	@grep -a '\[FUZZ\] SUMMARY' $(call FUZZ_LOG,$(2)) || echo "(campaign produced no summary)"
+	@grep -a '\[FUZZ\] EXIT' $(call FUZZ_LOG,$(2)) || echo "(campaign did not finish: timeout or reset)"
 endef
 
 ## Build the kernel with the fuzzing framework linked in (smoke mode).
 build-fuzz:
-	$(call fuzz_build,fuzz-smoke)
-	@echo "built $(FUZZ_KERNEL) / $(FUZZ_ISO)"
+	$(call fuzz_build,fuzz-smoke,smoke)
+	@echo "built $(call FUZZ_KERNEL,smoke) / $(call FUZZ_ISO,smoke)"
 
 ## Smoke mode: 100 - 10.000 cases, run on every commit.
 fuzz-smoke:
-	$(call fuzz_run,build-fuzz,smoke)
+	$(call fuzz_run,build-fuzz,smoke,smoke)
 
 ## Coverage mode: 10^5 cases, hunting for new paths.
 fuzz-coverage:
-	$(call fuzz_run,fuzz-coverage-build,coverage)
+	$(call fuzz_run,fuzz-coverage-build,coverage,coverage)
 
 ## Regression mode: replay the recorded crashes.
 fuzz-regression:
-	$(call fuzz_run,fuzz-regression-build,regression)
+	$(call fuzz_run,fuzz-regression-build,regression,regression)
 
 fuzz-coverage-build:
-	$(call fuzz_build,fuzz-coverage)
+	$(call fuzz_build,fuzz-coverage,coverage)
 
 fuzz-regression-build:
-	$(call fuzz_build,fuzz-regression)
+	$(call fuzz_build,fuzz-regression,regression)
 
-## Remove fuzzing artifacts and the recorded crash log.
+## Remove fuzzing artifacts (all modes) and the recorded crash log.
 fuzz-clean:
 	rm -rf $(FUZZ_BUILD_DIR)
-	$(RM) $(FUZZ_LOG)
