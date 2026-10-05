@@ -871,6 +871,138 @@ dan `mount_flags_from_syscall` dikembalikan ke `0` → 1 FAILED).
 
 ---
 
+### BUG-017 — `make fuzz-smoke` tidak bisa dikompilasi sama sekali
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — salah satu dari tiga lapisan verifikasi tidak jalan
+**Test:** tidak ada test; ini compile error, jadi `cargo build` yang menjaganya
+
+**Di mana:** `crates/zenus-sched/src/scheduler.rs` — `idle_until`;
+`apps/src/fuzz_runner.rs` — `run_and_exit`
+
+```rust
+// sebelum
+pub fn idle_until(cond: fn() -> bool, finished: fn() -> !) { … }
+
+pub fn run_and_exit(mode: Mode, cases: u64) -> ! {
+    …
+    zenus_sched::scheduler::idle_until(watchdog, || abort("watchdog"));
+}
+```
+
+**Yang salah:** `idle_until` tidak pernah kembali — `finished` adalah
+`fn() -> !` dan blok asm-nya diakhiri `ud2` — tapi tipenya `()`. Inline asm
+tidak dianggap divergen oleh compiler, jadi `idle_until(...)` sebagai
+**tail expression** dari fungsi `-> !` tidak lolos typecheck:
+
+```
+error[E0308]: mismatched types
+  --> apps/src/fuzz_runner.rs:126:60
+   |
+126 | pub fn run_and_exit(mode: Mode, cases: u64) -> ! {
+   |        ------------                                        ^ expected `!`, found `()`
+```
+
+Artinya `make fuzz-smoke`, `make fuzz-coverage`, dan `make fuzz-regression`
+**gagal build** di HEAD. Tidak ada fuzzing yang pernah berjalan di repo ini,
+dan karena `doc/fuzzing.md` dan `README.md` memperlakukannya sebagai lapisan
+verifikasi, ini satu lapisan yang hilang tanpa terlihat.
+
+**Fix:** `idle_until` dideklarasikan `-> !` dengan `unreachable!()` setelah
+blok asm (asm-nya sudah tidak bisa keluar). Satu-satunya caller adalah
+`run_and_exit`, jadi tidak ada efek samping.
+
+**Verifikasi:** `make fuzz-smoke` sekarang build dan **jalan** — banner,
+campaign task dibuat, framework terinisialisasi. denounced di bawah bahwa
+kampanye masih belum menyelesaikan diri.
+
+### BUG-018 — entry `testing` kehilangan inisialisasi APIC
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — `make test` crash sebelum test pertama
+**Test:** tidak ada test; ini crash di hardware-ish, butuh QEMU
+
+**Di mana:** `apps/src/lib.rs` — `entry()` yang `#[cfg(feature = "testing")]`
+
+**Yang salah:** entry testing menyalin urutan boot dari entry normal, tapi
+salinannya sudah berbeda: tidak ada `apic::init_with_virt`. Padahal
+`keyboard::init()` — dipanggil beberapa baris kemudian — me-route IRQ1 lewat
+IOAPIC dan butuh APIC id, dan `current_apic_id()` adalah **read MMIO LAPIC**:
+
+```
+TYPE: supervisor-read-nonpresent
+ADDR=0x0000000000000020 RIP=0xFFFFFFFF8003ED5C
+#2 zenus_arch::interrupts::apic::lapic_read (reg=32) at crates/zenus-arch/src/interrupts/apic.rs:19
+#3 zenus_arch::interrupts::apic::current_apic_id () at crates/zenus-arch/src/interrupts/apic.rs:61
+#4 zenus_arch::keyboard::init () at crates/zenus-arch/src/keyboard.rs:96
+#5 zenus::entry () at apps/src/lib.rs:724
+```
+
+`LAPIC_VIRT_BASE` masih 0, jadi alamatnya `0 + 0x20`. `#PF` tepat sebelum test
+pertama jalan. Dikonfirmasi pre-existing: worktree di `c8b7fce` (sebelum
+seluruh commit di sini)WYSIWYG crash identik.
+
+**Fix:** blok APIC + PIT + tick source disalin ke entry testing, persis seperti
+entry normal. Sekalian `enable_tick_source(32)` literal diganti
+`interrupts::TIMER_VECTOR` — konstanta yang sama, tapi sekarang kalau vektor
+timer berubah hanya ada satu tempat yang perlu diubah (`ARCHITECTURE.md`
+menyebut ini sebagai yang layak dibetulkan).
+
+### BUG-019 — hasil test in-kernel tidak pernah masuk ke serial
+
+**Status:** sudah di-fix (commit ini)
+**Keparateh:** sedang — `make test` melaporkan "terminated" tanpa output
+**Test:** tidak ada test; ini masalah output, bukan logika
+
+**Di mana:** `apps/src/test_runner.rs` — `run_tests`
+
+**Yang salah:** `SerialPort::write_str` tidak menulis ke UART, ia menumpuk ke
+`OUTPUT_BUF`, dan yang mengosongkan buffer itu adalah scheduler atau
+`flush_output_blocking()` eksplisit. Tapi suite test dijalankan **di boot CPU**,
+tanpa task, tanpa scheduler — jadi tidak ada yang pernah flush. Mesin lalu
+`hlt` selamanya dengan hasil test masih di buffer.
+
+Akibatnya `make test-quiet` (grep `\[TEST\]`) tidak pernah menemukan apa pun dan
+make melaporkan `Error`, yang identik dengan gejala suite yang hang. Dua
+lapisan yang menutupi satu sama lain.
+
+**Fix:** `flush_output_blocking()` setelah tiap test dan setelah ringkasan.
+
+**Belum selesai / diketahui sekarang (lihat bagian di bawah).**
+
+---
+
+## Lapisan verifikasi: apa yang benar-benar jalan
+
+| Lapisan | Status | Catatan |
+|---|---|---|
+| `make test-host` | **hijau**, 192 test | Sepanjang sesi ini |
+| `cargo build` (default / testing / fuzz-smoke / fuzz-coverage / fuzz-regression) | **hijau** | Semua kombinasi feature |
+| `make fuzz-smoke` | **build + start**, belum selesai | BUG-017 sudah di-fix. Masih ada fault di dalam campaign: `instruction-fetch` fault di `0xFFFFFFFF805B9008` dengan `RSP = IDLE_RSP - 8`, yaitu pola "ret ke alamat sampah". `IDLE_RSP` ada di `0xffffffff80858f90`, jadi address itu 0x2FF588 di bawahnya — di luar alokasi idle stack. Dugaan terkuat: frame `run_campaign` lebih besar dari yang di accommodating task 256 KiB (`create_task_named(entry, 1 << 18, "fuzz")`), atau `fuzz_guard` memulihkan `(rsp, rip)` yang salah. Belum dibuktikan — butuh breakpoint di QEMU |
+| `make test` | **boot**, belum menyelesaikan test | Fixed BUG-018 dan BUG-019; mesin sekarang mencapai `run_tests` dan test pertama jalan, lalu beberapa kali page fault berturut-turut (handler-nya sendiri fault saat membaca stack). Terdaftar di bagian "belum selesai" |
+
+### Yang belum selesai, dan kenapa saya tidak menebaknya
+
+Dua hal di atas memerlukan diagnosis yang benar, bukan tebakan. Menebak akan
+berarti menambahkan kode yang *terlihat* seperti perbaikan tanpa bukti — persis
+yang `AGENTS.md` larang ("kalau tidak bisa dibuktikan gagal dulu, itu bukan
+regression test — catatan saja").
+
+1. **Fault di dalam `make fuzz-smoke`.** Belum ada diagnostics yang cukup. Yang
+   diketahui: `CAUSE=instruction-fetch`, `ADDR == RIP`, `RSP == IDLE_RSP - 8`.
+   Hipotesis yang harus diuji, berurutan: (a) kedalaman frame
+   `run_campaign` vs ukuran stack task, (b) `fuzz_guard` checkpoint, (c)
+   `idle_until` yang menimpa RSP tanpa menyimpannya.
+2. **Page fault berulang di `make test`.** Handler-nya sendiri fault membaca
+   stack, jadi dump tidak pernahCetak. Yang diketahui: test pertama
+   (`test_new_cache_empty`) selesai, jadi bukan boot lagi.
+3. **SMAP/SMEP.** Tidak berubah; masih item #1 di `ROADMAP.md`.
+
+Kalau ada yang mau diambil berikutnya, saya sarankan nomor 1 dengan QEMU + gdb,
+karena satu-satunya yang punya jejak yang cukup untuk diuji.
+
+---
+
 ## Kandidat berikutnya
 
 Semua kandidat dari daftar `bug hunt` sudah dikerjakan. Yang tersisa bukan bug

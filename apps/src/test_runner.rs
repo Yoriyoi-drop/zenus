@@ -143,6 +143,13 @@ pub fn run_tests(serial: &mut SerialPort) {
                 failed += 1;
             }
         }
+        // `SerialPort::write_str` buffers into `OUTPUT_BUF`, and this suite runs
+        // on the boot CPU with no scheduler and no timer-driven flush — so
+        // without this every result line sat in the buffer and the machine then
+        // `hlt`-looped forever with nothing on the wire. `make test` reported
+        // "terminated" with no `[TEST]` output at all, which looks exactly like
+        // the suite hanging.
+        zenus_console::serial::flush_output_blocking();
     }
 
     serial.write_str("\n=== Results: ");
@@ -158,4 +165,6 @@ pub fn run_tests(serial: &mut SerialPort) {
     } else {
         serial.write_str("[OK] All tests passed\n");
     }
+    // And the summary, for the same reason.
+    zenus_console::serial::flush_output_blocking();
 }

@@ -436,7 +436,7 @@ pub extern "C" fn entry() -> ! {
     // sat in `hlt` with interrupts enabled and no faults at all.
     // PIT stays initialised so pit::get_ticks() (uptime) keeps counting.
     interrupts::pit::init();
-    interrupts::apic::enable_tick_source(32);
+    interrupts::apic::enable_tick_source(interrupts::TIMER_VECTOR);
     zenus_arch::rtc::init();
     zenus_arch::rtc::cache_boot_epoch();
     zenus_arch::random::init_rng();
@@ -719,6 +719,15 @@ pub extern "C" fn entry() -> ! {
     frame_allocator::reserve_boot_stack(hhdm_offset);
     interrupts::init();
     zenus_console::vga::init(hhdm_offset);
+    // The APIC has to be initialised before anything reads it. `keyboard::init()`
+    // routes IRQ1 through the IOAPIC and needs the APIC id, which is a LAPIC
+    // read — with `LAPIC_VIRT_BASE` still 0 that read is address 0x20 and the
+    // machine takes a #PF before the first test runs. This copy of the boot
+    // sequence had drifted from the non-testing one and lost the APIC step.
+    let apic_base = unsafe { cpu::read_msr(0x1B) } & 0xFFFFF000;
+    zenus_arch::interrupts::apic::init_with_virt(apic_base + hhdm_offset);
+    zenus_arch::interrupts::pit::init();
+    zenus_arch::interrupts::apic::enable_tick_source(zenus_arch::interrupts::TIMER_VECTOR);
     zenus_arch::rtc::init();
     zenus_arch::random::init_rng();
     zenus_arch::keyboard::init();

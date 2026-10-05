@@ -1975,7 +1975,15 @@ pub fn idle() -> ! {
 /// would pop a "return address" out of the idle task's frame and jump to
 /// garbage. That made `fuzz_runner`'s `abort("watchdog")` unreachable — the
 /// watchdog path could never report a timeout.
-pub fn idle_until(cond: fn() -> bool, finished: fn() -> !) {
+/// Run `cond` on the idle stack until it returns true, then run `finished`.
+///
+/// Never returns: `finished` is `fn() -> !`, and the asm block ends in `ud2` so
+/// a hypothetical return traps rather than falling through into whatever
+/// follows. Declared `-> !` because that is what it is — inline asm is not
+/// assumed to diverge by the compiler, so without this every caller has to add
+/// its own unreachable tail, and `run_and_exit`'s tail-expression form does not
+/// typecheck at all.
+pub fn idle_until(cond: fn() -> bool, finished: fn() -> !) -> ! {
     let check: fn() -> bool = cond;
     unsafe {
         core::arch::asm!(
@@ -2003,6 +2011,9 @@ pub fn idle_until(cond: fn() -> bool, finished: fn() -> !) {
             // go through them, so nothing else needs to know it is Rust-ABI.
         );
     }
+    // Unreachable: `finished` is `fn() -> !` and the asm ends in `ud2`. Present
+    // only so the `-> !` signature is sound.
+    unreachable!()
 }
 
 /// Called from `idle()`'s asm, already running on `IDLE_RSP`.
