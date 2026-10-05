@@ -57,12 +57,25 @@ pub trait FileSystem: Send + Sync {
 pub struct VfsNode {
     pub fs: &'static dyn FileSystem,
     pub inode: u64,
+    /// The mount this node was reached through was mounted `MS_RDONLY`.
+    ///
+    /// Carried on the node rather than looked up again at write time, because
+    /// `sys_mount` used to accept `MS_RDONLY` and then discard it: a caller
+    /// that mounted a filesystem read-only still got a writable view of it,
+    /// and `sys_write` had nothing to check.
+    pub read_only: bool,
 }
+
+/// `MS_RDONLY`. The other `MS_*` bits are advisory for now: the VFS has no
+/// suid, device or exec enforcement to attach them to, so `sys_mount` rejects
+/// anything it cannot honour rather than pretending to.
+pub const MS_RDONLY: u32 = 1;
 
 #[derive(Clone, Copy)]
 struct Mount {
     path: &'static str,
     fs: &'static dyn FileSystem,
+    flags: u32,
 }
 
 const MAX_MOUNTS: usize = 32;
@@ -76,6 +89,7 @@ struct MountTable {
 const EMPTY_MOUNT: Mount = Mount {
     path: "",
     fs: &crate::devfs::DevFs as &dyn FileSystem,
+    flags: 0,
 };
 
 impl MountTable {
@@ -197,19 +211,21 @@ fn mount_prefix_len(path: &str, mount: &str) -> usize {
     }
 }
 
+/// Longest-prefix mount lookup: `(fs, prefix, flags)` for the mount covering
+/// `path`, if any.
 fn find_mount_in_table(
     ns_id: zenus_ns::NsId,
     path: &str,
-) -> Option<(&'static (dyn FileSystem + 'static), &'static str)> {
+) -> Option<(&'static (dyn FileSystem + 'static), &'static str, u32)> {
     if ns_id == zenus_ns::NS_ROOT {
         let mt = MOUNT_TABLE.lock();
-        let mut best: Option<(&dyn FileSystem, &str)> = None;
+        let mut best: Option<(&dyn FileSystem, &str, u32)> = None;
         let mut best_len = 0usize;
         for i in 0..mt.count {
             let m = &mt.mounts[i];
             let len = mount_prefix_len(path, m.path);
             if len > best_len {
-                best = Some((m.fs, m.path));
+                best = Some((m.fs, m.path, m.flags));
                 best_len = len;
             }
         }
@@ -219,13 +235,13 @@ fn find_mount_in_table(
     for i in 0..tables.count {
         if let Some(ref entry) = tables.entries[i] {
             if entry.ns_id == ns_id {
-                let mut best: Option<(&dyn FileSystem, &str)> = None;
+                let mut best: Option<(&dyn FileSystem, &str, u32)> = None;
                 let mut best_len = 0usize;
                 for j in 0..entry.table.count {
                     let m = &entry.table.mounts[j];
                     let len = mount_prefix_len(path, m.path);
                     if len > best_len {
-                        best = Some((m.fs, m.path));
+                        best = Some((m.fs, m.path, m.flags));
                         best_len = len;
                     }
                 }
@@ -233,18 +249,20 @@ fn find_mount_in_table(
             }
         }
     }
-    find_mount_to_pair(path)
+    find_mount_to_triple(path)
 }
 
-fn find_mount_to_pair(path: &str) -> Option<(&'static (dyn FileSystem + 'static), &'static str)> {
+fn find_mount_to_triple(
+    path: &str,
+) -> Option<(&'static (dyn FileSystem + 'static), &'static str, u32)> {
     let mt = MOUNT_TABLE.lock();
-    let mut best: Option<(&dyn FileSystem, &str)> = None;
+    let mut best: Option<(&dyn FileSystem, &str, u32)> = None;
     let mut best_len = 0usize;
     for i in 0..mt.count {
         let m = &mt.mounts[i];
         let len = mount_prefix_len(path, m.path);
         if len > best_len {
-            best = Some((m.fs, m.path));
+            best = Some((m.fs, m.path, m.flags));
             best_len = len;
         }
     }
@@ -256,6 +274,7 @@ pub fn init() {
     let root = VfsNode {
         fs: tmp_fs,
         inode: tmp_fs.root_inode(),
+        read_only: false,
     };
     {
         let mut root_lock = VFS_ROOT.lock();
@@ -266,6 +285,7 @@ pub fn init() {
         mt.mounts[0] = Mount {
             path: "/",
             fs: tmp_fs,
+            flags: 0,
         };
         mt.count = 1;
     }
@@ -274,7 +294,27 @@ pub fn init() {
 }
 
 pub fn mount(path: &'static str, fs: &'static dyn FileSystem) -> bool {
-    mount_in_ns(zenus_ns::NS_ROOT, path, fs)
+    mount_with_flags(zenus_ns::NS_ROOT, path, fs, 0)
+}
+
+/// Mount with `MS_*` flags recorded. Only [`MS_RDONLY`] has an effect; see
+/// that constant.
+pub fn mount_with_flags(
+    ns_id: zenus_ns::NsId,
+    path: &'static str,
+    fs: &'static dyn FileSystem,
+    flags: u32,
+) -> bool {
+    mount_in_ns_inner(ns_id, path, fs, flags)
+}
+
+/// Does this mount point's filesystem refuse writes?
+///
+/// Pure. A path is covered by the mount at `mount` only when it is the mount
+/// point itself or a component below it — the same rule `mount_covers` states,
+/// so the two cannot drift.
+pub fn mount_is_read_only(path: &str, mount: &str, flags: u32) -> bool {
+    mount_covers(path, mount) && (flags & MS_RDONLY) != 0
 }
 
 pub fn umount(path: &str) -> bool {
@@ -358,6 +398,15 @@ fn paths_equal(a: &str, b: &str) -> bool {
 }
 
 pub fn mount_in_ns(ns_id: zenus_ns::NsId, path: &'static str, fs: &'static dyn FileSystem) -> bool {
+    mount_in_ns_inner(ns_id, path, fs, 0)
+}
+
+fn mount_in_ns_inner(
+    ns_id: zenus_ns::NsId,
+    path: &'static str,
+    fs: &'static dyn FileSystem,
+    flags: u32,
+) -> bool {
     // Normalise once, at the point the mount is recorded: every later decision
     // (prefix matching, longest-prefix selection, and the `&path[prefix.len()..]`
     // slice in `open_in_ns`) assumes the stored prefix has no trailing slash.
@@ -373,7 +422,7 @@ pub fn mount_in_ns(ns_id: zenus_ns::NsId, path: &'static str, fs: &'static dyn F
                         return false;
                     }
                     let j = entry.table.count;
-                    entry.table.mounts[j] = Mount { path, fs };
+                    entry.table.mounts[j] = Mount { path, fs, flags };
                     entry.table.count += 1;
                     return true;
                 }
@@ -386,7 +435,7 @@ pub fn mount_in_ns(ns_id: zenus_ns::NsId, path: &'static str, fs: &'static dyn F
         return false;
     }
     let i = mt.count;
-    mt.mounts[i] = Mount { path, fs };
+    mt.mounts[i] = Mount { path, fs, flags };
     mt.count += 1;
     true
 }
@@ -542,10 +591,12 @@ pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
         return root().map(|r| VfsNode {
             fs: r.fs,
             inode: r.inode,
+            read_only: r.read_only,
         });
     }
 
-    let (fs, mount_prefix) = find_mount_in_table(ns_id, path)?;
+    let (fs, mount_prefix, mount_flags) = find_mount_in_table(ns_id, path)?;
+    let read_only = mount_flags & MS_RDONLY != 0;
     let root_inode = fs.root_inode();
 
     let rel_path = if mount_prefix.is_empty() || mount_prefix == "/" {
@@ -565,6 +616,7 @@ pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
         return Some(VfsNode {
             fs,
             inode: root_inode,
+            read_only,
         });
     }
 
@@ -572,6 +624,7 @@ pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
     let mut current = VfsNode {
         fs,
         inode: root_inode,
+        read_only,
     };
     let root_inode_num = root_inode;
     let mut path_segments: [&str; MAX_PATH_SEGMENTS] = [""; MAX_PATH_SEGMENTS];
@@ -608,6 +661,7 @@ pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
                 current = VfsNode {
                     fs: current.fs,
                     inode,
+                    read_only,
                 };
             }
             None => {

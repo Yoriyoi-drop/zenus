@@ -819,10 +819,68 @@ sungguhan; yang bisa diuji di host adalah bagian indeksnya.
 
 ---
 
-## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
+### BUG-016 — `MS_RDONLY` diterima lalu dibuang, dan `mount` tanpa cek root
 
-Prioritas menurut dampak × kemudahan diuji:
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — filesystem read-only bisa ditulis; mount/umount tanpa hak
+**Test:**
+- `crates/zenus-syscall/src/syscall.rs` → `ms_rdonly_survives_the_translation_into_the_vfs`
+- `crates/zenus-fs/src/lib.rs` → `a_read_only_mount_produces_read_only_nodes`,
+  `a_read_only_mount_does_not_cover_a_sibling`
 
-| # | Lokasi | Bug | Uji |
-|---|---|---|---|
-| 13 | `zenus-syscall/src/syscall.rs:2034` | `sys_mount` menerima `MS_RDONLY\|MS_NOSUID\|MS_NODEV\|MS_NOEXEC` lalu mengabaikan semuanya, return 0. `vfs::Mount` tidak punya field flag sama sekali. Tidak ada cek `euid == 0` | host |
+**Di mana:** `crates/zenus-syscall/src/syscall.rs` — `sys_mount`,
+`sys_umount2`, `mount_flags_from_syscall`; `crates/zenus-fs/src/vfs.rs` —
+`Mount`, `VfsNode`, `mount_with_flags`, `mount_is_read_only`;
+`crates/zenus-syscall/src/syscall/fd.rs` — `FdEntry::read_only`, `fd_write`
+
+**Yang salah (#16a — flag dibuang):** `sys_mount` sudah menolak flag di luar
+`MS_SUPPORTED` (perbaikan BUG-005), tapi `MS_RDONLY` **sendiri** tidak pernah
+dipakai. `vfs::Mount` juga tidak punya field flag sama sekali — tidak ada tempat
+untuk menyimpannya. Jadi `mount(..., MS_RDONLY)` mengembalikan 0 dan caller
+mendapat view yang bisa ditulis. Tidak ada yang bisa memeriksa apa pun di
+`sys_write`, karena informasinya tidak pernah ada.
+
+**Yang salah (#16b — tanpa cek root):** `sys_mount` dan `sys_umount2` tidak
+pernah memanggil `current_euid()`. Karena `current_euid()` adalah 0 untuk
+hampir semua task (lihat BUG-008), setiap program bisa memasang ext2 untuk
+device mana pun yang bisa ia sebut, dan melepas filesystem mana pun dari tree.
+
+**Fix:**
+
+- `vfs::Mount.flags: u32`, diisi lewat `mount_with_flags`
+- `VfsNode.read_only: bool`, di-set dari flag mount yang cocok saat lookup.
+  Dipakai sebagai field node, bukan dicari ulang saat write, supaya tidak ada
+  jalur yang lupa mengecek.
+- `FdEntry.read_only`, diisi dari node saat `open`, dan **dipertahankan** oleh
+  `dup` dan `dup2` — kalau tidak, `dup2` jadi cara-tutorial mengubah deskriptor
+  read-only menjadi bisa tulis.
+- `fd_write` mengembalikan `None` (EROFS) untuk deskriptor read-only
+- `mount_flags_from_syscall(flags) -> u32` murni. Hanya `MS_RDONLY` yang
+  diteruskan; `MS_NOSUID`/`MS_NODEV`/`MS_NOEXEC` tetap diterima
+  (`MS_SUPPORTED` tidak berubah) tapi dipetakan ke nol, karena tidak ada
+  enforced suid/dev/exec di VFS. Menerima bit lalu berpura-pura menghornya
+  adalah kebohongan yang sama dengan mengabaikannya, jadi apa yang mereka petakan
+  dinyatakan eksplisit di sini.
+- `sys_mount` dan `sys_umount2` menolak `euid != 0`
+- `mount_is_read_only(path, mount, flags)` murni, dibangun di atas
+  `mount_covers` supaya aturan read-only tidak bisa menyimpang dari aturan
+  prefix mount
+
+Test read-only diverifikasi gagal sebelum fix (`read_only` dipaksa `false`
+dan `mount_flags_from_syscall` dikembalikan ke `0` → 1 FAILED).
+
+---
+
+## Kandidat berikutnya
+
+Semua kandidat dari daftar `bug hunt` sudah dikerjakan. Yang tersisa bukan bug
+yang tercatat, tapi yang **tidak** bisa diselesaikan di host:
+
+| Item | Kenapa belum selesai |
+|---|---|
+| SMAP/SMEP | Root cause-nya belum dipahami (interaksi U/S PML4 antara `ensure_kernel_pages_supervisor`, `create_address_space`, `map_user_page_raw`). Semua test userspace gagal saat diaktifkan. Butuh board QEMU + alasan yang benar, bukan tebakan. Ini item #1 di `ROADMAP.md` |
+| `mapped_at` satu alamat per segmen SHM | `shmat` kedua untuk segmen yang sama menimpa yang pertama, jadi pemetaan pertama tidak bisa di-detach. Perbaikannya butuh daftar attachment per segmen, bukan skalar — perubahan struktural, di luar-fix yang bisa diverifikasi |
+| SHM end-to-end | Butuh page table sungguhan. Yang bisa diuji di host (bagian indeks) sudah ada test-nya |
+| `io_scheduler::io_stats()` | Mengembalikan total + dua nol hardcoded (`ARCHITECTURE.md`) |
+| lockdep | Graf dan pengecekan reverse-edge sudah ada, tapi tidak ada jalur produksi yang mendaftarkan kelas lock |
+| CI lint | `cargo clippy -- -D warnings` sudah gagal di HEAD (288 warning), bukan karena perubahan di sini |

@@ -2120,6 +2120,21 @@ const MS_BIND: u64 = 4096;
 /// error.
 const MS_SUPPORTED: u64 = MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_REMOUNT;
 
+/// Translate syscall `MS_*` bits into the VFS's mount flags.
+///
+/// Pure. Only `MS_RDONLY` survives: the VFS has no suid, device-node or exec
+/// enforcement to attach the other three to. `MS_SUPPORTED` still admits them,
+/// because a real kernel accepts and records those bits, but nothing here reads
+/// them — and pretending to honour a flag is the same lie as ignoring it, so
+/// what they map to is stated rather than left implicit.
+pub fn mount_flags_from_syscall(flags: u64) -> u32 {
+    if flags & MS_RDONLY != 0 {
+        zenus_fs::vfs::MS_RDONLY
+    } else {
+        0
+    }
+}
+
 /// Sanity check on the unsupported-mask constant (keeps MS_BIND referenced and
 /// documents why it is absent from `MS_SUPPORTED`).
 const _: () = assert!(MS_BIND == 4096 && MS_BIND & MS_SUPPORTED == 0);
@@ -2147,6 +2162,13 @@ fn sys_mount(
         || !validate_user_ptr::<u8>(target_ptr)
         || !validate_user_ptr::<u8>(fstype_ptr)
     {
+        return -1i64 as u64;
+    }
+    // Mounting is a privileged operation and `sys_mount` never checked. Since
+    // `current_euid()` is 0 for every task that has not explicitly dropped
+    // privileges, the check has to be here: without it any ring-3 program could
+    // attach an ext2 filesystem for any device it could name.
+    if zenus_sched::scheduler::current_euid() != 0 {
         return -1i64 as u64;
     }
     // BUG-005 follow-up: the flags used to be dropped on the floor, so
@@ -2234,13 +2256,25 @@ fn sys_mount(
     }
 
     vfs::create_dir(target_static);
-    if !vfs::mount(target_static, fs) {
+    // The flags are recorded on the mount now instead of discarded, so an
+    // `MS_RDONLY` mount produces descriptors that refuse writes.
+    if !vfs::mount_with_flags(
+        zenus_ns::NS_ROOT,
+        target_static,
+        fs,
+        mount_flags_from_syscall(flags),
+    ) {
         return -1i64 as u64;
     }
     0
 }
 
 fn sys_umount2(target_ptr: u64, _flags: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    // Unmount is privileged for the same reason mount is: it removes a
+    // filesystem from the tree, and any task could do it.
+    if zenus_sched::scheduler::current_euid() != 0 {
+        return -1i64 as u64;
+    }
     if !validate_user_ptr::<u8>(target_ptr) {
         return -1i64 as u64;
     }
@@ -3597,7 +3631,11 @@ pub extern "C" fn syscall_signal_hook(kernel_rsp: u64) {
 
 #[cfg(test)]
 mod host_tests {
-    use super::{brk_action, checked_array_len, BrkAction, MAX_XFER, USER_SPACE_LIMIT};
+    use super::{
+        brk_action, checked_array_len, mount_flags_from_syscall, BrkAction, MAX_XFER,
+        MS_NODEV, MS_NOSUID, MS_NOEXEC, USER_SPACE_LIMIT,
+    };
+    use super::MS_RDONLY as SYSCALL_MS_RDONLY;
 
     #[repr(C)]
     struct Pollfd {
@@ -3656,6 +3694,39 @@ mod host_tests {
         // What it accepts now.
         assert!(MAX_XFER < (1u64 << 40));
         assert_eq!(MAX_XFER.checked_add(1), Some(MAX_XFER + 1));
+    }
+
+    /// Regression: `brk(small)` called `unmap_heap_pages(cr3, small, heap_brk)`.
+    /// `heap_brk` starts at the loader's heap base around 0x6000_0000_0000, so
+    /// the loop walked every page between the program's own text segment and its
+    /// heap — about 6.4 billion page-table entries — and `free_frame`d every
+    /// mapped one it found, which included the code the program was executing.
+    ///
+    /// The floor is the initial break. Anything below it is refused.
+    /// Regression: `sys_mount` accepted `MS_RDONLY` and dropped it. A caller
+    /// that mounted a filesystem read-only got a writable view of it, and
+    /// `sys_write` had nothing to check because no mount carried flags at all —
+    /// `vfs::Mount` had no field for them.
+    #[test]
+    fn ms_rdonly_survives_the_translation_into_the_vfs() {
+        use zenus_fs::vfs::MS_RDONLY as VFS_MS_RDONLY;
+
+        assert_eq!(
+            mount_flags_from_syscall(SYSCALL_MS_RDONLY),
+            VFS_MS_RDONLY,
+            "MS_RDONLY must reach the VFS, not be dropped"
+        );
+        assert_eq!(mount_flags_from_syscall(0), 0);
+        // MS_NOSUID|MS_NODEV|MS_NOEXEC are admitted by MS_SUPPORTED but have
+        // nothing enforcing them, so they map to nothing rather than to a flag
+        // the VFS would ignore.
+        assert_eq!(mount_flags_from_syscall(MS_NOSUID), 0);
+        assert_eq!(mount_flags_from_syscall(MS_NODEV | MS_NOEXEC), 0);
+        // Combined with RDONLY, only RDONLY carries through.
+        assert_eq!(
+            mount_flags_from_syscall(SYSCALL_MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC),
+            VFS_MS_RDONLY
+        );
     }
 
     /// Regression: `brk(small)` called `unmap_heap_pages(cr3, small, heap_brk)`.

@@ -80,6 +80,12 @@ pub struct FdEntry {
     pub file_type: FileType,
     pub pipe_id: u64,   // u64::MAX if not a pipe
     pub socket_id: u64, // u64::MAX if not a socket
+    /// The mount this descriptor's file was reached through is `MS_RDONLY`.
+    ///
+    /// Recorded at `open` time from the VFS node, so `write` has something to
+    /// check. `sys_mount` used to accept `MS_RDONLY` and drop it, which meant a
+    /// filesystem mounted read-only still produced writable descriptors.
+    pub read_only: bool,
 }
 
 unsafe impl Send for FdEntry {}
@@ -102,20 +108,20 @@ impl FdTable {
     fn alloc(
         &mut self,
         task_id: u64,
-        fs: &'static dyn FileSystem,
-        inode: u64,
+        node: vfs::VfsNode,
         file_type: FileType,
     ) -> Option<u64> {
         for i in 0..MAX_FDS {
             if self.entries[i].is_none() {
                 self.entries[i] = Some(FdEntry {
                     task_id,
-                    fs: Some(fs),
-                    inode,
+                    fs: Some(node.fs),
+                    inode: node.inode,
                     offset: 0,
                     file_type,
                     pipe_id: u64::MAX,
                     socket_id: u64::MAX,
+                    read_only: node.read_only,
                 });
                 return Some(i as u64);
             }
@@ -139,6 +145,7 @@ impl FdTable {
                     file_type,
                     pipe_id,
                     socket_id: u64::MAX,
+                    read_only: false,
                 });
                 return Some(i as u64);
             }
@@ -157,6 +164,7 @@ impl FdTable {
                     file_type: FileType::CharDevice,
                     pipe_id: u64::MAX,
                     socket_id,
+                    read_only: false,
                 });
                 return Some(i as u64);
             }
@@ -225,7 +233,16 @@ impl FdTable {
         } else if entry.socket_id != u64::MAX {
             self.alloc_socket(task_id, entry.socket_id)
         } else {
-            self.alloc(task_id, entry.fs?, entry.inode, entry.file_type)
+            self.alloc(
+                task_id,
+                vfs::VfsNode {
+                    fs: entry.fs?,
+                    inode: entry.inode,
+                    // A dup of a read-only descriptor stays read-only.
+                    read_only: entry.read_only,
+                },
+                entry.file_type,
+            )
         }
     }
 
@@ -246,7 +263,15 @@ impl FdTable {
             } else if entry.socket_id != u64::MAX {
                 self.alloc_socket(dst_task_id, entry.socket_id);
             } else if let Some(fs) = entry.fs {
-                self.alloc(dst_task_id, fs, entry.inode, entry.file_type);
+                self.alloc(
+                    dst_task_id,
+                    vfs::VfsNode {
+                        fs,
+                        inode: entry.inode,
+                        read_only: entry.read_only,
+                    },
+                    entry.file_type,
+                );
             }
         }
     }
@@ -308,7 +333,7 @@ pub fn fd_open(task_id: u64, path: &str) -> Option<u64> {
         return None;
     }
     let mut table = FD_TABLE.lock();
-    table.alloc(task_id, node.fs, node.inode, stat.file_type)
+    table.alloc(task_id, node, stat.file_type)
 }
 
 pub fn fd_close(fd: u64) -> bool {
@@ -391,6 +416,12 @@ pub fn fd_write(fd: u64, buf: &[u8]) -> Option<u64> {
             None => return None,
         };
         return pipe.write(buf).map(|n| n as u64);
+    }
+
+    // A descriptor opened under an `MS_RDONLY` mount stays read-only. This is
+    // EROFS, not a silent success.
+    if entry.read_only {
+        return None;
     }
 
     let fs = entry.fs?;
@@ -491,6 +522,8 @@ pub fn fd_dup2(task_id: u64, oldfd: u64, newfd: u64) -> Option<u64> {
             file_type: entry_copy.file_type,
             pipe_id: entry_copy.pipe_id,
             socket_id: entry_copy.socket_id,
+            // dup2 must not launder a read-only descriptor into a writable one.
+            read_only: entry_copy.read_only,
         });
         Some(newfd)
     } else {

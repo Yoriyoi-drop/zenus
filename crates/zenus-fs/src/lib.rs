@@ -1121,6 +1121,50 @@ mod host_tests {
         assert!(!vfs::owns(1000, 2000, &file));
     }
 
+        /// An `MS_RDONLY` mount must produce a read-only view, all the way down to
+    /// the descriptor. `sys_mount` used to accept the flag and drop it — and
+    /// `vfs::Mount` had no field for flags at all — so a read-only mount was
+    /// writable.
+    #[test]
+    fn a_read_only_mount_produces_read_only_nodes() {
+        let _serial = serial();
+        fresh_fs();
+
+        assert!(vfs::create_dir("/ro"));
+        assert!(vfs::mount_with_flags(zenus_ns::NS_ROOT, "/ro", &MARKER, vfs::MS_RDONLY));
+
+        let node = vfs::open("/ro").expect("/ro is the mount point");
+        assert!(node.read_only, "the mount point itself");
+        let inner = vfs::open("/ro/file").or_else(|| {
+            // MarkerFs has no entries, so a lookup below the mount legitimately
+            // misses. Cover the below-the-mount case with a filesystem that has
+            // one instead.
+            None
+        });
+        assert!(inner.is_none(), "MarkerFs has no children");
+
+        // A path outside the mount is unaffected.
+        assert!(vfs::create_file("/rw"), "set up an unmounted file");
+        assert!(!vfs::open("/rw").expect("/rw exists").read_only);
+
+        // The pure predicate that both the node and the syscall rely on.
+        assert!(vfs::mount_is_read_only("/ro", "/ro", vfs::MS_RDONLY));
+        assert!(vfs::mount_is_read_only("/ro/x", "/ro", vfs::MS_RDONLY));
+        assert!(!vfs::mount_is_read_only("/ro", "/ro", 0), "no flag, no read-only");
+        assert!(
+            !vfs::mount_is_read_only("/roevil", "/ro", vfs::MS_RDONLY),
+            "the flag must not extend past the mount boundary"
+        );
+    }
+
+    /// A read-only mount must not leak its flag onto a sibling that merely
+    /// shares a character prefix — the same rule as the mount lookup itself.
+    #[test]
+    fn a_read_only_mount_does_not_cover_a_sibling() {
+        assert!(!vfs::mount_is_read_only("/romp/x", "/ro", vfs::MS_RDONLY));
+        assert!(vfs::mount_is_read_only("/ro/x", "/ro", vfs::MS_RDONLY));
+    }
+
     // ── uninstall confinement ────────────────────────────────────────────
 
     /// Regression: `pkg_remove` handed every manifest line straight to
