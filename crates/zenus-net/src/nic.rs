@@ -102,72 +102,140 @@ pub fn net_poll() {
             v.receive(&mut buf).map(|len| (buf, len))
         } {
             let (buf, len) = &mut pkt;
-            poll_packet(&buf[..*len]);
+            let idx = match virtio_iface_index() {
+                Some(i) => i,
+                None => return,
+            };
+            let iface = get_iface(idx).expect("index came from the table");
+            let mut reply = [0u8; 1514];
+            if let Some(len) = poll_packet(idx, &iface, &buf[..*len], &mut reply) {
+                // Sent with `v` directly, not through `send_frame`: we are
+                // already inside `with_nic`, and going back through it would
+                // take `NET_LOCK` a second time — the same self-deadlock the
+                // RTL8139 `poll()` comment describes.
+                let _ = v.send_raw(&reply[..len]);
+            }
         }
     });
 }
 
-fn poll_packet(data: &[u8]) {
+/// Index of the virtio NIC in the interface table.
+///
+/// Hardcoding `1` was only right when the RTL8139 probe happened first, and
+/// `poll_packet` also passed `1` to `tcp`/`udp::handle_receive` regardless of
+/// which NIC the frame actually arrived on. Both are wrong whenever the other
+/// driver registers first, or when only virtio is present.
+pub fn virtio_iface_index() -> Option<usize> {
+    for i in 0..iface_count() {
+        if let Some(iface) = get_iface(i) {
+            if iface.nic_type == NicType::Virtio {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Handle one received frame. Returns the length of a frame to send back, if
+/// this frame needs an answer.
+fn poll_packet(
+    iface_idx: usize,
+    iface: &NetworkInterface,
+    data: &[u8],
+    reply: &mut [u8; 1514],
+) -> Option<usize> {
     if data.len() < 14 {
-        return;
+        return None;
     }
     let (eth_hdr, eth_payload) = match crate::ethernet::parse(data) {
         Some(h) => h,
-        None => return,
+        None => return None,
     };
     match eth_hdr.ether_type {
         crate::ethernet::ETH_ARP => {
-            crate::arp::handle(&eth_hdr, eth_payload, &[10, 0, 2, 15], &eth_hdr.src_mac);
+            // The reply was computed and then dropped: the return value was
+            // ignored, so a virtio NIC never answered ARP and no outbound IPv4
+            // traffic could leave the machine. `iface.ip`/`iface.mac` are our
+            // own identity — the old code passed a hardcoded address and the
+            // requester's MAC, which would have made the answer sticky
+            // poisoning against ourselves.
+            let arp_reply = crate::arp::handle(&eth_hdr, eth_payload, &iface.ip, &iface.mac)?;
+            if reply.len() < arp_reply.len() {
+                return None;
+            }
+            reply[..arp_reply.len()].copy_from_slice(&arp_reply);
+            Some(arp_reply.len())
         }
         crate::ethernet::ETH_IPV4 => {
-            if let Some((ip_hdr, ip_payload)) = crate::ipv4::parse(eth_payload) {
-                let pkt_proto = match ip_hdr.protocol {
-                    crate::ipv4::PROTO_TCP => crate::firewall::FirewallProto::Tcp,
-                    crate::ipv4::PROTO_UDP => crate::firewall::FirewallProto::Udp,
-                    crate::ipv4::PROTO_ICMP => crate::firewall::FirewallProto::Icmp,
-                    _ => crate::firewall::FirewallProto::Any,
-                };
-                let (src_port, dst_port) = if ip_payload.len() >= 4 {
-                    let sp = u16::from_be_bytes([ip_payload[0], ip_payload[1]]);
-                    let dp = u16::from_be_bytes([ip_payload[2], ip_payload[3]]);
-                    (sp, dp)
-                } else {
-                    (0, 0)
-                };
-                let pkt = crate::firewall::PacketInfo {
-                    src_ip: ip_hdr.src_ip,
-                    dst_ip: ip_hdr.dst_ip,
-                    src_port,
-                    dst_port,
-                    proto: pkt_proto,
-                };
-                if crate::firewall::firewall_check(&pkt) == crate::firewall::FirewallAction::Accept
-                {
-                    let ticks = zenus_arch::interrupts::pit::get_ticks();
-                    let conn_state = crate::firewall::ConnState::Established;
-                    let ct = crate::firewall::ConnTrack {
-                        src_ip: ip_hdr.src_ip,
-                        dst_ip: ip_hdr.dst_ip,
-                        src_port,
-                        dst_port,
-                        proto: pkt_proto,
-                        state: conn_state,
-                        last_seen: ticks,
-                    };
-                    crate::firewall::firewall_track_connection(ct);
-                    match ip_hdr.protocol {
-                        crate::ipv4::PROTO_TCP => {
-                            crate::tcp::handle_receive(1, ip_hdr.src_ip, ip_hdr.dst_ip, ip_payload);
+            let (ip_hdr, ip_payload) = crate::ipv4::parse(eth_payload)?;
+            // Not for us: the RTL8139 path has always checked this and the
+            // virtio path did not, so every host on the segment was being
+            // handed to TCP, UDP and the firewall.
+            if ip_hdr.dst_ip != iface.ip && ip_hdr.dst_ip != [255; 4] {
+                return None;
+            }
+            let pkt_proto = match ip_hdr.protocol {
+                crate::ipv4::PROTO_TCP => crate::firewall::FirewallProto::Tcp,
+                crate::ipv4::PROTO_UDP => crate::firewall::FirewallProto::Udp,
+                crate::ipv4::PROTO_ICMP => crate::firewall::FirewallProto::Icmp,
+                _ => crate::firewall::FirewallProto::Any,
+            };
+            let (src_port, dst_port) = if ip_payload.len() >= 4 {
+                let sp = u16::from_be_bytes([ip_payload[0], ip_payload[1]]);
+                let dp = u16::from_be_bytes([ip_payload[2], ip_payload[3]]);
+                (sp, dp)
+            } else {
+                (0, 0)
+            };
+            let pkt = crate::firewall::PacketInfo {
+                src_ip: ip_hdr.src_ip,
+                dst_ip: ip_hdr.dst_ip,
+                src_port,
+                dst_port,
+                proto: pkt_proto,
+            };
+            if crate::firewall::firewall_check(&pkt) != crate::firewall::FirewallAction::Accept {
+                return None;
+            }
+            let ticks = zenus_arch::interrupts::pit::get_ticks();
+            let ct = crate::firewall::ConnTrack {
+                src_ip: ip_hdr.src_ip,
+                dst_ip: ip_hdr.dst_ip,
+                src_port,
+                dst_port,
+                proto: pkt_proto,
+                state: crate::firewall::ConnState::Established,
+                last_seen: ticks,
+            };
+            crate::firewall::firewall_track_connection(ct);
+            match ip_hdr.protocol {
+                crate::ipv4::PROTO_TCP => {
+                    crate::tcp::handle_receive(iface_idx, ip_hdr.src_ip, ip_hdr.dst_ip, ip_payload);
+                }
+                crate::ipv4::PROTO_UDP => {
+                    crate::udp::handle_receive(iface_idx, ip_hdr.src_ip, ip_hdr.dst_ip, ip_payload);
+                }
+                // The virtio path dropped ICMP entirely, so `ping` never got an
+                // answer on that NIC. The RTL8139 path has always replied.
+                crate::ipv4::PROTO_ICMP => {
+                    if let Some(icmp_reply) = crate::icmp::handle_echo(
+                        &ip_hdr,
+                        ip_payload,
+                        &iface.mac,
+                        &eth_hdr.src_mac,
+                        &iface.ip,
+                    ) {
+                        if reply.len() >= icmp_reply.len() {
+                            reply[..icmp_reply.len()].copy_from_slice(&icmp_reply);
+                            return Some(icmp_reply.len());
                         }
-                        crate::ipv4::PROTO_UDP => {
-                            crate::udp::handle_receive(1, ip_hdr.src_ip, ip_hdr.dst_ip, ip_payload);
-                        }
-                        _ => {}
                     }
                 }
+                _ => {}
             }
+            None
         }
-        _ => {}
+        _ => None,
     }
 }
 

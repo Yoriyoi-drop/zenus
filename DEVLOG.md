@@ -583,14 +583,81 @@ Tiga test diverifikasi gagal sebelum fix (bound dikembalikan ke
 
 ---
 
+### BUG-012 — Virtio NIC tidak pernah menjawab ARP, dan balancerannya akan jadi ARP poisoning
+
+**Status:** sudah di-fix (commit ini)
+**Keparahan:** tinggi — semua IPv4 outbound lewat virtio gagal; kalau balancerannya dikirim, itu poisoning sticky
+**Test:** `crates/zenus-net/src/arp.rs` → `arp::host_tests`
+- `the_reply_carries_our_identity_and_their_addresses`
+- `the_answering_interface_is_chosen_by_address_not_hardcoded`
+- `a_conflicting_mac_is_reported_rather_than_silently_ignored`
+- `the_target_address_needs_a_long_enough_payload`
+
+**Di mana:** `crates/zenus-net/src/nic.rs` — `net_poll`, `poll_packet`;
+`crates/zenus-net/src/arp.rs`
+
+**Yang salah (#12a):** `arp::handle` mengembalikan frame balasan, dan return-nya
+diabaikan:
+
+```rust
+// sebelum
+crate::arp::handle(&eth_hdr, eth_payload, &[10, 0, 2, 15], &eth_hdr.src_mac);
+```
+
+Jadi virtio NIC tidak pernah menjawab ARP. Setiap `send_packet` memanggil
+`arp::resolve`, yang gagal → `None` → `return false`. Tidak ada IPv4 outbound
+yang bisa keluar. Jalur RTL8139 memanggil `send_raw` dengan benar, jadi
+gejalanya hanya pada virtio — yang persis device yang dipakai CI QEMU dan
+container.
+
+**Yang salah (#12b):** dua argumen terakhir salah. `our_mac` diisi
+`eth_hdr.src_mac` — **MAC peminta** — dan IP di-hardcode `10.0.2.15`. Kalau
+balancerannya dikirim, ethereum src-nya adalah MAC peminta, dan `arp_insert`
+menolak mengganti MAC yang sudah ada (`arp.rs`). Balasan pertama yang pernah
+diterima untuk IP kita akan tercatat permanen. Itu ARP poisoning yang sticky,
+dilakukan kernel terhadap dirinya sendiri, dan tidak ada yang bisa
+memperbaikinya karena cache tidak pernah berubah.
+
+**Bug ketiga yang ketemu di file yang sama:** indeks interface di-hardcode `1`.
+`1` hanya benar kalau probe RTL8139 keluar pertama; kalau hanya virtio yang
+ada, `1` adalah loopback. `tcp`/`udp::handle_receive` juga menerima `1`
+terasuk apa pun NIC asalnya.
+
+**Bug keempat:** jalur virtio tidak memeriksa `dst_ip`, dan tidak menangani
+ICMP sama sekali — jadi `ping` tidak pernah dijawab di NIC itu, dan setiap
+host di segmen diteruskan ke firewall/TCP/UDP.
+
+**Fix:**
+
+- `build_reply(our_mac, our_ip, requester_mac, requester_ip)` — helper murni,
+  dipanggil dengan `iface.ip`/`iface.mac`
+- `answering_identity(target_ip, ifaces)` — memilih interface berdasarkan
+  alamat, bukan konstanta
+- `virtio_iface_index()` — mencari `NicType::Virtio` di tabel
+- `poll_packet(iface_idx, iface, data, reply) -> Option<usize>` —
+  mengembalikan frame yang harus dikirim; `net_poll` mengirimkannya dengan
+  `v.send_raw` **langsung**, bukan lewat `send_frame`, karena kita sudah
+  berada di dalam `with_nic` dan keluar lagi darinya akan mengambil
+  `NET_LOCK` dua kali — self-deadlock yang persis sama seperti yang
+  didokumentasikan pada `Rtl8139::poll`
+- `classify_insert` + `arp_insert` sekarang mengembalikan `ArpInsert`, jadi
+  percobaan poisoning bisa dilaporkan (`ARP: x already maps to another MAC`)
+  alih-alih diabaikan diam-diam. `add_static` dipisah: entri statis
+  bersifat otoritatif dan tidak tunduk pada aturan "jangan ganti MAC"
+- `target_address(payload)` — pembacaan offset 24 sekarang punya batas
+  eksplisit
+
+Dua test diverifikasi gagal sebelum fix (`build_reply` dikembalikan ke MAC
+peminta dan `answering_identity` ke `ifaces.first()` → 2 FAILED).
+
+---
+
 ## Kandidat berikutnya (dari bug hunt, belum dikerjakan)
 
 Prioritas menurut dampak × kemudahan diuji:
 
 | # | Lokasi | Bug | Uji |
 |---|---|---|---|
-| 2 | `zenus-net/src/nic.rs:118-121` | Balasan ARP dihitung lalu dibuang (`arp::handle` return-nya diabaikan). Virtio NIC tidak pernah menjawab ARP → semua IPv4 outbound gagal | in-kernel |
-| 3 | `zenus-net/src/nic.rs:120` | `our_mac` yang dikirim adalah MAC peminta, dan IP di-hardcode `10.0.2.15`. Kalau #2 diperbaiki, hasilnya ARP poisoning yang sticky (`arp.rs:64-69` menolak mengubah MAC untuk IP yang sudah ada) | host (arg builder) |
 | 7 | `zenus-syscall/src/syscall.rs:2681` | `8 * nfds` overflow → ukuran tervalidasi 0, ukuran terpakai 2^61 | host (helper) |
 | 8 | `zenus-syscall/src/syscall.rs:2459` | `sys_shmdt` `invlpg` tanpa menulis PTE → frame di-free sementara PTE masih hidup → UAF antar task. `shmat` juga tidak menaikkan `attached` | in-kernel |
 | 9 | `zenus-syscall/src/syscall.rs:1346` | `recv` alokasi `len` yang hanya dibatasi `USER_SPACE_LIMIT` (128 TiB), tidak seperti `sys_read`'s `MAX_READ` | host (helper) |
