@@ -131,7 +131,9 @@ fn find_fadt() -> u64 {
         None => return 0,
     };
     let s = zenus_console::serial::SerialPort::new(0x3F8);
-    s.write_str("[ACPI] RSDP at 0x");
+    // `write_hex` already emits the "0x" prefix, so this must not add another.
+    // It printed "0x0xFFFF8000000F5290" until now.
+    s.write_str("[ACPI] RSDP at ");
     s.write_hex(rsdp);
     s.write_str("\n");
 
@@ -151,7 +153,7 @@ fn find_fadt() -> u64 {
         return 0;
     }
 
-    s.write_str("[ACPI] Root SDT at 0x");
+    s.write_str("[ACPI] Root SDT at ");
     s.write_hex(table_addr);
     s.write_str("\n");
 

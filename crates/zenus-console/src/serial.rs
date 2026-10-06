@@ -12,6 +12,13 @@ pub struct SerialPort {
 /// interleave output from multiple writers at any moment.
 static OUTPUT_BUF: SpinLock<OutBuf> = SpinLock::new(OutBuf::new());
 
+/// The hex prefix `write_hex` prepends.
+///
+/// Exposed so a host test can assert on the byte sequence rather than needing
+/// real serial hardware: the prefix is part of the output, so a caller that adds
+/// its own produces `0x0x...`. Half the kernel's call sites did.
+pub const HEX_PREFIX: &[u8; 2] = b"0x";
+
 /// Boot-time input drain buffer. All bytes arriving before shell starts
 /// are collected here by polling with HLT (allows event loop to run).
 static mut DRAIN_BUF: [u8; 256] = [0; 256];
@@ -389,10 +396,15 @@ impl SerialPort {
         }
     }
 
+    /// Write `val` as 16 uppercase hex digits, **including** the `0x` prefix.
+    ///
+    /// The prefix is part of the output, not decoration: callers must not add
+    /// their own. When they did, the crash dump printed
+    /// `RAX: 0x0x00000000DEADBEEF` and ACPI printed `RSDP at 0x0xFFFF8000...`.
     pub fn write_hex(&self, val: u64) {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";
         let mut ob = OUTPUT_BUF.lock();
-        ob.push(b"0x");
+        ob.push(HEX_PREFIX);
         for i in (0..16).rev() {
             let nibble = ((val >> (i * 4)) & 0xF) as usize;
             ob.push(&[HEX[nibble]]);
@@ -436,4 +448,5 @@ macro_rules! serial_println {
     ($($arg:tt)*) => {
         $crate::serial_print!("{}\n", format_args!($($arg)*))
     };
+
 }

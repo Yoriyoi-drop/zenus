@@ -10,10 +10,13 @@ static HEAP_LOCK: SpinLock<()> = SpinLock::new(());
 /// them buries the dump that actually identifies the corruption.
 static FAULT_REPORTED: AtomicBool = AtomicBool::new(false);
 
-/// The chain `alloc_mut` was walking when it last split a block: (addr, size,
-/// region_end) for each candidate it examined. `alloc_mut` cannot print on the
-/// happy path (the formatter allocates), so it records here and
-/// `report_list_fault` prints it. Static, so recording allocates nothing.
+/// What `alloc_mut` decided on its last successful split, six u64s:
+/// (block, block_size, region_end, prev, aligned_data, requested).
+///
+/// `alloc_mut` cannot print on the happy path — the formatter allocates, and a
+/// probe that allocates replaces a clean free list with a corrupt one — so it
+/// records here and the fault report replays the log. Static and preallocated,
+/// so recording never allocates.
 static SPLIT_TRACE: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 
 fn trace_slot(i: usize) -> &'static AtomicU64 {
@@ -23,8 +26,8 @@ fn trace_slot(i: usize) -> &'static AtomicU64 {
 const HEAP_SIZE: usize = 1024 * 1024 * 8; // 8 MB
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
-const HEADER_SIZE: usize = core::mem::size_of::<BlockHeader>();
-const MIN_BLOCK: usize = 32;
+pub const HEADER_SIZE: usize = core::mem::size_of::<BlockHeader>();
+pub const MIN_BLOCK: usize = 32;
 const MAGIC_FREE: u64 = 0x46524545_424C4F43;
 const MAGIC_USED: u64 = 0x55534544_424C4F43;
 
@@ -42,7 +45,7 @@ const MAGIC_USED: u64 = 0x55534544_424C4F43;
 /// headers and `0xdeadbeefcafebabe` canaries inside the shell's stack, then
 /// jumps to addresses like 0x100000000).
 #[repr(C)]
-struct BlockHeader {
+pub struct BlockHeader {
     magic: u64,
     size: usize,
     next: *mut BlockHeader,
@@ -147,7 +150,7 @@ impl FreeListAllocator {
                 self.report_list_fault(where_, n, cur, "chain longer than 4096 blocks");
                 return;
             }
-            if cur < arena_lo || cur + HEADER_SIZE > arena_hi {
+            if cur < arena_lo || cur.checked_add(HEADER_SIZE).map_or(true, |e| e > arena_hi) {
                 self.report_list_fault(where_, n, cur, "block outside the arena");
                 return;
             }
@@ -160,9 +163,15 @@ impl FreeListAllocator {
             // `region_end=0xffffffff81031CF0` against an arena ending at
             // `0xffffffff81030f70`.
             let size = unsafe { (*(cur as *mut BlockHeader)).size };
-            if cur + HEADER_SIZE + size > arena_hi {
-                self.report_list_fault(where_, n, cur, "block extends past the arena");
-                return;
+            // `checked_add`: a corrupt `size` is exactly what this is looking
+            // for, and `cur + HEADER_SIZE + size` panicking on overflow turns a
+            // reportable heap fault into an unhandled exception.
+            match cur.checked_add(HEADER_SIZE).and_then(|e| e.checked_add(size)) {
+                Some(end) if end <= arena_hi => {}
+                _ => {
+                    self.report_list_fault(where_, n, cur, "block extends past the arena");
+                    return;
+                }
             }
             if cur <= prev {
                 self.report_list_fault(where_, n, cur, "chain is not ascending");
@@ -173,6 +182,15 @@ impl FreeListAllocator {
                 unsafe { ((*b).magic, (*b).canary, (*b).next as usize) };
             if magic != MAGIC_FREE || canary != CANARY_VALUE {
                 self.report_list_fault(where_, n, cur, "bad magic or canary");
+                return;
+            }
+            // `BlockHeader` holds `u64` and a pointer, so every header must be
+            // naturally aligned. A misaligned one is not a style violation: it
+            // is the signature of a header that was placed at a payload's end
+            // instead of at a rounded-up address, which is how BUG-034's chain
+            // got destroyed in the first place.
+            if cur % core::mem::align_of::<BlockHeader>() != 0 {
+                self.report_list_fault(where_, n, cur, "misaligned block header");
                 return;
             }
             prev = cur;
@@ -198,12 +216,24 @@ impl FreeListAllocator {
             zenus_console::error::codes::MEM_PROTECTION,
             "free list broken at block {index} ({addr:#x}) during {where_}: {why}"
         );
-        // 24 qwords from 64 bytes before the header onwards: enough to see the
+        // qwords from 64 bytes before the header onwards: enough to see the
         // neighbouring headers and whatever pattern sits in the payloads.
         let start = addr.saturating_sub(64);
+        let count = 24usize;
         let s = zenus_console::serial::SerialPort::new(0x3F8);
+        s.write_str("\n[HEAP] last alloc_mut split: block=");
+        s.write_hex(trace_slot(0).load(Ordering::Relaxed));
+        s.write_str(" bs=");
+        s.write_hex(trace_slot(1).load(Ordering::Relaxed));
+        s.write_str(" end=");
+        s.write_hex(trace_slot(2).load(Ordering::Relaxed));
+        s.write_str(" data=");
+        s.write_hex(trace_slot(4).load(Ordering::Relaxed));
+        s.write_str(" req=");
+        s.write_hex(trace_slot(5).load(Ordering::Relaxed));
+        s.write_str("\n");
         s.write_str("\n[HEAP] raw qwords around the bad block:\n");
-        for i in 0..24usize {
+        for i in 0..count {
             let a = start + i * 8;
             let v: u64 = unsafe { core::ptr::read_volatile(a as *const u64) };
             s.write_str(if i % 4 == 0 { "\n  " } else { " " });
@@ -211,18 +241,6 @@ impl FreeListAllocator {
             s.write_str(": ");
             s.write_hex(v);
         }
-        s.write_str("\n[HEAP] last alloc_mut split: block={");
-        s.write_hex(trace_slot(0).load(Ordering::Relaxed));
-        s.write_str(" size=");
-        s.write_hex(trace_slot(1).load(Ordering::Relaxed));
-        s.write_str(" region_end=");
-        s.write_hex(trace_slot(2).load(Ordering::Relaxed));
-        s.write_str(" prev=");
-        s.write_hex(trace_slot(3).load(Ordering::Relaxed));
-        s.write_str(" aligned_data=");
-        s.write_hex(trace_slot(4).load(Ordering::Relaxed));
-        s.write_str(" req=");
-        s.write_hex(trace_slot(5).load(Ordering::Relaxed));
         s.write_str("\n[HEAP] chain from head:");
         let mut c = self.free_head.load(Ordering::Acquire);
         let mut k = 0usize;
@@ -254,69 +272,126 @@ impl FreeListAllocator {
 
         while curr != 0 {
             let block = curr as *mut BlockHeader;
-
-
             unsafe {
                 let block_size = (*block).size;
-                let region_start = curr + HEADER_SIZE;
+                // This block owns [curr, curr + HEADER_SIZE + block_size).
                 let region_end = curr + HEADER_SIZE + block_size;
-                let aligned_data = (region_start + align - 1) & !(align - 1);
 
-                if aligned_data + size <= region_end {
-                    // Payload goes at `aligned_data`, header immediately
-                    // before it — no padding bookkeeping needed.
-                    let used_hdr = (aligned_data - HEADER_SIZE) as *mut BlockHeader;
-                    // Bytes consumed from the *region start* (used payload +
-                    // its header + alignment gap), and what is left over.
-                    let consumed = (aligned_data + size - curr) as isize;
-                    let remaining = block_size as isize - consumed;
+                // `used_hdr` is the header of the block we are about to carve
+                // out, and it must be **aligned** as well as inside the region:
+                // `BlockHeader` holds `u64` and pointers, so a header at a
+                // misaligned address is miscompiled at best and faulting on
+                // some targets. It sits immediately before the payload, so
+                // aligning the payload aligns the header with it.
+                //
+                // Deriving both from one value is the whole point. They used to
+                // be derived separately — payload aligned up from
+                // `curr + HEADER_SIZE`, leftover header at the payload's *end* —
+                // and every `size` that was not a multiple of `align` produced
+                // a leftover header at an unaligned address. The *next*
+                // allocation from that leftover then computed
+                // `used_hdr = round_up(new_block + HEADER_SIZE, align)
+                // - HEADER_SIZE`, which is greater than `new_block`, i.e. it
+                // landed **inside the leftover's own header** and overwrote its
+                // `next` and `canary` with the USED header's fields. That is
+                // BUG-034: the free list's chain pointer becomes a small
+                // integer, the walk stops, and the arena is left with hundreds
+                // of tiny unreachable blocks.
+                //
+                // So: place the used header at an aligned address, put the
+                // payload after it, and start the leftover at an aligned
+                // address too. All three come out of one round-up.
+                let used_hdr = (curr + align - 1) & !(align - 1);
+                let aligned_data = used_hdr + HEADER_SIZE;
+                let leftover = (aligned_data + size + align - 1) & !(align - 1);
 
-                    if remaining >= (HEADER_SIZE + MIN_BLOCK) as isize {
-                        let new_block = (aligned_data + size) as *mut BlockHeader;
-                        ptr::write(
-                            new_block,
-                            BlockHeader {
-                                magic: MAGIC_FREE,
-                                size: (remaining as usize) - HEADER_SIZE,
-                                next: (*block).next,
-                                canary: CANARY_VALUE,
-                            },
-                        );
+                // Does the request even fit in this block? Rounding `used_hdr`
+                // up can push `aligned_data` past `region_start`, so this has to
+                // be checked rather than assumed. When it does not fit, leave the
+                // block alone and try the next one.
+                if aligned_data + size > region_end {
+                    prev = curr;
+                    curr = (*block).next as usize;
+                    continue;
+                }
 
-                        if prev == 0 {
-                            self.free_head.store(new_block as usize, Ordering::Release);
-                        } else {
-                            (*(prev as *mut BlockHeader)).next = new_block;
-                        }
+                // The leftover needs its own header plus a usable payload.
+                // Invariant, asserted rather than assumed: a correct split
+                // leaves the leftover's *own* extent inside the block it came
+                // from, and the leftover strictly after the payload. Both used
+                // to be false and neither was checked, which is how BUG-034
+                // produced free blocks that claimed memory past the arena.
+                debug_assert!(used_hdr >= curr, "used header before its block");
+                debug_assert!(aligned_data >= used_hdr + HEADER_SIZE, "payload overlaps header");
+                debug_assert!(
+                    leftover >= aligned_data + size,
+                    "leftover overlaps the payload"
+                );
+
+                if leftover + HEADER_SIZE + MIN_BLOCK > region_end {
+                    // Not enough room to leave a valid free block behind.
+                    if prev == 0 {
+                        self.free_head.store((*block).next as usize, Ordering::Release);
                     } else {
-                        if prev == 0 {
-                            self.free_head
-                                .store((*block).next as usize, Ordering::Release);
-                        } else {
-                            (*(prev as *mut BlockHeader)).next = (*block).next;
-                        }
+                        (*(prev as *mut BlockHeader)).next = (*block).next;
                     }
-
-                    // `size` is the payload size: dealloc derives
-                    // block_end = used_hdr + HEADER + size == aligned_data + size.
+                } else {
+                    // `region_end - leftover` bytes remain, minus this header.
+                    // Deriving the size from the two endpoints is what keeps
+                    // `block_end` in `dealloc_mut` (`used_hdr + H + size`)
+                    // equal to `region_end`: it used to subtract `HEADER_SIZE`
+                    // a second time here, which cost 32 bytes per split and
+                    // meant adjacent free blocks never coalesced.
+                    let leftover_size = region_end - leftover - HEADER_SIZE;
+                    let new_block = leftover as *mut BlockHeader;
                     ptr::write(
-                        used_hdr,
+                        new_block,
                         BlockHeader {
-                            magic: MAGIC_USED,
-                            size,
-                            next: ptr::null_mut(),
+                            magic: MAGIC_FREE,
+                            size: leftover_size,
+                            next: (*block).next,
                             canary: CANARY_VALUE,
                         },
                     );
 
-                    self.record_split_trace(prev, curr, aligned_data, size, block_size, region_end);
-                    return aligned_data as *mut u8;
+                    if prev == 0 {
+                        self.free_head.store(leftover, Ordering::Release);
+                    } else {
+                        (*(prev as *mut BlockHeader)).next = new_block;
+                    }
                 }
 
-                prev = curr;
-                curr = (*block).next as usize;
+                // The **extent** stored in the header is `size` rounded up to
+                // `align`, not the caller's exact length. `dealloc_mut` ignores
+                // its `Layout` and derives the extent from this field, so this
+                // is the only place the rounding can happen — and it has to
+                // happen here, because `used_hdr + HEADER_SIZE + extent` is
+                // exactly `leftover`, and `leftover` is aligned by
+                // construction. Storing the caller's exact length instead put
+                // the next header at an unaligned address, and every block
+                // after it inherited the misalignment.
+                //
+                // The payload the caller may touch is still `size` bytes; the
+                // extra is a gap no block can use. See the `BlockHeader` docs.
+                let extent = (size + align - 1) & !(align - 1);
+                ptr::write(
+                    used_hdr as *mut BlockHeader,
+                    BlockHeader {
+                        magic: MAGIC_USED,
+                        size: extent,
+                        next: ptr::null_mut(),
+                        canary: CANARY_VALUE,
+                    },
+                );
+
+                self.record_split_trace(prev, curr, aligned_data, size, block_size, region_end);
+                return aligned_data as *mut u8;
             }
+
+            prev = curr;
+            curr = unsafe { (*block).next as usize };
         }
+
         zenus_console::kerror_code!(
             zenus_console::error::codes::MEM_ALLOC_FAILED,
             "Heap exhausted! free_head={:#x}, size={}",

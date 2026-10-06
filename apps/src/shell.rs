@@ -1194,7 +1194,7 @@ impl Shell {
         if args.has_flag("--ipc") || args.has_flag("ipc") {
             flags |= zenus_ns::CLONE_NEWIPC;
         }
-        w.write_str("Cloning with flags: 0x");
+        w.write_str("Cloning with flags: ");
         w.write_hex(flags);
         w.write_str("\r\n");
         let _ = zenus_sched::scheduler::clone_task(flags, 0, 65536, 0, 0, 0, 0x6000_0000_0000);

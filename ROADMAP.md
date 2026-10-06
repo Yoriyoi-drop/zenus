@@ -45,7 +45,7 @@ RTL8139, virtio-net.
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 206 host unit tests (`make test-host`), 25 in-kernel tests
+**Testing** — 208 host unit tests (`make test-host`), 25 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), CI running both.
 
 ## Partially done
@@ -62,11 +62,14 @@ watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
 ## Known broken
 
-- **One user program per boot.** Run a program from the shell and it exits
-  cleanly, but the heap's free list is corrupt afterwards and no second program
-  can start. Narrowed to the 64 KiB `alloc_stack` inside `create_user_task`; the
-  writer is not yet identified. `DEVLOG.md` BUG-034 has the evidence and what is
-  already ruled out.
+- **`meminfo` reports "Used: 0 frames".** `frame_allocator::free_frame` refuses
+  any frame that falls inside a known region, and every frame it handed out did
+  fall inside one, so it never recycles anything and `used_memory` stays at 0.
+  Not a crash, but the diagnostic lies.
+- **`reap_terminated_stacks()` is unreachable**, and `TERMINATED_STACKS` is only
+  filled by `task_exit()`, which no syscall reaches. `kill_task` and `reap_task`
+  each free task stacks on their own path, with nothing keeping those paths
+  consistent.
 
 ## Not real yet
 

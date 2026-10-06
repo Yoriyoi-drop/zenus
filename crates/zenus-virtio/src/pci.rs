@@ -181,7 +181,7 @@ pub unsafe fn init_device(dev: &PciDevice) -> Option<VirtioPciTransport> {
     s.write_hex(dev.device as u64);
     s.write_str(".");
     s.write_hex(dev.function as u64);
-    s.write_str(" (0x");
+    s.write_str(" (");
     s.write_hex(dev.device_id as u64);
     s.write_str(")\n");
 

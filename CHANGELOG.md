@@ -49,6 +49,28 @@
   `qemu64` model has no SMEP and no SMAP, so the in-kernel suite was silently
   not testing them at all.
 
+### Fixed
+- **BUG-035: the heap corrupted itself after a single `run`.** `size` in a block
+  header is a payload length, but every header must be 16-byte aligned — and
+  with the header immediately before its payload, those two only hold if each
+  block's *extent* is a multiple of the alignment. A 3-byte block does not give
+  that, and 3-byte blocks are routine: `devfs::readdir` allocates a `String` per
+  entry name, and `run` allocates an 8616-byte buffer for an ELF. The leftover
+  header was placed at the payload's *end*, so the next allocation from it
+  rounded its own header up past it and overwrote that block's `next` and
+  `canary`. The free list's chain became a small integer, the walk stopped, and
+  no further program could start. All three addresses now come from one
+  round-up, and the header records the payload length rounded up. Verified:
+  two `run`s plus `meminfo` reports 8063 KB free.
+- Every hex dump printed `0x0x...`. `write_hex` emits its own prefix and 26 call
+  sites added another, across the crash dump (all 19 registers), `acpi`, `virtio`
+  and the shell.
+- `make iso` and `make test-iso` shared one `libzenus.a`, so after a
+  `make test-iso` the next `make iso` linked the *testing* archive and the ISO
+  booted straight into the in-kernel suite instead of the shell. Each build now
+  has its own `CARGO_TARGET_DIR`, the archive steps are phony, and the ISO rules
+  copy their own linked kernel in rather than re-running the linker.
+
 ### Observability
 - The heap allocator verifies its own free list on every `alloc` and `dealloc`
   and names the first thing wrong: bad magic or canary, a non-ascending chain, a

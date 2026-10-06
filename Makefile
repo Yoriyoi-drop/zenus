@@ -25,11 +25,41 @@ all: $(KERNEL)
 build: $(KERNEL)
 
 # Build kernel staticlib
-target/$(TARGET)/$(PROFILE_DIR)/libzenus.a: apps/src/lib.rs $(shell find crates -name '*.rs')
+# The `testing` build gets its own cargo target directory. They used to share
+# `target/`, and cargo happily reused one `libzenus.a` for both: after a
+# `make test-iso`, the next `make iso` linked the *testing* archive, so the ISO
+# booted straight into the in-kernel suite and the shell never appeared. The
+# two kernels differ only by a feature flag, so nothing forced a rebuild and
+# nothing warned.
+# `$(KERNEL_SOURCES)` is a phony target so the archive is rebuilt on every `make
+# build`. Cargo's own freshness check is not enough: the testing and non-testing
+# kernels differ by one feature flag, and after a `make test-iso` cargo would
+# hand back the *testing* `libzenus.a` for a plain `cargo build` and consider it
+# fresh. The result was an ISO that booted straight into the in-kernel suite
+# instead of the shell, with nothing in the output to suggest why.
+#
+# Both builds use a separate `CARGO_TARGET_DIR` for the same reason, so neither
+# can overwrite the other's artefacts at all.
+KERNEL_SOURCES := apps/src/lib.rs apps/src/linker.ld $(shell find crates -name '*.rs')
+
+.PHONY: kernel-archive
+kernel-archive:
 	$(CARGO) build --package zenus --target $(TARGET) $(CARGO_FLAGS)
 
+TEST_TARGET_DIR := $(BUILD_DIR)/target-testing
+.PHONY: test-kernel-archive
+test-kernel-archive:
+	CARGO_TARGET_DIR=$(TEST_TARGET_DIR) \
+		$(CARGO) build --package zenus --target $(TARGET) --features testing
+
+target/$(TARGET)/$(PROFILE_DIR)/libzenus.a: kernel-archive
+	@test -f $@
+
+$(TEST_TARGET_DIR)/$(TARGET)/debug/libzenus.a: test-kernel-archive
+	@test -f $@
+
 # Link kernel with custom linker script
-$(KERNEL): target/$(TARGET)/$(PROFILE_DIR)/libzenus.a apps/src/linker.ld
+$(KERNEL): $(KERNEL_SOURCES) target/$(TARGET)/$(PROFILE_DIR)/libzenus.a
 	mkdir -p $(BUILD_DIR)
 	$(LD) -T apps/src/linker.ld -o $@ \
 		--nmagic -n --gc-sections \
@@ -48,14 +78,22 @@ $(INITRD): mkinitrd.sh $(addprefix $(USERSPACE_BUILD)/,$(USERSPACE_PROGS))
 	bash mkinitrd.sh $(INITRD)
 
 # ISO image (BIOS + UEFI) — ISO depends on kernel + initrd
+# Copy the already-linked kernel in, rather than running the linker again against
+# the archive. The two used to be separate link steps over the same input, so
+# `$(KERNEL)` could be the testing build while the ISO was linked from the
+# non-testing archive (or the reverse) with no error anywhere: the ISO booted
+# straight into the in-kernel suite instead of the shell.
+#
+# `$(ISO_DIR)` is shared with the `test-iso` rule below, and both rules start
+# with `rm -rf $(ISO_DIR)`. That is fine for the output file — each writes its
+# own — but it means `iso_root` only ever holds whichever ISO was built last, so
+# neither ISO may be considered up to date based on it. Both are repopulated from
+# their own kernel here and in `test-iso`, which is why each rule copies its
+# kernel in rather than relying on a shared one.
 $(ISO): $(KERNEL) $(INITRD)
 	rm -rf $(ISO_DIR)
 	mkdir -p $(ISO_DIR)/boot/limine
-	$(LD) --strip-debug --gc-sections -T apps/src/linker.ld -o $(ISO_DIR)/boot/zenus \
-		--nmagic -n \
-		--whole-archive \
-		target/$(TARGET)/$(PROFILE_DIR)/libzenus.a \
-		--no-whole-archive
+	cp $(KERNEL) $(ISO_DIR)/boot/zenus
 	cp $(INITRD) $(ISO_DIR)/boot/
 	cp limine.conf $(ISO_DIR)/boot/limine/
 	cp $(LIMINE_DIR)/limine-bios.sys $(ISO_DIR)/boot/limine/
@@ -144,13 +182,13 @@ bochs: $(ISO)
 	bochs -f bochsrc -q
 
 # Test build — enables testing feature for unit tests
-$(BUILD_DIR)/zenus-test: apps/src/lib.rs $(shell find crates -name '*.rs') apps/src/linker.ld
-	$(CARGO) build --package zenus --target $(TARGET) --features testing
+$(BUILD_DIR)/zenus-test: $(KERNEL_SOURCES) \
+                       $(TEST_TARGET_DIR)/$(TARGET)/debug/libzenus.a
 	mkdir -p $(BUILD_DIR)
 	$(LD) -T apps/src/linker.ld -o $@ \
 		--nmagic -n --gc-sections \
 		--whole-archive \
-		target/$(TARGET)/debug/libzenus.a \
+		$(TEST_TARGET_DIR)/$(TARGET)/debug/libzenus.a \
 		--no-whole-archive
 
 test-iso: $(BUILD_DIR)/zenus-test $(INITRD)

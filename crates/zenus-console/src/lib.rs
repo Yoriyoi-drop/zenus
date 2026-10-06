@@ -20,6 +20,24 @@ pub mod vga;
 /// framebuffer stays out — those fault in ring 3.
 #[cfg(test)]
 mod host_tests {
+    /// `write_hex` prepends `0x`, and a caller that adds its own prints
+    /// `0x0x...`. That was not hypothetical: the crash dump printed
+    /// `RAX: 0x0x00000000DEADBEEF` for all 19 registers, `acpi` printed
+    /// `RSDP at 0x0xFFFF8000000F5290`, and virtio printed `(0x0x1000ed000)`.
+    ///
+    /// The prefix is part of the output, so the contract is one-sided: this test
+    /// cannot see call sites (they are in other crates), but it pins the thing
+    /// that made them wrong, and the constant is public so a caller can write
+    /// `write_str(label)` rather than `write_str(label); write_hex(v)`.
+    #[test]
+    fn hex_output_carries_its_own_prefix() {
+        assert_eq!(crate::serial::HEX_PREFIX, b"0x");
+        // Not "0X", and not empty: a diagnostic dump is read by humans and by
+        // grep, so the spelling has to be the conventional one.
+        assert_eq!(crate::serial::HEX_PREFIX[0], b'0');
+        assert_eq!(crate::serial::HEX_PREFIX[1], b'x');
+    }
+
     use crate::error::{self, ErrorModule};
     use crate::log::{LogBuf, LogLevel};
     use core::fmt::Write;

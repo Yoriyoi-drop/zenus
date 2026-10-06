@@ -49,6 +49,55 @@ mod host_tests {
         assert_eq!(512 * 8 * 8, page_table_bytes() * 8);
     }
 
+    /// The regression `BlockHeader::size` rounding exists for.
+    ///
+    /// Two invariants pull against each other in the heap allocator:
+    /// `dealloc` derives a block's extent as `block + HEADER_SIZE + size`, so
+    /// `size` is a payload length; and every header must be naturally aligned or
+    /// its `u64` fields are read misaligned. A header sits immediately before
+    /// its payload, so those two only coexist if each block's *extent* is a
+    /// multiple of the alignment. A 3-byte block does not give that — its
+    /// successor's header would land at `block + 35`.
+    ///
+    /// `devfs::readdir` allocates a `String` per entry name, so 3-byte blocks
+    /// are routine, and `run` allocates an 8616-byte buffer for an ELF. Both
+    /// used to leave the next header misaligned, and the corruption propagated
+    /// from there: the next allocation's `used_hdr` was rounded up *past* the
+    /// preceding header and overwrote its `next` and `canary`, so the free list
+    /// stopped describing the heap and a single `run` wedged the allocator.
+    ///
+    /// The test pins the arithmetic, not the call site — it cannot catch a
+    /// reintroduced `size` at the wrong place, but it does pin the one fact the
+    /// layout rests on.
+    #[test]
+    fn a_block_extent_is_a_multiple_of_the_header_alignment() {
+        use crate::allocator::{HEADER_SIZE, MIN_BLOCK};
+        use core::mem::align_of;
+
+        let align = align_of::<crate::allocator::BlockHeader>();
+        assert_eq!(HEADER_SIZE % align, 0, "header size must be a multiple of its alignment");
+
+        // Round a payload length the way `alloc_mut` does, and check the block
+        // that follows is still aligned for every length that matters.
+        for size in [1usize, 2, 3, 4, 5, 7, 8, 15, 16, 17, 63, 64, 0x1000, 8616, 65536] {
+            let extent = (size + align - 1) & !(align - 1);
+            assert_eq!(extent % align, 0, "size {size} rounded to {extent:#x}");
+            assert!(extent >= size, "rounding must not shrink the payload");
+            assert!(extent - size < align, "rounding must waste less than `align`");
+
+            // The successor header sits at block + HEADER + extent.
+            let successor = HEADER_SIZE + extent;
+            assert_eq!(
+                successor % align,
+                0,
+                "size {size}: successor header would be at +{successor:#x}, misaligned"
+            );
+        }
+
+        // And a split still has to leave a usable leftover behind.
+        assert!(MIN_BLOCK >= 32);
+    }
+
     /// `unmap_page_raw_keep_frame` walks four levels by index. The indices come
     /// from four shifts, and a wrong shift is invisible until it reads the wrong
     /// table — which on a live system means unmapping somebody else's page.

@@ -2199,37 +2199,180 @@ This did not fire in the run above, because the faulting walk ended on a zeroed
 header before reaching the inflated block. Both faults are present; the zeroed
 header is found first.
 
-### Where this leaves BUG-034
+### BUG-034 is closed: block extents were not a multiple of the header alignment
 
-Two distinct problems in one symptom, both now characterised:
+Two invariants in `alloc_mut` pull against each other, and the code satisfied
+neither:
 
-1. **A zeroed 32-byte header** terminating the free list, found first, so it is
-   what every report shows. Its neighbours are intact.
-2. **A block whose `size` is inflated past the arena end.** Found by the split
-   trace, not by the list walk. How a `size` grows is the open question —
-   `dealloc_mut`'s coalescing writes `(*p).size += HEADER_SIZE + block_size`
-   and `(*n).size` into a neighbour, and a coalesce that runs against a header
-   that is not really a free block would inflate exactly like this.
+* `dealloc_mut` derives a block's extent as `block + HEADER_SIZE + size`, so
+  `size` is a **payload length**.
+* Every header must be `align_of::<BlockHeader>()`-aligned, or its `u64` fields
+  are read misaligned.
 
-Next step, and it is a specific one: `dealloc_mut`'s coalescing is the only
-place `size` is ever increased, so log every coalesce (prev, block, next, and
-the three sizes before and after) into the same static trace and read back which
-coalesce inflated the block. That is a bounded, purely local question, and it
-does not need a write watchpoint.
+A header sits immediately before its payload, so those two only coexist if each
+block's *extent* is a multiple of the alignment. A 3-byte block does not give
+that: its successor's header would land at `block + 35`.
+
+This is not a corner case. `devfs::readdir` allocates a `String` per entry name,
+so 3-byte blocks are routine, and the shell's `run` allocates an 8616-byte
+buffer for an ELF file. Neither length is a multiple of 16.
+
+The old split arithmetic made it worse in two ways:
+
+```rust
+let new_block = aligned_data + size;                      // payload end
+BlockHeader { size: (remaining as usize) - HEADER_SIZE,   // one header too few
+```
+
+The leftover header went at the **payload's end** rather than at a rounded-up
+address, so any `size` that was not a multiple of 16 left a header at an
+unaligned address. The *next* allocation from that leftover computed
+`used_hdr = round_up(new_block + HEADER_SIZE, align) - HEADER_SIZE`, which is
+**greater than `new_block`** — it landed *inside the leftover's own header* and
+overwrote its `next` and `canary` with the USED header's fields. The free list's
+chain pointer became a small integer, the walk stopped there, and the arena was
+left with hundreds of tiny unreachable blocks. That is the `0x30`-stride
+interleaving the raw dump showed, and it is why a single `run` wedged the heap.
+
+The fix derives all three addresses from one round-up, and stores the USED
+block's **extent** (payload rounded up) rather than the caller's exact length:
+
+```rust
+let used_hdr  = (curr + align - 1) & !(align - 1);   // aligned header
+let aligned_data = used_hdr + HEADER_SIZE;          // payload follows it
+let leftover = (aligned_data + size + align - 1) & !(align - 1);
+let extent   = (size + align - 1) & !(align - 1);   // what the header records
+```
+
+`dealloc_mut` ignores its `Layout` and reads the extent back from the header, so
+this is the only place the rounding can happen — and it has to happen here,
+because `used_hdr + HEADER_SIZE + extent` is exactly `leftover`.
+
+The cost is up to `align - 1` unusable bytes per block. With 16-byte alignment
+that is under 1.5 % of a 64 KiB task stack, against 8 MiB of arena.
+
+### Verified
+
+* `run /initrd/bin/hello`, then `run /initrd/bin/args a b c`, then `meminfo`:
+  both programs run, `args` prints the right `argc`/`argv`, and the heap reports
+  **8063 KB free** afterwards — no corruption, no exhaustion.
+* `make test-host` 208 passed, `make test` 25/25, `make fuzz-smoke` 2000 cases
+  with `crashes=0`.
+
+### Two bugs in the diagnostic itself, and one in the build
+
+Worth recording, because all three cost real time and all three would have
+produced confident wrong answers:
+
+* The `size >= MIN_BLOCK` check added last round was a **false positive** — only
+  the *remainder* of a split has to reach `MIN_BLOCK`, and the block handed out
+  keeps the caller's size, so a freed 3-byte `String` is a legal 3-byte free
+  block. It reported a healthy list as broken hundreds of times per `run`.
+* The extent check `cur + HEADER_SIZE + size > arena_hi` **panicked on overflow**
+  when `size` was corrupt — which is exactly the condition being tested for, so
+  a reportable heap fault became an unhandled exception. Now `checked_add`.
+* `make iso` and `make test-iso` **shared one `libzenus.a`**, so after a
+  `make test-iso` the next `make iso` linked the *testing* archive: the ISO
+  booted straight into the in-kernel suite and the shell never appeared, with
+  nothing in the output to explain it. Both builds now use separate
+  `CARGO_TARGET_DIR`s, the archive step is phony so cargo cannot hand back the
+  wrong one, and the ISO rules copy their own already-linked kernel in instead
+  of running the linker a second time against the archive.
 
 ---
 
 ## Kandidat berikutnya
 
-Semua kandidat dari daftar `bug hunt` sudah dikerjakan. Yang tersisa bukan bug
-yang tercatat, tapi yang **tidak** bisa diselesaikan di host:
+Semua target di `ROADMAP.md` yang terbuka sudah tertutup di sesi ini:
 
-| Item | Kenapa belum selesai |
+| | Status |
 |---|---|
-| SMAP/SMEP | **SELESAI** — lihat BUG-033. Root cause-nya bukan PML4 U/S; ada tiga bug terpisah (`stac`/`clac` `nomem`, `sys_write` tanpa `stac`, page-fault handler yang fault dirinya sendiri). Sekarang aktif dan `run /initrd/bin/hello` lulus. |
-| Heap free list korup setelah satu user task | **BUG-034, belum selesai, tapi oracle baru.** Dua masalah dalam satu gejala: (a) header 32-byte yang di-zero mengakhiri free list — ini yang selalu ditemukan pertama; (b) sebuah block yang `size`-nya **melewati ujung arena** (`region_end=0x81031CF0` vs arena berakhir `0x81030F70`), ditemukan lewat split-trace, bukan list walk. Watchpoint hardware sudah dicoba dan **tidak berfungsi di QEMU 8.2.2 TCG** (0 dari 6 encoding DR7 menghasilkan `#DB`), jadi jangan coba lagi. Langkah berikutnya sudah spesifik: `dealloc_mut` coalescing adalah satu-satunya tempat `size` pernah bertambah, jadi log setiap coalesce. Detail di BUG-034 |
-| `mapped_at` satu alamat per segmen SHM | `shmat` kedua untuk segmen yang sama menimpa yang pertama, jadi pemetaan pertama tidak bisa di-detach. Perbaikannya butuh daftar attachment per segmen, bukan skalar — perubahan struktural, di luar-fix yang bisa diverifikasi |
-| SHM end-to-end | Butuh page table sungguhan. Yang bisa diuji di host (bagian indeks) sudah ada test-nya |
-| `io_scheduler::io_stats()` | Mengembalikan total + dua nol hardcoded (`ARCHITECTURE.md`) |
-| lockdep | Graf dan pengecekan reverse-edge sudah ada, tapi tidak ada jalur produksi yang mendaftarkan kelas lock |
-| CI lint | `cargo clippy -- -D warnings` sudah gagal di HEAD (288 warning), bukan karena perubahan di sini |
+| SMAP/SMEP | **SELESAI** — BUG-033 |
+| Heap free list korup setelah satu user task | **SELESAI** — BUG-034 |
+| `make iso` dan `make test-iso` berbagi satu archive | **SELESAI** — BUG-034 |
+| Prefix `0x0x` di semua dump hex | **SELESAI** — BUG-035 |
+
+Sisa `ROADMAP.md`, urut dari "Next, in order":
+
+1. **Tutup parser holes** — fuzz semua decoder. Tiga target fuzz hijau
+   (`fuzz-smoke` 2000 kasus `crashes=0`), tapi `fuzz-coverage` masih perlu
+   dijalankan penuh untuk membesarkan corpus yang lebih besar.
+2. **cgroup enforcement** nyata — minimal `memory` dan `pids`.
+3. **KPTI**, supaya user CR3 tidak memetakan kernel half.
+4. **Driver model** supaya storage tidak PIO-only: AHCI dulu.
+5. **Capabilities dan `prctl` yang sungguhan.**
+6. **Boot test di CI**: smoke test QEMU yang boot sampai shell prompt.
+
+Yang **tidak** saya klaim selesai:
+
+* `reap_terminated_stacks()` masih tidak dipanggil dari mana pun, dan
+  `TERMINATED_STACKS` hanya diisi oleh `task_exit()`, yang tidak dipakai syscall
+  mana pun (`sys_exit` memakai `exit_current_task`). Jadi tidak ada leak, tapi
+  jalurnya mati — dan `kill_task` serta `reap_task` masing-masing punya jalur free stack sendiri
+  yang tidak saling dikunci. Itu laporan untuk BUG berikutnya, bukan fix.
+* `frame_allocator::free_frame` **tidak pernah recycle frame**: ia menolak
+  setiap frame yang jatuh di dalam sebuah region, dan semua frame yang
+  dialokasikan memang di dalam region. Jadi `used_memory` juga selalu 0, dan
+  `meminfo` melaporkan "Used: 0 frames" sepanjang boot. Ini bukan crash, tapi
+  `meminfo` berbohong.
+* Watchpoint hardware tidak bisa dipakai di QEMU 8.2.2 TCG (BUG-034). Kalau
+  ada yang butuh "siapa menulis byte ini", jawabannya bukan DR0.
+* `ROADMAP.md` masih menyebut 199 host test; sekarang 208.
+
+---
+
+## BUG-035 — every hex dump printed `0x0x`, and the Makefile shared one archive
+
+Two small things that both had outsized effects on how the rest of the work
+looked.
+
+### `0x0x`
+
+`SerialPort::write_hex` prepends its own `0x`, and call sites added a second:
+
+```
+[ACPI] RSDP at 0x0xFFFF8000000F5290
+[ACPI] Root SDT at 0x0x000000007FFE1D69
+```
+
+The crash dump did it for all 19 registers (`RAX: 0x0x00000000DEADBEEF`),
+`virtio` for the device id, the shell for `clone` flags. 26 sites across four
+crates. `write_hex` is the only function that emits hex, so the prefix belongs
+to it and callers must not add one; the sites are now `write_str(label)` followed
+by `write_hex(value)`, and `HEX_PREFIX` is public so the contract is nameable
+rather than folklore. `hex_output_carries_its_own_prefix` pins it.
+
+### `make iso` built the testing kernel
+
+The two kernels differ by one cargo feature, but shared `target/` and therefore
+one `libzenus.a`. After a `make test-iso`, a plain `cargo build` would hand back
+the **testing** archive and cargo considered it fresh — so `make iso` linked that
+and the ISO booted straight into the in-kernel suite. The shell never appeared,
+and nothing in the output said why:
+
+```
+=== Results: 25 passed, 0 failed, 25 total ===
+[OK] All tests passed
+```
+
+with no prompt, no `Shell PID`, and no `[TEST]` line the reader expected. That
+cost real time during BUG-034: several runs "passed" against a kernel that was
+not the one under test.
+
+Three changes:
+
+* Each build gets its own `CARGO_TARGET_DIR` (`build/target-testing` for the
+  testing kernel), so neither can overwrite the other's artefacts.
+* The archive steps are `phony`, so cargo is always invoked and cannot report a
+  stale archive as up to date.
+* The ISO rules copy their own already-linked kernel in rather than running
+  `ld.lld` a second time over the archive — which had also been a way for
+  `$(KERNEL)` and the ISO to disagree.
+
+Verified by building both, in both orders, and checking the symbols:
+
+```
+iso:       test_runner=0 shell=209
+test-iso:  test_runner=3 shell=0
+iso again: test_runner=0 shell=209
+```
