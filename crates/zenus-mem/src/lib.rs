@@ -4,10 +4,14 @@
 // The host test harness needs std; the bare-metal build must not pull it in.
 #[cfg(test)]
 extern crate std;
+#[cfg(test)]
+extern crate alloc;
 
 pub mod allocator;
 pub mod frame_allocator;
 pub mod paging;
+#[cfg(test)]
+mod reserve_tests;
 pub mod vma;
 pub use vma::VmaTable;
 

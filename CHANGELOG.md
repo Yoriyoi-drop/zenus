@@ -50,6 +50,29 @@
   not testing them at all.
 
 ### Fixed
+- **A sub-page `reserve_region` reserved nothing.** It split the region list on
+  exact byte boundaries, so `[0x1000, 0x5000)` minus `[0x1800, 0x2000)` became
+  `[0x1000, 0x1800)` and `[0x2000, 0x5000)`. `alloc_frame` rounds a region's base
+  *up*, so it went on serving page `0x1000` — a page the reservation overlapped.
+  The reservation now rounds both ends out to page boundaries, which is the safe
+  direction: it reserves at least what was asked for. Every caller today is
+  already page aligned, so this changes nothing for them and closes the hole for
+  anything that is not.
+- **`reserve_region` could spin forever.** The branch that swallows a whole region
+  `continue`s without advancing its index, relying on `region_count` having gone
+  down. Lose that decrement and the loop never terminates — a hang rather than a
+  wrong answer, which is the worst failure mode a test can have. It is now pinned
+  by a test that turns the hang into a failure.
+- **`reserve_region` has tests at all.** It reshapes the region list four different
+  ways and runs during initialisation, before there is a shell, where a mistake
+  has neither a test behind it nor a log anyone reads. Six of the seven mutations
+  that went unnoticed during the three reverted attempts at the allocator's
+  second pass (BUG-038) were mutations of this function, and the function was
+  untested. Ten of thirteen mutations are now caught; the three that are not are
+  unreachable through the public API and are listed, with the reason, in
+  `crates/zenus-mem/src/reserve_tests.rs`.
+
+### Fixed
 - **BUG-035: the heap corrupted itself after a single `run`.** `size` in a block
   header is a payload length, but every header must be 16-byte aligned — and
   with the header immediately before its payload, those two only hold if each

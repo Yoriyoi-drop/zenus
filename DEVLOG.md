@@ -2750,13 +2750,52 @@ caught. That is the standard, and this does not meet it.
 
 ### What would actually settle it
 
-Not more mutation rounds. `reserve_region` needs its own table-driven test over
-the four reshape cases — cover, overlap-at-start, overlap-at-end, split — each
-asserting the resulting `(base, length)` list *and* that the region's pages stay
-reachable. That is a small, obvious piece of work that I did not do, and doing
-it would likely close six of the seven. `global_init`'s seeding can be covered by
-splitting it: a pure `plan(memory_map, kernel_image, boot_stack) -> regions`
-that `global_init` then applies, so the seed is testable without `rsp`.
+Not more mutation rounds. Two pieces, and the first is now done.
+
+**Done: `reserve_region` has tests** (`crates/zenus-mem/src/reserve_tests.rs`).
+It reshapes the region list four ways, runs during initialisation before there is
+a shell, and six of the seven mutations this log could not hold were mutations of
+it. A table over the four reshape cases — cover, overlap-at-start, overlap-at-end,
+split — plus the non-overlap guard and the page rounding on both ends.
+
+Ten of thirteen mutations are caught. The three that are not are listed in the
+file with the reason, and all three are unreachable through the public API:
+
+| mutation | why nothing sees it |
+|---|---|
+| removal loop leaves a stale entry past `region_count` | everything is bounded by `region_count`, so the slot is unreachable by construction — dead-store, not a defect |
+| `next_free` set to `base` instead of `end` | only observable when a reservation covers `next_free` without shrinking a region, and any reservation big enough does shrink one |
+| zero-length reservation clears `next_free` | `next_free` only gates the second pass, which only runs once the first is exhausted |
+
+Making those visible would mean adding an accessor for `next_free` purely so a
+test could poke it, which trades a real invariant for a synthetic one.
+
+#### Two real bugs the new tests found
+
+**A sub-page reservation reserved nothing.** It split the list on exact byte
+boundaries: `[0x1000, 0x5000)` minus `[0x1800, 0x2000)` became `[0x1000, 0x1800)`
+and `[0x2000, 0x5000)`. `alloc_frame` rounds a region's base *up*, so it went on
+serving page `0x1000`, which the reservation overlapped. Fixed by rounding both
+ends out to pages — the safe direction, since it reserves at least what was
+asked for. Every caller today is page aligned, so this changes nothing for them
+and closes the hole for anything that is not.
+
+**A reservation could spin forever.** The branch that swallows a whole region
+`continue`s without advancing its index, relying on `region_count` having gone
+down so the index now points past the end. Delete that decrement and
+`reserve_region` never returns. This was found by a mutation that ran long
+enough for the harness to time out — the slowest possible way to learn that a
+guard load-bearing, and the reason the branch now has a test of its own that
+turns the hang into a failure.
+
+#### Still open
+
+`global_init`'s seeding of the cursors. It reads `rsp` and the real memory map,
+so no host test calls it — every host test constructs `FrameAllocator::new`,
+which seeds differently. The two paths are only equivalent by inspection. The fix
+is to split it: a pure `plan(memory_map, kernel_image, boot_stack) -> regions`
+that `global_init` then applies, so the seed is testable without `rsp`. Until
+that exists the second-pass repair stays reverted.
 
 Until both exist, the second pass keeps its defect and its doc comment, which
 says what the defect is and why the obvious repair was not applied.

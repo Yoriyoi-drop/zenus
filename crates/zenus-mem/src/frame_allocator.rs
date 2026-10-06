@@ -31,9 +31,9 @@ impl MemoryRegion {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct MemRegion {
-    base: u64,
-    length: u64,
+pub struct MemRegion {
+    pub base: u64,
+    pub length: u64,
 }
 
 const MAX_REGIONS: usize = 64;
@@ -216,11 +216,43 @@ impl FrameAllocator {
         self.free_count = 0;
     }
 
+    /// The allocatable regions, as `(base, length)` pairs, in list order.
+    ///
+    /// Read-only on purpose. `regions` is what `reserve_region` reshapes and what
+    /// `alloc_frame` walks, so the tests for the first need to see it — and they
+    /// need to see it without being able to write it, because a test that can
+    /// mutate what it checks proves nothing.
+    pub fn regions(&self) -> &[MemRegion] {
+        &self.regions[..self.region_count]
+    }
+
+    /// How many entries of `regions` are in use.
+    pub fn region_count(&self) -> usize {
+        self.region_count
+    }
+
     pub fn reserve_region(&mut self, base: u64, length: u64) {
         if length == 0 {
             return;
         }
-        let end = base + length;
+        // Round the reservation out to whole pages.
+        //
+        // Without this, a sub-page range splits the region list on exact byte
+        // boundaries and leaves a region whose base is not page-aligned —
+        // `[0x1000, 0x5000)` minus `[0x1800, 0x2000)` becomes
+        // `[0x1000, 0x1800)` and `[0x2000, 0x5000)`. `alloc_frame` rounds a
+        // region's base *up*, so it happily serves page `0x1000` even though the
+        // reservation overlaps its top half, and the reservation protects
+        // nothing.
+        //
+        // Rounding out is the safe direction: it reserves at least what was
+        // asked for. Every caller today is already page aligned — the memory map
+        // entries are trimmed to pages by the bootloader, `reserve_boot_stack`
+        // rounds its base down and adds a page, and the kernel image bounds come
+        // from the linker script — so this changes nothing for them and closes
+        // the hole for anything that is not.
+        let base = base & !(PAGE_SIZE_U64 - 1);
+        let end = (base.saturating_add(length) + PAGE_SIZE_U64 - 1) & !(PAGE_SIZE_U64 - 1);
         let mut i = 0;
         while i < self.region_count {
             let r = self.regions[i];
