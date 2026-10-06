@@ -45,7 +45,7 @@ RTL8139, virtio-net.
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 208 host unit tests (`make test-host`), 25 in-kernel tests
+**Testing** — 211 host unit tests (`make test-host`), 25 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), CI running both.
 
 ## Partially done
@@ -62,10 +62,16 @@ watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
 ## Known broken
 
-- **`meminfo` reports "Used: 0 frames".** `frame_allocator::free_frame` refuses
-  any frame that falls inside a known region, and every frame it handed out did
-  fall inside one, so it never recycles anything and `used_memory` stays at 0.
-  Not a crash, but the diagnostic lies.
+- **`meminfo` reports "Used: 0 frames".** `frame_allocator::free_frame` refused
+  any frame that fell inside a known region, and every frame it handed out did
+  fall inside one, so nothing was ever recycled and `used_memory` never came
+  back down. Recycling is fixed and tested (BUG-036); the counter is still wrong
+  because `free_frames_count` reports the recycled stack's depth rather than
+  what `alloc_frame` can serve.
+- **`mmap` is capped at 16384 pages** for the same reason: `sys_mmap` budgets
+  against `free_frames_count()`, which is that depth. It refuses large mappings
+  on a machine with 2 GiB spare. The design for the real fix is written down at
+  the end of BUG-036.
 - **`reap_terminated_stacks()` is unreachable**, and `TERMINATED_STACKS` is only
   filled by `task_exit()`, which no syscall reaches. `kill_task` and `reap_task`
   each free task stacks on their own path, with nothing keeping those paths

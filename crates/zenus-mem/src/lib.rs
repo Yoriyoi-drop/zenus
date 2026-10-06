@@ -49,6 +49,91 @@ mod host_tests {
         assert_eq!(512 * 8 * 8, page_table_bytes() * 8);
     }
 
+    /// The regression `FrameAllocator::free_frame` existed for.
+    ///
+    /// It refused every frame that fell inside a known region, on the theory
+    /// that this was a double-free guard. Regions describe memory *available to
+    /// be handed out*, so every frame the allocator ever returned matched and
+    /// nothing was ever recycled: `free_stack` stayed empty, `used_memory` never
+    /// came back down, and `meminfo` reported "Used: 0 frames" for a whole boot.
+    ///
+    /// `FrameAllocator::new` is host-safe — it only fills the region list, and
+    /// nothing here touches a real page table — so the whole cycle is testable.
+    #[test]
+    fn a_freed_frame_is_handed_out_again() {
+        use crate::frame_allocator::{FrameAllocator, MemoryRegion};
+
+        let map = [MemoryRegion { base: 0x1000, length: 0x10_000, kind: 0 }];
+        let mut fa = FrameAllocator::new(&map);
+
+        let first = fa.alloc_frame().expect("first frame");
+        let second = fa.alloc_frame().expect("second frame");
+        assert_ne!(first.as_u64(), second.as_u64());
+
+        fa.free_frame(first);
+        // The recycled frame has to come back before the bump pointer moves on.
+        let third = fa.alloc_frame().expect("recycled frame");
+        assert_eq!(third.as_u64(), first.as_u64(), "a freed frame must be reused");
+    }
+
+    /// A frame that is freed, re-allocated and freed again is legitimately
+    /// absent from the free stack the second time, so membership there is the
+    /// only double-free test that can tell the two cases apart. What it must
+    /// *not* do is reject a legitimate free.
+    #[test]
+    fn a_double_free_does_not_double_count() {
+        use crate::frame_allocator::{FrameAllocator, MemoryRegion};
+
+        let map = [MemoryRegion { base: 0x1000, length: 0x10_000, kind: 0 }];
+        let mut fa = FrameAllocator::new(&map);
+        // `free_frames_count` is still the recycled stack's depth (see its own
+        // docs), so it is the right thing to watch here: one free must put
+        // exactly one entry on it.
+        assert_eq!(fa.free_frames_count(), 0);
+
+        let a = fa.alloc_frame().expect("frame");
+        assert_eq!(fa.free_frames_count(), 0);
+        fa.free_frame(a);
+        assert_eq!(fa.free_frames_count(), 1, "one free, one entry");
+        fa.free_frame(a); // the double free
+        assert_eq!(fa.free_frames_count(), 1, "one frame back, not two");
+
+        // Re-allocate then free again: the frame was popped, so it is no longer
+        // on the stack and this free must be accepted.
+        let b = fa.alloc_frame().expect("frame");
+        assert_eq!(b.as_u64(), a.as_u64());
+        assert_eq!(fa.free_frames_count(), 0);
+        fa.free_frame(b);
+        assert_eq!(fa.free_frames_count(), 1);
+    }
+
+    /// `used_memory` is what `meminfo` prints, and it has to move in both
+    /// directions. It used to only move up, because the decrement sat after a
+    /// guard that returned first.
+    #[test]
+    fn used_memory_tracks_allocations_in_both_directions() {
+        use crate::frame_allocator::{FrameAllocator, MemoryRegion};
+
+        let map = [MemoryRegion { base: 0x1000, length: 0x10_000, kind: 0 }];
+        let mut fa = FrameAllocator::new(&map);
+        assert_eq!(fa.used_memory(), 0);
+
+        let a = fa.alloc_frame().expect("frame");
+        assert_eq!(fa.used_memory(), 0x1000);
+        let b = fa.alloc_frame().expect("frame");
+        assert_eq!(fa.used_memory(), 0x2000);
+
+        fa.free_frame(a);
+        assert_eq!(fa.used_memory(), 0x1000, "a free must give the count back");
+        fa.free_frame(b);
+        assert_eq!(fa.used_memory(), 0);
+
+        let c = fa.alloc_frame().expect("frame");
+        fa.free_frame(c);
+        fa.free_frame(c);
+        assert_eq!(fa.used_memory(), 0, "a double free must not decrement twice");
+    }
+
     /// The regression `BlockHeader::size` rounding exists for.
     ///
     /// Two invariants pull against each other in the heap allocator:

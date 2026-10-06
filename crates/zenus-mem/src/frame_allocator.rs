@@ -132,35 +132,54 @@ impl FrameAllocator {
         None
     }
 
+    /// Return a frame to the allocator.
+    ///
+    /// The frame goes on `free_stack`, and `alloc_frame` pops from there before
+    /// it bumps `next_free`. Without that, every frame ever handed out is gone
+    /// for good: the bump pointer only ever moves forward.
+    ///
+    /// ## What used to be here, and why it was wrong
+    ///
+    /// This used to refuse any frame that fell inside a known region, on the
+    /// theory that this was a double-free guard. It is not one. Regions describe
+    /// memory *available to be handed out*, which is every frame this allocator
+    /// ever returned — so the guard rejected every legitimate free, `free_stack`
+    /// stayed permanently empty, and `used_memory` (decremented *after* the
+    /// guard, so also never reached) kept counting. `meminfo` reported
+    /// "Used: 0 frames" for a whole boot no matter how much had been mapped, and
+    /// "Free stack: 0 frames" on a machine with 2 GiB spare.
+    ///
+    /// Membership in `free_stack` is the guard that can actually tell a double
+    /// free from a legitimate re-free: a frame that was freed, re-allocated and
+    /// freed again is legitimately *absent* from the stack the second time.
     pub fn free_frame(&mut self, addr: PhysAddr) {
         let a = addr.as_u64();
-        for i in 0..self.free_count {
-            if self.free_stack[i] == a {
-                return;
-            }
+        // Not a frame address; handing one out would give a caller a page whose
+        // neighbours are whatever happens to be there.
+        if a == 0 || a & (PAGE_SIZE_U64 - 1) != 0 {
+            return;
         }
-        for i in 0..self.region_count {
-            let r = self.regions[i];
-            if a >= r.base && a < r.base + r.length {
-                return;
-            }
+        // Already on the stack: a double free. Returning here also keeps
+        // `used_memory` from being decremented twice for one frame.
+        if self.free_stack[..self.free_count].contains(&a) {
+            return;
         }
         if self.free_count < FREE_STACK_SIZE {
             self.free_stack[self.free_count] = a;
             self.free_count += 1;
-        } else if self.region_count < MAX_REGIONS {
-            self.regions[self.region_count] = MemRegion {
-                base: a,
-                length: PAGE_SIZE as u64,
-            };
-            self.region_count += 1;
-            if self.next_free > a {
-                self.next_free = a;
-            }
-        } else {
-            zenus_console::kwarn!("Frame free stack overflow! Frame lost. addr={:#x}", a);
+            self.used_memory = self.used_memory.saturating_sub(PAGE_SIZE_U64);
+            return;
         }
-        self.used_memory = self.used_memory.saturating_sub(PAGE_SIZE as u64);
+        // The stack is full. Appending a one-page *region* and lowering
+        // `next_free` to reach it looked like a way to keep the memory, but
+        // `next_free` is the high-water mark of what has been handed out, so
+        // lowering it re-offers frames that are still live. Dropping the frame is
+        // the honest option; the stack is 16384 entries.
+        zenus_console::kwarn!(
+            "Frame free stack full, dropping frame {:#x} ({} entries)",
+            a,
+            FREE_STACK_SIZE
+        );
     }
 
     pub fn used_memory(&self) -> u64 {

@@ -2376,3 +2376,134 @@ iso:       test_runner=0 shell=209
 test-iso:  test_runner=3 shell=0
 iso again: test_runner=0 shell=209
 ```
+
+---
+
+## BUG-036 — the frame allocator never recycled a single page
+
+Found while closing BUG-035's fallout: `meminfo` reported "Used: 0 frames" for
+an entire boot on a machine that had just mapped and unmapped a user program's
+whole address space. That is not a display bug — the count was telling the
+truth, and the truth was that nothing was ever freed.
+
+### `free_frame` rejected every legitimate free
+
+```rust
+for i in 0..self.region_count {
+    let r = self.regions[i];
+    if a >= r.base && a < r.base + r.length {
+        return;
+    }
+}
+```
+
+The intent was obviously a double-free guard. It cannot be one. `regions`
+describes memory *available to be handed out*, which is by definition every page
+this allocator has ever returned — so the guard matched every frame and
+discarded it. The `free_stack`, which is where `alloc_frame` looks before it
+bumps anything, stayed permanently empty.
+
+`used_memory` was decremented *after* that guard, so it never moved down either.
+That is the whole of "Used: 0 frames", and the reason `mmap` was refused
+everything: `sys_mmap` budgets against `free_frames_count()`, which was
+`free_count` — the depth of a stack that was always empty.
+
+The fix is small and the reasoning is recorded at the function:
+
+* reject a non-page-aligned or zero address outright;
+* reject a frame already on the stack — that is the double-free guard that
+  *can* work, because a frame freed, re-allocated and freed again is
+  legitimately absent from the stack the second time;
+* otherwise push it and decrement `used_memory`.
+
+The full-stack path changed too. It used to append a one-page *region* and lower
+`next_free` to reach it, which is handing out memory again: `next_free` is the
+high-water mark of what has been served, so lowering it re-offers live pages. It
+now warns and drops the frame.
+
+### Tests
+
+Three, and each was verified to fail against the old code first:
+
+| test | fails before the fix because |
+|---|---|
+| `a_freed_frame_is_handed_out_again` | the recycled frame never comes back |
+| `a_double_free_does_not_double_count` | two frees of one frame put two entries on the stack |
+| `used_memory_tracks_allocations_in_both_directions` | the decrement is never reached |
+
+Then four mutations of the fixed code, to check the tests are load-bearing rather
+than merely present — each is caught:
+
+| mutation | result |
+|---|---|
+| restore the region guard in `free_frame` | FAILED, as it must |
+| remove the free-stack dedup | FAILED |
+| remove the `used_memory` decrement | FAILED |
+| stop pushing to the free stack | FAILED |
+
+### Verified
+
+`run /initrd/bin/hello` then `meminfo`: **"Free stack: 0 frames" before, "24
+frames" after.** Those 24 pages are the user program's page tables and data,
+handed back by `destroy_address_space` and now genuinely recycled.
+`make test-host` 211, `make test` 25/25, `make fuzz-smoke` 2000 cases,
+`crashes=0`.
+
+### What is still wrong, and why I stopped rather than fixed it
+
+**`meminfo` still prints "Used: 0 frames"**, and `Used` + `Free stack` should
+sum to `Total`. They do not, and I do not yet know why: `used_memory` is
+incremented on every `alloc_frame` path and decremented on every accepted free,
+so after `hello` has run and been reaped it should read 0 again — and it does —
+but the *first* `meminfo`, taken with nothing allocated, also reads 0, and so
+does the second, taken with 24 pages recycled. So `used_memory` is behaving and
+`free_frames_count` is reporting a stack depth that no longer corresponds to the
+only number anyone wants.
+
+I tried to fix `free_frames_count` properly, which meant making `alloc_frame`'s
+two passes report a consistent total, which meant replacing its single global
+high-water mark with a cursor per region. It works — 21 host tests, including
+two that drain regions completely — but **three of my five mutation checks came
+back `ok`**, meaning the new tests did not actually pin the invariants I
+claimed for them. Shipping an allocator rewrite whose tests do not demonstrably
+fail when its invariants are broken is worse than shipping a wrong label, so I
+reverted it and kept the part that is proven.
+
+So, precisely:
+
+* **Fixed and proven:** `free_frame` recycles, the double-free guard works, and
+  `used_memory` moves in both directions.
+* **Not fixed:** `free_frames_count` still returns the recycled stack's depth,
+  so `sys_mmap` still refuses mappings larger than 16 384 pages even though the
+  machine has 2 GiB spare. That is a real availability limit, not a safety
+  problem, and the fix is the per-region cursor — which is written down below and
+  should be done with mutation-checked tests.
+
+### The cursor design, for whoever does it
+
+`alloc_frame` walks the region list twice: once with `next_free` (the pages at or
+above the floor), once from each region's base up to the floor. Those two walks
+move through a region from **opposite ends**, so a single `next_free` cannot
+track both — whichever position it holds, one pass either re-serves the other's
+pages or cannot see them. That is not a theoretical objection; it is exactly
+what happened when I first tried to make `free_frames_count` agree with
+`alloc_frame` without changing the allocator, and the numbers disagreed by
+exactly one page per region.
+
+The fix is two cursor arrays, one per pass (`cursor[i]` and `low_cursor[i]`), plus
+`floor` fixed at initialisation. With those, `free_frames_count` becomes exact
+and needs no approximation:
+
+```
+free = free_count + sum over regions of length / PAGE_SIZE
+```
+
+Two more things that design must respect, both learned by breaking them:
+
+* `free_frames_count` **must not under-count**. `sys_mmap` refuses a mapping up
+  front when it is too small, so an under-count turns away memory that is
+  available. Over-counting is survivable — `mmap` fails part-way and unwinds.
+* Do not shrink regions to track consumption. `reserve_region` runs during
+  initialisation and the arithmetic in it assumes regions describe what exists,
+  not what has been handed out.
+

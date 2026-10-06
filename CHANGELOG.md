@@ -71,6 +71,16 @@
   has its own `CARGO_TARGET_DIR`, the archive steps are phony, and the ISO rules
   copy their own linked kernel in rather than re-running the linker.
 
+- **BUG-036: the frame allocator never recycled a single page.** `free_frame`
+  refused any frame falling inside a known region, as a double-free guard — but
+  regions describe memory *available to be handed out*, so every frame the
+  allocator ever returned matched and every free was discarded. `free_stack`
+  stayed empty, `used_memory` (decremented after that guard, so also never
+  reached) stayed at 0, and `sys_mmap` — which budgets against the stack depth —
+  refused every mapping. Recycling and the double-free guard are fixed and
+  mutation-checked; the `free_frames_count` under-report is still open and its
+  design is written up in `DEVLOG.md`.
+
 ### Observability
 - The heap allocator verifies its own free list on every `alloc` and `dealloc`
   and names the first thing wrong: bad magic or canary, a non-ascending chain, a
