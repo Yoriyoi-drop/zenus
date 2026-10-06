@@ -33,6 +33,12 @@
     `zenus_syscall::userstack::write_initial_user_stack`.
 
 ### Fixed
+- `clone_user_address_space` zeroed each new page table with
+  `write_bytes(ptr, 0, 512 * 8)` against a `*mut u64`. `write_bytes` counts
+  *elements*, so that is 4096 elements = 32 KiB per table instead of 4 KiB —
+  three tables per `fork`, so every fork zeroed 24 KiB past the end of a page
+  table it had just taken from the frame allocator. `page_table_bytes()` makes
+  the count a byte count, and `a_page_table_is_exactly_one_page` pins it.
 - The page-fault dump mislabelled five of its eight fault-type encodings. It
   indexed the error code as present?/user?/write?, when bit 1 is W/R and bit 2
   is U/S — so `0x1`, a supervisor read of a *present* page, printed as
@@ -43,11 +49,21 @@
   `qemu64` model has no SMEP and no SMAP, so the in-kernel suite was silently
   not testing them at all.
 
+### Observability
+- The heap allocator verifies its own free list on every `alloc` and `dealloc`
+  and names the first thing wrong (bad magic, non-ascending chain, a block
+  outside the arena, a `size` below `MIN_BLOCK`). The corruption report now also
+  says whether the pointer is inside the arena and which free block encloses it.
+  Both were added for BUG-034, which is still open: one user program runs, then
+  the free list is corrupt and no further program can start. `DEVLOG.md` records
+  what is ruled out (the frame allocator, `alloc_mut`'s own writes) and what the
+  next step is.
+
 ### Testing
 - Added a host unit-test layer: `#[cfg(test)] mod host_tests` inside the
   kernel crates, run with `make test-host` / `cargo test --workspace`. 151
   tests across 11 crates, covering VMA arithmetic, packet parsing, permission
-  bits, syscall numbering, the journal, the fuzzer's bookkeeping, namespaces
+  bits, syscall numbering, the journal, the fuzzer's bookkeeping, namespaces,
   the error-code catalog and the initial user-stack layout.
 - Removed the workspace-wide default cargo target. `cargo test` could not run
   against `x86_64-unknown-none` (no `std`, therefore no test harness); kernel

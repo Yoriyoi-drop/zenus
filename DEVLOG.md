@@ -2023,6 +2023,117 @@ that were in it.
 
 ---
 
+## BUG-034 — heap free list is corrupted by `alloc_stack`, writer not yet identified
+
+Pre-existing and **not** related to BUG-033. It reproduces with SMAP disabled
+(verified by rebuilding with `enable_smep_smap` commented out), so it is not a
+consequence of that work.
+
+### Symptom
+
+One user program runs and exits cleanly, then:
+
+```
+[ERROR][zenus_mem::allocator] Heap header corrupted at 0xffffffff80841400
+  (magic=0x0 canary=0x0) ptr=0xffffffff80841420
+```
+
+repeated four times, and every subsequent `run` fails with:
+
+```
+[CRIT ][zenus_mem::allocator] Heap exhausted! free_head=0xffffffff80840230, size=65536
+run: failed to create task
+```
+
+So: run one program, and the shell can never run another. `meminfo` at boot is
+clean and reports 8061 KB free, and a boot with no `run` at all never reports
+corruption — it needs one `create_user_task`.
+
+### What is established
+
+Probing the free list at successive points in `cmd_run` narrowed it a long way:
+
+| after | free list |
+|---|---|
+| `vfs` read | clean |
+| `create_address_space` | clean |
+| `load_elf_raw` | clean |
+| `write_initial_user_stack` | clean |
+| **`alloc_stack`** (64 KiB, inside `create_user_task`)** | **broken** |
+
+The corruption is a single 4 KiB-aligned region inside the heap whose free-block
+*headers* have been zeroed (`magic=0`, `canary=0`) while surrounding headers stay
+intact. The block at the head of the list has `size=0`, which no path in the
+allocator can produce — `alloc_mut` only creates free blocks with
+`size >= MIN_BLOCK` (32) and `dealloc_mut` only coalesces upward.
+
+The write is not a plain zero-fill of the whole page: the list shows intact
+blocks *interleaved* with dead ones at 0x30-byte strides, which is the stride of
+a `BlockHeader` (32) plus a `u64`. That looks like a sequence of 8-byte stores
+at header+8 offsets, not a `write_bytes`.
+
+### What is *not* established
+
+**Who writes.** The frame allocator cannot hand out a frame inside the kernel
+image — `global_init` reserves `__kernel_start..__kernel_end` (`.text`, `.rodata`,
+`.data` **and** `.bss`, which is where the heap lives) *inside* the function,
+before the free stack is filled, precisely so a late `reserve_region` cannot
+leave a stale frame queued. `ensure_initialized` writes the first header, and
+`alloc_mut`'s split path writes each new header once. So the writer is something
+else entirely, and it is reached from `alloc_stack`.
+
+One methodological note, because it cost real time and would cost it again: the
+first version of the probe printed unconditionally. Every message goes through
+the formatter, which **allocates** — so the probe replaced a clean free list with
+a corrupt one and the bisect pointed at `alloc_stack` when the real transition
+was earlier. The check now reports only on failure, and the reasoning is recorded
+at `debug_check_free_list` so the next attempt does not repeat it.
+
+### What was fixed here anyway
+
+`clone_user_address_space` zeroed each new page table with
+`write_bytes(ptr, 0, 512 * 8)` against a `*mut u64`. `write_bytes` counts
+**elements**, so that is 4096 elements = **32 KiB** per table instead of 4 KiB —
+three tables per `fork`, so every fork zeroed 24 KiB past the end of a page table
+it had just taken from the frame allocator. This is the same bug class as the
+comment on the idle task's frame ("writing top-down from the stack base
+underflowed into the heap block in front of the allocation"), one level up.
+
+Not the cause of the symptom above — `run /initrd/bin/hello` does not fork, so
+the corrupted bytes are not explained by it — but it is a real heap-clobbering
+overrun on a path that userspace can reach, and it was found while looking.
+
+`page_table_bytes()` now exists so the zero-fills are written in bytes against a
+`*mut u8`, with `a_page_table_is_exactly_one_page` pinning the arithmetic.
+
+### Also added
+
+`FreeListAllocator::debug_check_free_list` walks the list on every `alloc` and
+`dealloc` and reports the first thing wrong (bad magic, non-ascending chain, a
+block outside the arena, a `size` below `MIN_BLOCK`). It reports nothing when
+the list is fine. This is the check whose absence made this bug silent: `dealloc`
+only refuses a pointer whose header has the wrong magic, and a *partially*
+overwritten header that still says `MAGIC_FREE` sails straight through.
+
+Verified: `make test-host` 206 passed, `make test` 25/25.
+
+### Next step for whoever picks this up
+
+Not more probing. The writer is reachable from a single 64 KiB `alloc`, so the
+cheap decisive move is a **watchpoint on the first header the corruption touches**,
+armed from inside `alloc_stack` rather than from GDB — the address is not known
+until the split happens, which is why the external watchpoint attempts kept
+missing it. Concretely: set DR0 to the address of the block `alloc_mut` is about
+to split, take the write, and print the faulting RIP. Alternatively, poison every
+free block's payload with a pattern in `debug_check_free_list` so the next
+corruption reports which block's *contents* were overwritten rather than just
+that a header was.
+
+Do not guess. The two things ruled out above (frame allocator, `alloc_mut`'s own
+writes) are the two that look most likely from the outside.
+
+---
+
 ## Kandidat berikutnya
 
 Semua kandidat dari daftar `bug hunt` sudah dikerjakan. Yang tersisa bukan bug
@@ -2031,6 +2142,7 @@ yang tercatat, tapi yang **tidak** bisa diselesaikan di host:
 | Item | Kenapa belum selesai |
 |---|---|
 | SMAP/SMEP | **SELESAI** — lihat BUG-033. Root cause-nya bukan PML4 U/S; ada tiga bug terpisah (`stac`/`clac` `nomem`, `sys_write` tanpa `stac`, page-fault handler yang fault dirinya sendiri). Sekarang aktif dan `run /initrd/bin/hello` lulus. |
+| Heap free list korup setelah satu user task | **BUG-034, belum selesai.** Sudah dibatasi sampai `alloc_stack` (64 KiB) di dalam `create_user_task`; penulis byte-nya belumidentified. Frame allocator dan `alloc_mut` sudah disingkirkan. Yang perlu berikutnya: watchpoint *dari dalam* `alloc_stack` pada header yang akan di-split, bukan dari GDB — alamatnya baru diketahui setelah split terjadi, itu sebabnya percobaan watchpoint dari luar selalu miss. Detail lengkap di BUG-034 |
 | `mapped_at` satu alamat per segmen SHM | `shmat` kedua untuk segmen yang sama menimpa yang pertama, jadi pemetaan pertama tidak bisa di-detach. Perbaikannya butuh daftar attachment per segmen, bukan skalar — perubahan struktural, di luar-fix yang bisa diverifikasi |
 | SHM end-to-end | Butuh page table sungguhan. Yang bisa diuji di host (bagian indeks) sudah ada test-nya |
 | `io_scheduler::io_stats()` | Mengembalikan total + dua nol hardcoded (`ARCHITECTURE.md`) |

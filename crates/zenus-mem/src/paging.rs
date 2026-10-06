@@ -7,6 +7,20 @@ use x86_64::PhysAddr;
 use x86_64::VirtAddr;
 
 pub const PAGE_SIZE: usize = 4096;
+
+/// Bytes in one x86-64 page table: 512 8-byte entries = one 4 KiB page.
+///
+/// This exists so the page-table zero-fills are written *in bytes* against a
+/// `*mut u8`. `write_bytes` counts **elements**, and that is exactly the bug
+/// this replaces: `write_bytes(ptr, 0, 512 * 8)` on a `*mut u64` zeroes 4096
+/// elements = **32 KiB**, not 4 KiB. `clone_user_address_space` did that for
+/// every PDPT, PD and PT it allocated, so each `fork` zeroed 24 KiB past the
+/// end of a page table it had just taken from the frame allocator — straight
+/// over whatever had been handed out next. Host-tested by
+/// `a_page_table_is_exactly_one_page`.
+pub const fn page_table_bytes() -> usize {
+    512 * core::mem::size_of::<u64>()
+}
 const MAX_FREED_CR3: usize = 64;
 
 static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
@@ -444,7 +458,7 @@ pub fn clone_user_address_space(source_cr3_raw: u64) -> Option<u64> {
         let new_pdpt_phys = new_pdpt_frame.as_u64() & !0xFFF;
         let new_pdpt_virt = (new_pdpt_phys + hhdm) as *mut u64;
         unsafe {
-            core::ptr::write_bytes(new_pdpt_virt, 0, 512 * 8);
+            core::ptr::write_bytes(new_pdpt_virt as *mut u8, 0, page_table_bytes());
         }
 
         let pdpt_virt = (pdpt_phys + hhdm) as *const u64;
@@ -465,7 +479,7 @@ pub fn clone_user_address_space(source_cr3_raw: u64) -> Option<u64> {
             let new_pd_phys = new_pd_frame.as_u64() & !0xFFF;
             let new_pd_virt = (new_pd_phys + hhdm) as *mut u64;
             unsafe {
-                core::ptr::write_bytes(new_pd_virt, 0, 512 * 8);
+                core::ptr::write_bytes(new_pd_virt as *mut u8, 0, page_table_bytes());
             }
 
             let pd_virt = (pd_phys + hhdm) as *const u64;
@@ -486,7 +500,7 @@ pub fn clone_user_address_space(source_cr3_raw: u64) -> Option<u64> {
                 let new_pt_phys = new_pt_frame.as_u64() & !0xFFF;
                 let new_pt_virt = (new_pt_phys + hhdm) as *mut u64;
                 unsafe {
-                    core::ptr::write_bytes(new_pt_virt, 0, 512 * 8);
+                    core::ptr::write_bytes(new_pt_virt as *mut u8, 0, page_table_bytes());
                 }
 
                 let pt_virt = (pt_phys + hhdm) as *const u64;

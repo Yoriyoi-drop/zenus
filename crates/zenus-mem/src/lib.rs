@@ -23,6 +23,32 @@ mod host_tests {
         PAGE_USER, PAGE_WRITABLE, PROT_EXEC, PROT_READ, PROT_WRITE,
     };
 
+    /// The regression that `page_table_bytes()` exists for: the page-table
+    /// zero-fills used `write_bytes(ptr, 0, 512 * 8)` against a `*mut u64`,
+    /// and `write_bytes` counts *elements*, so each of the three page tables
+    /// `clone_user_address_space` allocated was zeroed over 32 KiB instead of
+    /// 4 KiB. The overrun landed on whatever the frame allocator handed out
+    /// next, which is how a `fork` could clobber heap metadata.
+    ///
+    /// The test cannot catch a reintroduced `512 * 8` — it is the arithmetic
+    /// that is pinned. What it does guarantee is that the byte count the call
+    /// sites use is a page, so the mistake cannot be made silently again.
+    #[test]
+    fn a_page_table_is_exactly_one_page() {
+        use crate::paging::page_table_bytes;
+
+        assert_eq!(
+            page_table_bytes(),
+            crate::paging::PAGE_SIZE,
+            "page_table_bytes() is what the zero-fills pass to write_bytes"
+        );
+        // 512 entries of 8 bytes.
+        assert_eq!(page_table_bytes(), 512 * 8);
+        // The mistake was 8x. Make sure that is still 8x, so the pinned value
+        // cannot quietly become the oversized one.
+        assert_eq!(512 * 8 * 8, page_table_bytes() * 8);
+    }
+
     /// `unmap_page_raw_keep_frame` walks four levels by index. The indices come
     /// from four shifts, and a wrong shift is invisible until it reads the wrong
     /// table — which on a live system means unmapping somebody else's page.

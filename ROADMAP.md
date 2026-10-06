@@ -39,10 +39,13 @@ RTL8139, virtio-net.
 
 **Namespaces** — PID, UTS, mount, net, user, IPC.
 
+**Security** — SMEP and SMAP enabled at boot, per-process address spaces,
+`STACK_GUARD`, `USER_SPACE_LIMIT`, NX on user mappings.
+
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 205 host unit tests (`make test-host`), 25 in-kernel tests
+**Testing** — 206 host unit tests (`make test-host`), 25 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), CI running both.
 
 ## Partially done
@@ -56,6 +59,14 @@ watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
   there is no dependency ordering, no health checking beyond "still running",
   and no declarative manifests.
 - **Shell** — ~90 builtins, no job control, no pipelines, no redirection.
+
+## Known broken
+
+- **One user program per boot.** Run a program from the shell and it exits
+  cleanly, but the heap's free list is corrupt afterwards and no second program
+  can start. Narrowed to the 64 KiB `alloc_stack` inside `create_user_task`; the
+  writer is not yet identified. `DEVLOG.md` BUG-034 has the evidence and what is
+  already ruled out.
 
 ## Not real yet
 
