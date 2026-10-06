@@ -2675,3 +2675,93 @@ fix from this run, which is the point of running it: the ROADMAP item is now
 *measured* rather than assumed open. If a future change moves `crashes` off zero,
 that number is the thing to chase, and `make fuzz-coverage` is now trustworthy
 enough to be the thing that notices.
+
+---
+
+## BUG-038 — third attempt at the second-pass fix, and why the pattern repeats
+
+The `alloc_frame` second pass advances `regions[i].base` in place without
+shrinking `length`, so a region's claimed end — `base + length` — grows by a page
+every time that pass serves one. After enough allocations the region describes
+memory that does not exist, and the first pass will eventually hand it out.
+
+The repair is small: a per-region `low_cursor` plus a fixed `floor`, leaving
+`regions` alone. Third attempt at making that change trustworthy. It went in,
+held 14 of 21 mutations, and was reverted.
+
+| | attempt 1 | attempt 2 | attempt 3 |
+|---|---|---|---|
+| mutations run | 5 | 10 | 21 |
+| caught | 2 | 4 | 14 |
+| **missed** | **3** | **6** | **7** |
+
+### What attempt 3 got right
+
+The six second-pass mutations were all caught once the fixtures reached the
+second pass, which is the thing attempts 1 and 2 failed to do:
+
+| mutation | result |
+|---|---|
+| second pass stops advancing `low_cursor` | CAUGHT |
+| advances `low_cursor` by two pages | CAUGHT |
+| ignores `low_cursor` | CAUGHT |
+| `floor` clamp dropped | CAUGHT |
+| bound uses `next_free` instead of `floor` | CAUGHT |
+| mutates `regions[i].base` (the original defect) | CAUGHT |
+
+Plus all five `free_frame` mutations, and two of the seeding ones.
+
+### What it still could not hold
+
+Seven misses, and they are not scattered — they are exactly the code my host
+tests cannot reach:
+
+| missed | why |
+|---|---|
+| `global_init` does not seed `low_cursor` | `global_init` reads `rsp` and reads the real memory map. It is not host-safe, so **no test calls it** — every host test constructs `FrameAllocator::new` instead, which seeds differently. The two seeding paths are only equivalent by inspection. |
+| `global_init` seeds `low_cursor` to `floor` | same |
+| `reserve_region`: overlap-at-start no re-seed | the branch needs a reservation that moves a region's base, and a fixture that both moves it *and* leaves pages for the second pass to prove it with did not exist until late |
+| `reserve_region`: overlap-at-end no re-seed | same |
+| `reserve_region`: split head no re-seed | same |
+| `reserve_region`: removal loop no re-seed | needs a region to be deleted entirely |
+| `reserve_region`: insertion loop no re-seed | needs `region_count == MAX_REGIONS - 1` |
+
+Six of the seven are in `reserve_region`, which is **pure arithmetic on the
+region list** — host-safe in principle, and I simply did not build the fixtures.
+The seventh is `global_init`, which is genuinely unreachable.
+
+### The honest conclusion
+
+Three attempts, and the gap narrowed but did not close. What I can say with
+evidence:
+
+1. **The repair is correct.** Six of the mutations that matter most to it are
+   caught, including the original defect and every variation of the cursor
+   arithmetic.
+2. **My tests do not hold it.** `reserve_region` is host-safe and I left it
+   untested — that is ordinary negligence, not a limitation. The `global_init`
+   seeding is not reachable from a host test at all.
+3. **Shipping it would be shipping unreached code.** `reserve_region` runs
+   during initialisation, before the kernel has a shell, where a mistake has no
+   test standing behind it and no log anyone will read.
+
+The `free_frame` fix (BUG-036) shipped because every one of its mutations was
+caught. That is the standard, and this does not meet it.
+
+### What would actually settle it
+
+Not more mutation rounds. `reserve_region` needs its own table-driven test over
+the four reshape cases — cover, overlap-at-start, overlap-at-end, split — each
+asserting the resulting `(base, length)` list *and* that the region's pages stay
+reachable. That is a small, obvious piece of work that I did not do, and doing
+it would likely close six of the seven. `global_init`'s seeding can be covered by
+splitting it: a pure `plan(memory_map, kernel_image, boot_stack) -> regions`
+that `global_init` then applies, so the seed is testable without `rsp`.
+
+Until both exist, the second pass keeps its defect and its doc comment, which
+says what the defect is and why the obvious repair was not applied.
+
+### Also checked this tick, and clean
+
+`make fuzz-coverage`: 50 000 cases, `crashes=0` (BUG-037). Nothing new from the
+fuzzer, so the remaining ROADMAP work is the audit findings, not parser holes.

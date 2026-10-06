@@ -71,10 +71,13 @@ watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 - **`mmap` is capped at 16384 pages.** `sys_mmap` budgets against
   `free_frames_count()`, which still returns the recycled stack's depth rather
   than what `alloc_frame` can serve, so large mappings are refused on a machine
-  with 2 GiB spare. An availability limit, not a safety one. The fix needs a
-  cursor per region — written up at the end of BUG-036, together with the two
-  attempts that were reverted because their tests did not hold the invariants
-  they claimed.
+  with 2 GiB spare. An availability limit, not a safety one.
+- **The frame allocator's second pass advances `regions[i].base` without
+  shrinking `length`,** so a region's claimed end grows by a page every time it
+  serves one. The repair (a per-region cursor and a fixed floor) was attempted
+  three times and reverted each time; BUG-038 records the mutation results. The
+  blocker is `reserve_region`'s reshape branches being untested, which is
+  ordinary missing work rather than a hard limit.
 - **`reap_terminated_stacks()` is unreachable**, and `TERMINATED_STACKS` is only
   filled by `task_exit()`, which no syscall reaches. `kill_task` and `reap_task`
   each free task stacks on their own path, with nothing keeping those paths

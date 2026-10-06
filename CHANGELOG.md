@@ -97,6 +97,11 @@
   campaign does. `EXITING` is now set first. Confirmed by reverting the reorder:
   `TIMEOUT` and `EXIT code=3` come straight back.
 
+- Nothing this tick: `fuzz-coverage` ran clean at 50 000 cases again, and a
+  third attempt at the frame allocator's second-pass fix was reverted for the
+  third time. `DEVLOG.md` BUG-038 records the mutation results across all three
+  attempts (2/5, 4/10, 14/21 caught) and what would actually settle it.
+
 ### Observability
 - The heap allocator verifies its own free list on every `alloc` and `dealloc`
   and names the first thing wrong: bad magic or canary, a non-ascending chain, a
