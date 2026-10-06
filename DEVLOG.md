@@ -2507,3 +2507,87 @@ Two more things that design must respect, both learned by breaking them:
   initialisation and the arithmetic in it assumes regions describe what exists,
   not what has been handed out.
 
+### Second attempt at the same rewrite: same verdict, better evidence
+
+A later session rebuilt the cursor design from scratch — `floor` plus
+`cursor_hi[i]`/`cursor_lo[i]` per region, leaving `regions` untouched, with
+`free_frames_count` as an exact sum — and wrote four tests for it. They all
+passed, and **6 of 10 mutations still went unnoticed**:
+
+| mutation | caught? |
+|---|---|
+| pass 1 cursor → global `next_free` | CAUGHT |
+| pass 1 `floor` term dropped | **MISSED** |
+| pass 2 `floor` clamp dropped | CAUGHT |
+| pass 2 `low_cursor` ignored | **MISSED** |
+| pass 2 does not advance `low_cursor` | **MISSED** |
+| pass 1 does not advance `cursor_hi` | CAUGHT |
+| `free_frames_count` ignores the free stack | CAUGHT |
+| `free_frames_count` ignores pass 2 | **MISSED** |
+| `free_frames_count` ignores pass 1 | CAUGHT |
+| pass 2 mutates `regions[i].base` (the old bug) | **MISSED** |
+
+Reverted again. The verdict is the same as the first attempt and for the same
+reason, so it is now a pattern rather than bad luck: **I can write an allocator
+whose tests pass, and I cannot yet write tests that hold it.**
+
+### What the misses actually were
+
+Worth recording, because the failures were not evenly distributed — they cluster
+on one thing.
+
+The misses were all about the **second** pass and about `free_frames_count`'s
+second term. Not one was about `free_frame`, `used_memory`, or the double-free
+guard. The cause was the same in every case: my region fixtures never made the
+second pass do the work.
+
+`global_init` raises the floor to 16 MiB only when a region's base is *below*
+16 MiB **and** its end is *above* it. A fixture like
+`{base: 0x20_0000, length: 0x10_0000}` ends at 0x30_0000, entirely below the
+floor, so the floor collapses onto the base and the **first** pass serves
+everything. The second pass is dead code, and mutations to dead code are
+invisible by construction.
+
+That is a property of the fixture, not of the allocator, and it is exactly the
+kind of thing that makes a test suite look stronger than it is. A test has to
+*demonstrate* that it reaches the code it claims to cover, and the only way I
+have found to do that is the mutation table above.
+
+### What I kept instead
+
+Not the rewrite. Two things, both with mutation checks that pass:
+
+1. **A test that actually reaches the second pass.** A region straddling the
+   floor (`base: 0x20_0000, length: 0x20_000_00`), drained completely, asserting
+   both that no page repeats and that *every* page below the floor was served.
+   The second assertion is the one that matters: a second pass that serves
+   nothing leaves it short, so the test fails rather than passing quietly. This
+   catches "the second pass stops advancing the region's base" and "advances by
+   two pages".
+
+2. **A test that `free_frame` rejects a non-frame address.** Misaligned and zero
+   addresses must not enter the free stack. It was previously unchecked, and it
+   was the one mutation of seven still surviving.
+
+Seven mutations, all caught:
+
+| mutation | result |
+|---|---|
+| restore the region guard in `free_frame` | CAUGHT |
+| remove the free-stack dedup | CAUGHT |
+| stop pushing to the free stack | CAUGHT |
+| remove the `used_memory` decrement | CAUGHT |
+| second pass stops advancing the region's base | CAUGHT |
+| second pass advances the base by two pages | CAUGHT |
+| remove the misaligned-address rejection | CAUGHT |
+
+Plus the doc comment on the second pass now states the defect it has, in place,
+with the reason the fix was not taken.
+
+### Still open, unchanged
+
+`free_frames_count` still reports the recycled stack's depth, so `sys_mmap` still
+caps mappings at 16 384 pages on a machine with 2 GiB spare. That is an
+availability limit, not a safety problem — `mmap` is refused rather than
+misbehaving — and the rewrite that would fix it is not going in until its tests
+demonstrably fail when its invariants are broken.

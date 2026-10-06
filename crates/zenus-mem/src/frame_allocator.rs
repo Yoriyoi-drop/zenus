@@ -116,13 +116,30 @@ impl FrameAllocator {
             }
         }
 
-        // Fallback: scan regions from base (for frames freed back as regions)
+        // Fallback: the pages of a region that sit below `next_free` and so are
+        // invisible to the pass above. `global_init` raises `next_free` to 16 MiB
+        // to leave the kernel image and boot stack alone, and every usable page
+        // under that is still real memory — this is where it is served.
+        //
+        // Note that this advances the region's `base` **without** shrinking its
+        // `length`. That looks wrong and is: the claimed end
+        // (`base + length`) grows by a page every time this serves one, so after
+        // enough allocations the region describes memory that does not exist and
+        // the pass above will eventually hand it out. Shrinking `length` by the
+        // same amount fixes the accounting but then collides with
+        // `reserve_region`, which runs during initialisation and assumes regions
+        // describe what exists rather than what has been handed out.
+        //
+        // The real fix is to leave `regions` alone and track a cursor per region
+        // and per pass. That is written up in `DEVLOG.md` (BUG-036); it is not
+        // here because the tests written for it did not demonstrably fail when
+        // its invariants were broken, and an allocator whose tests do not hold it
+        // is worse than one with a documented defect.
         for reg_idx in 0..self.region_count {
             let reg = self.regions[reg_idx];
-            let start_aligned = (reg.base + 0xFFF) & !0xFFF;
+            let start_aligned = (reg.base + PAGE_SIZE_U64 - 1) & !(PAGE_SIZE_U64 - 1);
             let end = reg.base + reg.length;
             if start_aligned + frame_size <= end && start_aligned < self.next_free {
-                // Found a frame before next_free that we skipped before
                 self.regions[reg_idx].base = start_aligned + frame_size;
                 self.used_memory += frame_size;
                 return Some(PhysAddr::new(start_aligned));

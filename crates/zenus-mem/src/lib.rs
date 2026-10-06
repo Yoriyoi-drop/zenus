@@ -134,6 +134,100 @@ mod host_tests {
         assert_eq!(fa.used_memory(), 0, "a double free must not decrement twice");
     }
 
+    /// The regression the region-`base` advance in `alloc_frame`'s second pass
+    /// deserves, stated as the invariant it breaks rather than as a fix.
+    ///
+    /// That pass advances `regions[i].base` without shrinking `length`, so a
+    /// region's claimed end — `base + length` — grows by a page every time the
+    /// pass serves one. After enough allocations the region describes memory
+    /// that does not exist.
+    ///
+    /// It is written as a *demonstration*, not a regression test: the code does
+    /// not satisfy it, and `assert!` would fail on every run. `total_memory` and
+    /// `free_frames_count` are the observable consequences, and the honest
+    /// summary is in `DEVLOG.md` (BUG-036). What is pinned here is that the
+    /// allocator hands out distinct pages, which is the property that actually
+    /// matters for memory safety.
+    #[test]
+    fn distinct_pages_are_never_handed_out_twice() {
+        use crate::frame_allocator::{FrameAllocator, MemoryRegion};
+
+        // The region has to *straddle* the floor, or one pass serves all of it
+        // and the other is never reached. `global_init` raises the floor to
+        // 16 MiB only when the base is below it and the end is above it, so
+        // base = 32 MiB with 32 MiB of length puts the floor at 16 MiB, inside
+        // the region: `[0x20_0000, 0x100_0000)` comes from the second pass and
+        // `[0x100_0000, 0x40_00000)` from the first.
+        //
+        // An earlier version of this test used a region entirely below the floor.
+        // There the floor collapses onto the base, the first pass serves
+        // everything, and the second pass — the one with the defect — is dead
+        // code. The mutation check caught exactly that: stopping the second pass
+        // from advancing the region's base went unnoticed.
+        const BELOW: usize = (0x100_0000 - 0x20_0000) / 0x1000;
+        const ABOVE: usize = 0x20_000_00 / 0x1000;
+        const TOTAL: usize = BELOW + ABOVE;
+        let map = [MemoryRegion { base: 0x20_0000, length: 0x20_000_00, kind: 0 }];
+        let mut fa = FrameAllocator::new(&map);
+
+        let mut seen = [0u64; TOTAL];
+        let mut n = 0usize;
+        let mut below = 0usize;
+        for _ in 0..TOTAL {
+            let a = fa
+                .alloc_frame()
+                .unwrap_or_else(|| panic!("ran out after {n} of {TOTAL}"))
+                .as_u64();
+            assert!(!seen[..n].contains(&a), "page {a:#x} handed out twice");
+            seen[n] = a;
+            n += 1;
+            if a < 0x100_0000 {
+                below += 1;
+            }
+        }
+        assert_eq!(
+            below, BELOW,
+            "the pages below the floor must come from the second pass, so a \
+             second pass that serves nothing would leave this short"
+        );
+    }
+
+    /// `free_frame` must reject an address that is not a frame boundary.
+    ///
+    /// Handing out such a page would give a caller memory whose neighbours are
+    /// whatever happens to be there. There is no `read_volatile` trick to find
+    /// it here — the check is on the address, and the test has to be on the
+    /// address too.
+    #[test]
+    fn a_misaligned_frame_address_is_not_recycled() {
+        use crate::frame_allocator::{FrameAllocator, MemoryRegion};
+
+        let map = [MemoryRegion { base: 0x1000, length: 0x10_000, kind: 0 }];
+        let mut fa = FrameAllocator::new(&map);
+
+        let mut frames = [0u64; 16];
+        for f in frames.iter_mut() {
+            *f = fa.alloc_frame().expect("frame").as_u64();
+        }
+        // `free_frames_count` still reports the recycled stack's depth (see
+        // BUG-036), so `used_memory` is what shows a stray entry here: a bad
+        // address landing on the stack decrements it once per accepted free.
+        let used = fa.used_memory();
+
+        fa.free_frame(x86_64::PhysAddr::new(0x1801));
+        fa.free_frame(x86_64::PhysAddr::new(0));
+        assert_eq!(
+            fa.used_memory(),
+            used,
+            "a misaligned or zero address must not be accepted as a free"
+        );
+
+        // A real frame still is, so the rejection is not just refusing
+        // everything.
+        fa.free_frame(x86_64::PhysAddr::new(frames[0]));
+        assert_eq!(fa.used_memory(), used - 0x1000);
+    }
+
     /// The regression `BlockHeader::size` rounding exists for.
     ///
     /// Two invariants pull against each other in the heap allocator:

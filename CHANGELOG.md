@@ -80,6 +80,11 @@
   refused every mapping. Recycling and the double-free guard are fixed and
   mutation-checked; the `free_frames_count` under-report is still open and its
   design is written up in `DEVLOG.md`.
+- Two more frame-allocator tests, chosen because the mutation checks showed my
+  earlier fixtures never reached the allocator's second pass: a region
+  straddling the 16 MiB floor, drained completely, and `free_frame` refusing a
+  non-frame address. Seven mutations of the allocator are now caught in total;
+  before these, three went unnoticed.
 
 ### Observability
 - The heap allocator verifies its own free list on every `alloc` and `dealloc`
