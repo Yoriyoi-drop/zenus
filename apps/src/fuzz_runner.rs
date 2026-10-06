@@ -77,6 +77,11 @@ fn emit_exit(code: u32) {
 }
 
 /// Campaign verdict.
+/// Publish the campaign verdict and power off. Never returns.
+///
+/// `EXITING` is set by `campaign_task` before it sets `CAMPAIGN_DONE`; setting
+/// it again here is harmless and keeps this correct if it is ever reached by
+/// another path.
 fn finish(stats: &zenus_fuzz::FuzzStats) -> ! {
     EXITING.store(true, Ordering::Release);
     zenus_fuzz::print_stats();
@@ -130,6 +135,25 @@ fn campaign_task() {
     let mode = mode_from_u8(MODE.load(Ordering::Relaxed));
     let cases = CASES.load(Ordering::Relaxed);
     let stats = zenus_fuzz::run_campaign(mode, cases, 0xDEAD_BEEF);
+    // `EXITING` **before** `CAMPAIGN_DONE`, and that order is the whole fix.
+    //
+    // The watchdog treats `CAMPAIGN_DONE` as "the campaign finished without
+    // publishing a verdict, so abort". `finish()` is what publishes the verdict,
+    // and it runs *after* this store — so between the two stores the watchdog saw
+    // `CAMPAIGN_DONE == true` and `EXITING == false` and called `abort()`,
+    // stacking `TIMEOUT` and `EXIT code=3` on top of a campaign that had just
+    // passed.
+    //
+    // That is not hypothetical: `make fuzz-coverage` completed 50 000 cases with
+    // `crashes=0` and still reported `EXIT code=3`, so a clean campaign reads as
+    // a failed one and CI would act on that. The race is narrow and only shows
+    // on runs that finish near the deadline — which is exactly what a long
+    // coverage campaign does.
+    //
+    // Setting `EXITING` first makes the watchdog keep idling for as long as it
+    // takes `finish()` to print and power off, which is what it is for: "a
+    // verdict is on its way" is not "there is no verdict".
+    EXITING.store(true, Ordering::Release);
     CAMPAIGN_DONE.store(true, Ordering::Release);
     finish(&stats)
 }

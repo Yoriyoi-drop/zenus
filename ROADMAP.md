@@ -62,16 +62,19 @@ watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
 ## Known broken
 
-- **`meminfo` reports "Used: 0 frames".** `frame_allocator::free_frame` refused
-  any frame that fell inside a known region, and every frame it handed out did
-  fall inside one, so nothing was ever recycled and `used_memory` never came
-  back down. Recycling is fixed and tested (BUG-036); the counter is still wrong
-  because `free_frames_count` reports the recycled stack's depth rather than
-  what `alloc_frame` can serve.
-- **`mmap` is capped at 16384 pages** for the same reason: `sys_mmap` budgets
-  against `free_frames_count()`, which is that depth. It refuses large mappings
-  on a machine with 2 GiB spare. The design for the real fix is written down at
-  the end of BUG-036.
+- **`meminfo`'s frame lines do not add up.** Recycling is fixed (BUG-036), so
+  "Free stack" now moves from 0 to 24 after a user program runs and is reaped.
+  "Used" stays 0, which is correct at the two points it is sampled — before
+  anything is mapped, and after everything is freed — but nothing samples it
+  while frames are actually outstanding, so the line is untested rather than
+  wrong.
+- **`mmap` is capped at 16384 pages.** `sys_mmap` budgets against
+  `free_frames_count()`, which still returns the recycled stack's depth rather
+  than what `alloc_frame` can serve, so large mappings are refused on a machine
+  with 2 GiB spare. An availability limit, not a safety one. The fix needs a
+  cursor per region — written up at the end of BUG-036, together with the two
+  attempts that were reverted because their tests did not hold the invariants
+  they claimed.
 - **`reap_terminated_stacks()` is unreachable**, and `TERMINATED_STACKS` is only
   filled by `task_exit()`, which no syscall reaches. `kill_task` and `reap_task`
   each free task stacks on their own path, with nothing keeping those paths
@@ -93,9 +96,10 @@ Do not build on these without reading the code:
 
 ## Next, in order
 
-1. **Close the parser holes.** Fuzz every decoder (`make fuzz-coverage`) and
-   treat each crash as a Critical until it is not. `DEVLOG.md` tracks the audit
-   findings that are not fixed yet, ranked by impact.
+1. **Close the parser holes.** `make fuzz-coverage` now runs clean at 50 000
+   cases (`crashes=0`), and the harness reports its verdict correctly (BUG-037).
+   The remaining work is audit findings, not fuzzer findings — `DEVLOG.md`
+   tracks them, ranked by impact.
 2. **Real cgroup enforcement** — at least `memory` and `pids` — so the existing
    namespace work has teeth.
 3. **KPTI**, so a user CR3 does not have the kernel half mapped. SMEP/SMEP

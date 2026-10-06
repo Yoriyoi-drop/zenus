@@ -2591,3 +2591,87 @@ caps mappings at 16 384 pages on a machine with 2 GiB spare. That is an
 availability limit, not a safety problem — `mmap` is refused rather than
 misbehaving — and the rewrite that would fix it is not going in until its tests
 demonstrably fail when its invariants are broken.
+
+---
+
+## BUG-037 — a clean `fuzz-coverage` run reported `EXIT code=3`
+
+ROADMAP item 1 ("close the parser holes") starts with running the full coverage
+campaign, so that is what this tick did. The campaign itself is clean — 50 000
+cases, `crashes=0`, `hangs=0`, `faults=0`, `new_paths=978` — but it reported
+itself as a failure:
+
+```
+[FUZZ] campaign done mode=coverage
+[FUZZ] TIMEOUT reason=watchdog cases=49996 stuck_in_case=49999 subsystem=4 syscall=20
+[FUZZ] SUMMARY cases=50000 crashes=0 hangs=0 ... unrecovered=0
+[FUZZ] REPORT crashes=0
+EXIT code=3
+```
+
+A verdict and a watchdog abort, stacked. Since CI keys on the exit code, a
+passing campaign reads as a failing one.
+
+### The race
+
+`campaign_task` published its completion before it had a verdict to publish:
+
+```rust
+let stats = zenus_fuzz::run_campaign(mode, cases, 0xDEAD_BEEF);
+CAMPAIGN_DONE.store(true, Ordering::Release);
+finish(&stats)          // <-- EXITING is set in here, one line in
+```
+
+and the watchdog reads that flag as "the campaign finished without publishing a
+verdict, so abort":
+
+```rust
+if EXITING.load(Ordering::Acquire) { return false; }   // a verdict is on its way
+if CAMPAIGN_DONE.load(Ordering::Acquire) { return true; }  // abort
+```
+
+Between the two stores the watchdog sees `CAMPAIGN_DONE == true` and
+`EXITING == false`, and calls `abort("watchdog")` — which prints its own
+`TIMEOUT` and emits `EXIT code=3`.
+
+The window is a few instructions wide, so it does not fire every run. It fired
+here because the campaign finished at `elapsed=85s` against a 120 s deadline —
+close enough that the boot task's poll landed in the window. A long coverage
+campaign is exactly the case that hits it, which is why this survived from the
+day the harness was written.
+
+### Fix
+
+Set `EXITING` before `CAMPAIGN_DONE`. The two now mean what they say: `EXITING`
+is "a verdict is coming, do not report anything", `CAMPAIGN_DONE` is "no verdict
+is coming". The watchdog keeps idling for as long as `finish()` takes to print
+and power off, which is its job in the other direction too.
+
+### Verified by reverting it
+
+Not by inspection — by putting the old order back and re-running the campaign:
+
+```
+[FUZZ] TIMEOUT reason=watchdog cases=28156 stuck_in_case=28159 subsystem=3 syscall=20
+EXIT code=3
+```
+
+and with the fix:
+
+```
+[FUZZ] SUMMARY cases=50000 crashes=0 hangs=0 new_paths=978 corpus=2063 edges=1077
+EXIT code=0
+```
+
+All three campaigns now report what actually happened: `fuzz-smoke` 2000 cases
+`EXIT code=0`, `fuzz-coverage` 50 000 cases `EXIT code=0`, `fuzz-regression`
+`NO-CORPUS` `EXIT code=2` (correct — the crash log is kernel memory and is not
+persisted, so that run proves nothing and says so).
+
+### The parser holes themselves
+
+`crashes=0` at 50 000 cases with 2063 corpus entries and 1077 edges. Nothing to
+fix from this run, which is the point of running it: the ROADMAP item is now
+*measured* rather than assumed open. If a future change moves `crashes` off zero,
+that number is the thing to chase, and `make fuzz-coverage` is now trustworthy
+enough to be the thing that notices.

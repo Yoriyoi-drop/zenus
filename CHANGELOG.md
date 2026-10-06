@@ -86,6 +86,17 @@
   non-frame address. Seven mutations of the allocator are now caught in total;
   before these, three went unnoticed.
 
+- **A clean `fuzz-coverage` run reported `EXIT code=3`.** The campaign completed
+  50 000 cases with `crashes=0` and still printed a watchdog `TIMEOUT` and
+  `EXIT code=3` on top of its own verdict, so a passing campaign read as a failed
+  one and CI would act on that. `campaign_task` set `CAMPAIGN_DONE` before
+  `finish()` set `EXITING`, and the watchdog reads `CAMPAIGN_DONE` as "finished
+  without publishing a verdict, abort" — so it had a window in which the
+  campaign was done but the verdict had not been published yet, and it took it.
+  Only runs finishing near the deadline hit it, which is what a long coverage
+  campaign does. `EXITING` is now set first. Confirmed by reverting the reorder:
+  `TIMEOUT` and `EXIT code=3` come straight back.
+
 ### Observability
 - The heap allocator verifies its own free list on every `alloc` and `dealloc`
   and names the first thing wrong: bad magic or canary, a non-ascending chain, a
