@@ -301,22 +301,57 @@ pub fn enable_smep_smap() {
     }
 }
 
-#[inline]
-pub unsafe fn stac() {
+/// Is SMAP actually switched on?
+///
+/// The page-fault dump uses this to say "you touched a user page without
+/// `stac`" instead of leaving the reader to work out why a *present* page
+/// produced a supervisor protection violation. Reading CR4 is privileged, so
+/// this is bare-metal only and returns `false` on the host.
+#[cfg(target_os = "none")]
+pub fn smap_enabled() -> bool {
     let cr4: u64;
-    core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
-    if cr4 & (1 << 21) != 0 {
-        core::arch::asm!("stac", options(nostack, nomem));
+    unsafe {
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
     }
+    cr4 & (1 << 21) != 0
 }
 
+/// Host twin: SMAP is a ring-0 concept and CR4 is unreadable from ring 3.
+#[cfg(not(target_os = "none"))]
+pub fn smap_enabled() -> bool {
+    false
+}
+
+/// Enable supervisor access to user pages for the duration of a copy
+/// (SMAP's AC flag).
+///
+/// **Do not add `nomem` here.** The whole point of this function is to open a
+/// window in which the *compiler* is not allowed to move a user-memory access
+/// across it. With `nomem`, LLVM is told the asm neither reads nor writes
+/// memory, so a `read_volatile`/`copy_nonoverlapping` between `stac` and `clac`
+/// is free to be scheduled after the `clac` — the access then happens with
+/// AC clear and SMAP faults it. That is not hypothetical: it is why
+/// `read_user_cstr` and `copy_{from,kernel}_to_user` were
+/// "not reliably" reading user memory with SMAP enabled, and why SMAP had to
+/// be left off in `apps/src/lib.rs`.
+///
+/// The `mov cr4` guard that used to be here was also wrong twice over: it
+/// added a second memory-opaque asm to the window, and it was pointless, since
+/// per Intel SDM Vol 2, `STAC` sets AC whether or not SMAP is enabled, and AC
+/// has no effect at all while SMAP is clear.
+///
+/// `nostack, preserves_flags` is the correct option set: neither instruction
+/// touches the stack or flags.
+#[inline]
+pub unsafe fn stac() {
+    core::arch::asm!("stac", options(nostack, preserves_flags));
+}
+
+/// Close the window [`stac`] opened. See that function for why this must not be
+/// memory-opaque either, and why it must be paired with it.
 #[inline]
 pub unsafe fn clac() {
-    let cr4: u64;
-    core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nostack, preserves_flags));
-    if cr4 & (1 << 21) != 0 {
-        core::arch::asm!("clac", options(nostack, nomem));
-    }
+    core::arch::asm!("clac", options(nostack, preserves_flags));
 }
 
 pub fn enable_syscall_ap() {

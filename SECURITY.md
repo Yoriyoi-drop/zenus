@@ -4,17 +4,17 @@
 
 Zenus is an educational kernel. It has real memory-safety discipline in the
 Rust sense (ownership, no `unsafe` without a comment explaining it) and real
-effort in its parsers, but its **security model is not complete**. The most
-consequential gap is that SMAP/SMEP are implemented and then switched off at
-boot, so the kernel can read and write user memory at will. Do not deploy this
-on anything you care about.
+effort in its parsers, but its **security model is not complete**. SMEP and
+SMAP are enabled at boot, which closes the largest hole in the list below, but
+there is still no KPTI, no capability system and no driver isolation. Do not
+deploy this on anything you care about.
 
 ## What is actually enforced
 
 | Control | State |
 |---|---|
 | User/kernel address separation | Yes — per-process CR3, `USER_SPACE_LIMIT = 0x0000_8000_0000_0000` |
-| SMEP / SMAP | **Implemented but disabled** (see below) |
+| SMEP / SMAP | **Enabled at boot**, in `apps::entry`. Needs a CPU (or QEMU `-cpu max`) that has them |
 | KPTI | Not implemented |
 | Unix permission bits (uid/gid/mode) | Yes, in `vfs::access_check` |
 | Path confinement | Components are bounded (`MAX_PATH_SEGMENTS`), over-long paths are refused, `..` cannot escape a mount prefix |
@@ -24,26 +24,27 @@ on anything you care about.
 | NX | Set on user mappings without `PROT_EXEC` |
 | Heap/stack guard | `STACK_GUARD` at the top of every task stack; `stack_size_is_valid` refuses undersized stacks |
 
-## The three gaps that matter
+## The gaps that matter
 
-### 1. SMAP/SMEP are off
+### 1. No KPTI
 
-`apps::entry` has this commented out:
+SMEP and SMAP are on. What is *not* on is page-table isolation from user
+mappings: a user CR3 keeps the kernel half mapped, and a `%cr3` write or a
+kernel bug that lands in ring 0 while a user CR3 is loaded still finds the
+whole kernel image mapped. KPTI (or PCID-based user/entry trampolines) is the
+usual answer and is not implemented.
 
-```rust
-//zenus_mem::paging::ensure_kernel_pages_supervisor();
-//cpu::enable_smep_smap();
-```
+Two supporting rules the kernel relies on, both enforced by the source rather
+than by the hardware:
 
-They were disabled on 2026-07-19 because they fault in userspace programs
-(`args`, `pipe_test`): writing the user stack through HHDM with `stac` does not
-reliably write the expected values. The suspected root cause is PML4 U/S
-handling between `ensure_kernel_pages_supervisor`, `create_address_space` and
-`map_user_page_raw`.
-
-Until that is fixed: **any kernel bug that can be steered by user input can
-read or write all of user memory**, and a `#PF` handler that trusts its own
-`error_code` is a privilege-escalation primitive.
+* **Supervisor code pages are supervisor.** `ensure_kernel_pages_supervisor`
+  clears the U/S bit at all four levels of every present entry in the boot
+  address space before SMEP is switched on, so no ring-0 instruction fetch can
+  come from a user page.
+* **Supervisor access to user pages goes through `stac`/`clac`.** See
+  `zenus_arch::cpu::stac` for why that pair is memory-opaque and must never be
+  marked `nomem`, and `zenus_syscall::userstack::write_initial_user_stack` for
+  the one place allowed to run with a foreign CR3 loaded.
 
 ### 2. No privilege separation beyond uid/gid
 

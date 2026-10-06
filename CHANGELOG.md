@@ -2,12 +2,53 @@
 
 ## Unreleased
 
+### Security
+- **SMAP and SMEP are enabled at boot.** This was item 1 of `ROADMAP.md` and
+  the top gap in `SECURITY.md`; it is done. Five separate defects had to be
+  fixed first, and each one was a real bug on its own, independent of SMAP:
+  - `zenus_arch::cpu::stac`/`clac` were declared `nomem`, which told LLVM the
+    inline asm touches no memory and therefore permitted it to hoist a
+    `read_volatile`/`copy_nonoverlapping` across the pair. Every user-memory
+    copy in the syscall layer was inside that window and could be scheduled
+    after the `clac`, so with SMAP on it faulted. The `mov cr4` guard around
+    them was also pointless: `STAC` sets AC whether or not SMAP is enabled.
+  - `sys_write`'s stdout/stderr path read the user buffer byte-by-byte through a
+    raw pointer with **no `stac` at all** — its comment said as much ("SMAP
+    disabled, so the kernel can access user memory directly"). It now streams in
+    fixed chunks through the direct map, which also means an unmapped buffer is
+    `EFAULT` instead of a ring-0 page fault.
+  - `signal::setup_signal_frame`/`restore_signal_frame` pushed and popped the
+    `ucontext` frame through raw user pointers, and never checked the frame was
+    mapped. A signal handler could wedge the machine from the timer handler.
+  - The page-fault handler read faulting stacks with a bare `read_volatile` and
+    no translation check, so it faulted *itself*: a nested `#PF` re-entered the
+    handler and the machine wedged in a silent loop printing one header. It now
+    walks the tables and reads through the HHDM, which is supervisor-only and so
+    needs no `stac` at all.
+  - `sys_execve` built the new image's initial user stack while the **old** CR3
+    was still loaded. `load_elf` randomises `stack_top`, so those writes went to
+    an address the loaded CR3 did not map. The shell's `run` command did switch
+    CR3 but left interrupts enabled across the window, so a timer tick could
+    run the ISR on the half-built address space. Both now go through
+    `zenus_syscall::userstack::write_initial_user_stack`.
+
+### Fixed
+- The page-fault dump mislabelled five of its eight fault-type encodings. It
+  indexed the error code as present?/user?/write?, when bit 1 is W/R and bit 2
+  is U/S — so `0x1`, a supervisor read of a *present* page, printed as
+  "supervisor-write-nonpresent". That is what a SMAP violation looks like, and
+  it is why this took as long as it did to find. It now also prints
+  `[SMAP: supervisor touched a user page without stac]` when that is the case.
+- `make test` and `make test-quiet` did not pass `-cpu max`. QEMU's default
+  `qemu64` model has no SMEP and no SMAP, so the in-kernel suite was silently
+  not testing them at all.
+
 ### Testing
 - Added a host unit-test layer: `#[cfg(test)] mod host_tests` inside the
   kernel crates, run with `make test-host` / `cargo test --workspace`. 151
   tests across 11 crates, covering VMA arithmetic, packet parsing, permission
   bits, syscall numbering, the journal, the fuzzer's bookkeeping, namespaces
-  and the error-code catalog.
+  the error-code catalog and the initial user-stack layout.
 - Removed the workspace-wide default cargo target. `cargo test` could not run
   against `x86_64-unknown-none` (no `std`, therefore no test harness); kernel
   builds now always pass `--target x86_64-unknown-none` explicitly. CI runs

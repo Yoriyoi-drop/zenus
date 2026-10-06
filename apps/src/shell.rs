@@ -1444,75 +1444,26 @@ impl Shell {
         }
         let argc = argv_count;
 
-        // Calculate total space needed on user stack
-        let mut total_str_len: usize = 0;
-        for i in 0..argc {
-            total_str_len += argv_strings[i].len() + 1; // +1 for null terminator
-        }
-        let ptr_array_size = (argc + 1) * 8; // argv pointers + NULL
-        let stack_used = total_str_len + ptr_array_size + 8; // +8 for argc
-
-        // Available user stack space: 16 pages = 65536 bytes
-        if stack_used > 64000 {
-            zenus_mem::paging::destroy_address_space(new_cr3);
-            w.write_str("run: argv too large\r\n");
-            return;
-        }
-
         let user_stack_top = loaded.stack_top;
 
-        zenus_console::kinfo!("run: setting up argv ({} bytes)", stack_used);
-
-        // Compute user_rsp_final BEFORE unsafe block so it's accessible outside
-        let mut total_deployed: usize = 0;
-        for i in 0..argc {
-            total_deployed += argv_strings[i].len() + 1;
-        }
-        let str_pos_computed = user_stack_top - total_deployed as u64;
-        let ptr_area_start_computed = (str_pos_computed - (argc + 1) as u64 * 8) & !7u64;
-        let user_rsp_final = ptr_area_start_computed - 8;
-
-        // Switch to user CR3 to write the stack
-        let kernel_cr3 = zenus_mem::paging::kernel_cr3();
-        zenus_mem::paging::set_cr3(new_cr3);
-
-        unsafe {
-            // stac: bypass SMAP so supervisor mode can write to user pages
-            core::arch::asm!("stac", options(nostack, preserves_flags));
-
-            // ── Write argv strings: packed from high address to low ──
-            let mut str_pos = user_stack_top;
-            for i in 0..argc {
-                let s = argv_strings[i].as_bytes();
-                let len = s.len();
-                str_pos -= len as u64 + 1;
-                core::ptr::copy_nonoverlapping(s.as_ptr(), str_pos as *mut u8, len);
-                *((str_pos + len as u64) as *mut u8) = 0;
+        let argv_lens: alloc::vec::Vec<usize> =
+            (0..argc).map(|i| argv_strings[i].len()).collect();
+        let layout = match zenus_syscall::userstack::layout_user_stack(user_stack_top, &argv_lens) {
+            Some(l) => l,
+            None => {
+                zenus_mem::paging::destroy_address_space(new_cr3);
+                w.write_str("run: argv too large\r\n");
+                return;
             }
+        };
+        zenus_console::kinfo!("run: setting up argv ({} bytes)", layout.bytes_used);
 
-            // Write argv pointer array
-            let ptr_area_start = (str_pos - (argc + 1) as u64 * 8) & !7u64;
-            let mut ptr_pos = ptr_area_start;
-            let mut str_cur = str_pos;
-            for i in 0..argc {
-                *((ptr_pos) as *mut u64) = str_cur;
-                ptr_pos += 8;
-                str_cur += argv_strings[i].len() as u64 + 1;
-            }
-            *((ptr_pos) as *mut u64) = 0;
+        let argv_refs: alloc::vec::Vec<&[u8]> =
+            (0..argc).map(|i| argv_strings[i].as_bytes()).collect();
+        zenus_syscall::userstack::write_initial_user_stack(new_cr3, &layout, &argv_refs);
 
-            // Write argc (using computed user_rsp_final)
-            *((user_rsp_final) as *mut u64) = argc as u64;
-
-            // clac: restore SMAP protection
-            core::arch::asm!("clac", options(nostack, preserves_flags));
-        }
-
-        // Safe operations after SMAP bypass (outside unsafe block)
+        let user_rsp_final = layout.user_rsp;
         zenus_console::kinfo!("run: user_rsp=0x{:x} argc={}", user_rsp_final, argc);
-
-        // Switch back to kernel CR3
-        zenus_mem::paging::set_cr3(kernel_cr3);
 
         // ── Create user task ──
         let stack_size = 65536;

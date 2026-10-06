@@ -191,13 +191,17 @@ test-host:
 test-host-quiet:
 	$(CARGO) test --workspace --target $(HOST_TARGET) --quiet
 
+# `-cpu max` is not optional here. QEMU's default `qemu64` model has no SMEP
+# and no SMAP, so the kernel's CR4 writes to enable them are silently ignored
+# and the suite would pass without ever testing them — which is exactly what
+# happened while SMAP was disabled in `apps/src/lib.rs`.
 test: test-iso
 	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
-		-drive file=ext2_test.img,format=raw,if=ide 2>&1
+		-cpu max -drive file=ext2_test.img,format=raw,if=ide 2>&1
 
 test-quiet: test-iso
 	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
-		-drive file=ext2_test.img,format=raw,if=ide 2>&1 | grep -a "\[TEST\]"
+		-cpu max -drive file=ext2_test.img,format=raw,if=ide 2>&1 | grep -a "\[TEST\]"
 
 clean:
 	rm -rf $(BUILD_DIR) $(ISO_DIR)

@@ -3,9 +3,9 @@
 ## Where we are
 
 **Pre-alpha.** The kernel boots, runs user programs, mounts filesystems, serves
-the network and runs an init system with supervision. The security model is not
-finished, and a few subsystems are views onto data rather than the real thing
-(see "Not real yet").
+the network and runs an init system with supervision. SMEP/SMAP are on. The
+security model is still not finished, and a few subsystems are views onto data
+rather than the real thing (see "Not real yet").
 
 The previous version of this file claimed Phases 2 and 3 were 100 % complete,
 including a capability system, KPTI, encryption, NAT and incremental backups.
@@ -42,14 +42,13 @@ RTL8139, virtio-net.
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 199 host unit tests (`make test-host`), 25 in-kernel tests
+**Testing** — 205 host unit tests (`make test-host`), 25 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), CI running both.
 
 ## Partially done
 
-- **User-mode hardening** — SMAP/SMEP are implemented and disabled; the PML4
-  U/S interaction that breaks them is not understood yet. This is the single
-  highest-value fix available.
+- **User-mode hardening** — SMAP/SMEP are **enabled**; KPTI is not, so a
+  user CR3 still has the whole kernel mapped.
 - **Container story** — the six namespace types exist and work, but there is no
   OCI runtime, no cgroup enforcement (the cgroup2 tree is read-only) and no
   overlayfs.
@@ -74,14 +73,13 @@ Do not build on these without reading the code:
 
 ## Next, in order
 
-1. **Fix and enable SMAP/SMEP.** Understand the PML4 U/S interaction; make the
-   userspace tests pass with them on. Everything else in this list is worth
-   less.
-2. **Close the parser holes.** Fuzz every decoder (`make fuzz-coverage`) and
+1. **Close the parser holes.** Fuzz every decoder (`make fuzz-coverage`) and
    treat each crash as a Critical until it is not. `DEVLOG.md` tracks the audit
    findings that are not fixed yet, ranked by impact.
-3. **Real cgroup enforcement** — at least `memory` and `pids` — so the existing
+2. **Real cgroup enforcement** — at least `memory` and `pids` — so the existing
    namespace work has teeth.
+3. **KPTI**, so a user CR3 does not have the kernel half mapped. SMEP/SMEP
+   being on (done) is not the same thing.
 4. **A driver model** so storage stops being PIO-only: AHCI first.
 5. **Capabilities and a real `prctl`**, replacing the current no-ops.
 6. **Boot testing**: a QEMU smoke test in CI that boots to the shell prompt and

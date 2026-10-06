@@ -26,14 +26,52 @@ fn is_kernel_addr(addr: u64) -> bool {
     addr >= 0xFFFF800000000000
 }
 
+/// Read a faulting task's stack word without ever faulting ourselves.
+///
+/// The dump below walks addresses taken from the interrupted frame's `RSP`,
+/// which for a ring-3 task is a *user* address. Two things used to go wrong:
+///
+/// * The address was read with a bare `read_volatile`. With SMAP off, ring 0 can
+///   read a user page, so this worked by accident. With SMAP on it is a nested
+///   `#PF` inside the page-fault handler, the handler re-enters itself, and the
+///   machine wedges in a silent loop — which is why SMAP could not simply be
+///   switched on and why the original dump printed one header and then stopped.
+/// * Even without SMAP, nothing checked that the address was mapped. `RSP` on a
+///   half-set-up task points below its lowest mapped page, and the bare read
+///   faulted.
+///
+/// So: walk the page tables first, and read the *physical* address through the
+/// HHDM. The direct map is supervisor-only, so the access needs no `stac`, and
+/// every frame the allocator hands out came out of a Limine usable region, which
+/// is exactly what the HHDM covers.
+fn read_via_hhdm(addr: u64, width: u64) -> Option<u64> {
+    let hhdm = zenus_mem::paging::hhdm_offset();
+    if hhdm == 0 {
+        return None;
+    }
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
+    }
+    let phys = zenus_mem::paging::virt_to_phys_raw(cr3, addr)?;
+    let p = (hhdm + phys) as *const u8;
+    Some(match width {
+        1 => (unsafe { core::ptr::read_volatile(p) }) as u64,
+        8 => unsafe { core::ptr::read_volatile(p as *const u64) },
+        _ => return None,
+    })
+}
+
 fn try_read_u64(addr: u64) -> Option<u64> {
     if addr < 0x1000 {
         return None;
     }
+    // A u64 read that straddles a page boundary could cross into an unmapped
+    // page even when `addr` itself translates.
     if (addr & 0xFFF) > 0xFF8 {
         return None;
     }
-    Some(unsafe { core::ptr::read_volatile(addr as *const u64) })
+    read_via_hhdm(addr, 8)
 }
 
 /// Tulis angka u64 sebagai hex ke display (framebuffer/VGA). Format: 0x1234.
@@ -64,7 +102,7 @@ fn try_read_u8(addr: u64) -> Option<u8> {
     if addr < 0x1000 {
         return None;
     }
-    Some(unsafe { core::ptr::read_volatile(addr as *const u8) })
+    read_via_hhdm(addr, 1).map(|v| v as u8)
 }
 
 #[allow(static_mut_refs)]
@@ -437,17 +475,32 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
 
     let s = SerialPort::new(0x3F8);
 
+    // Bit 0 is P, bit 1 is W/R and bit 2 is U/S, so the three low bits say
+    // "present? write? user?" — in that order. The table this replaces listed
+    // them as if the order were present? user? write?, which mislabelled five
+    // of the eight cases: 0x1 is a *supervisor read of a present page* (a
+    // protection violation, and what SMAP raises), not a write to a missing
+    // one. That mislabelling is what made a SMAP violation look like an
+    // unrelated non-present write for as long as it did.
     let pf_type = match code.bits() & 0x7 {
         0x0 => "supervisor-read-nonpresent",
-        0x1 => "supervisor-write-nonpresent",
-        0x2 => "supervisor-read-protection",
+        0x1 => "supervisor-read-protection",
+        0x2 => "supervisor-write-nonpresent",
         0x3 => "supervisor-write-protection",
         0x4 => "user-read-nonpresent",
-        0x5 => "user-write-nonpresent",
-        0x6 => "user-read-protection",
+        0x5 => "user-read-protection",
+        0x6 => "user-write-nonpresent",
         0x7 => "user-write-protection",
         _ => "unknown",
     };
+    // SMAP raises a supervisor protection violation on a page whose U/S bit is
+    // 1, so say so: "supervisor-read-protection" alone sends you looking for a
+    // supervisor/write permission bug that is not there. A caller that forgot
+    // `stac` around a user access lands here, and nothing else does.
+    let smap_suspect = matches!(code.bits() & 0x7, 0x1 | 0x3)
+        && addr < 0x0000_8000_0000_0000
+        && addr >= 0x1000
+        && crate::cpu::smap_enabled();
     let cause = if (code.bits() & 0x10) != 0 {
         "instruction-fetch"
     } else if (code.bits() & 0x02) != 0 {
@@ -461,6 +514,9 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
     s.write_str(pf_type);
     if (code.bits() & 0x10) != 0 {
         s.write_str(" [IF]");
+    }
+    if smap_suspect {
+        s.write_str(" [SMAP: supervisor touched a user page without stac]");
     }
 
     s.write_str("\nADDR=");

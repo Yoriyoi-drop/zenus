@@ -399,17 +399,15 @@ pub extern "C" fn entry() -> ! {
     paging::init(hhdm_offset);
     frame_allocator::reserve_boot_stack(hhdm_offset);
     interrupts::init();
-    // Fix page table permissions (clear U/S bit at all levels for all
-    // present PML4 entries 0-511), then enable SMEP + SMAP.
-    // NOTE: Requires QEMU `-cpu max` or a CPU with SMEP/SMAP support.
+    // Clear U/S at all four levels of every present entry, then turn on SMEP +
+    // SMAP. Both are real now; see `zenus_mem::paging::ensure_kernel_pages_supervisor`
+    // and `zenus_arch::cpu::stac` for why they work.
     //
-    // DISABLED (2026-07-19): SMAP causes GPF in userspace programs (args/pipe_test)
-    // because write to user stack via boot_run_userspace with stac does not
-    // reliably write the expected values. Root cause suspected in PML4 U/S interaction
-    // between ensure_kernel_pages_supervisor and create_address_space / map_user_page_raw.
-    // Enable after fixing: uncomment the two lines below.
-    //zenus_mem::paging::ensure_kernel_pages_supervisor();
-    //cpu::enable_smep_smap();
+    // Requires QEMU `-cpu max` or a CPU with SMEP/SMAP; QEMU's default `qemu64`
+    // model has neither, so a machine without them silently ignores the CR4
+    // writes rather than faulting.
+    zenus_mem::paging::ensure_kernel_pages_supervisor();
+    cpu::enable_smep_smap();
     zenus_console::vga::init(hhdm_offset);
 
     // Initialize framebuffer console if available (UEFI/GOP boot)

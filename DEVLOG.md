@@ -1886,8 +1886,140 @@ dikejar dari sisi itu. Yang tersisa:
    sedang berjalan) tapi belum dijalankan terhadap build `testing`.
 2. **`make test`** — butuh QEMU + gdb, dan jejak yang sudah ada tidak
    cukup untuk menemukan penyebabnya sendiri.
-3. **SMAP/SMEP** — tidak berubah; masih item #1 di `ROADMAP.md`, dan masih
-   butuh alasan yang benar.
+3. **SMAP/SMEP** — selesai, lihat BUG-033. Item #1 di `ROADMAP.md` sudah
+   tertutup; tidak ada lagi yang perlu diambil dari sisi itu.
+
+---
+
+## BUG-033 — SMAP/SMEP: the "PML4 U/S interaction" was three unrelated bugs
+
+`ROADMAP.md` item 1, the top gap in `SECURITY.md`, and the top of the
+"Kandidat berikutnya" list in this file for several sessions. The note said the
+root cause was "the PML4 U/S interaction between `ensure_kernel_pages_supervisor`,
+`create_address_space` and `map_user_page_raw`", and refused to guess further.
+
+**It was not the page tables.** Nothing in `create_address_space` or
+`map_user_page_raw` was wrong. There were three independent defects, and the
+"does not reliably write the expected values" wording in the original comment is
+what pointed at the first one.
+
+### 1. `stac`/`clac` were `nomem`
+
+```rust
+core::arch::asm!("stac", options(nostack, nomem));
+```
+
+`nomem` tells LLVM the asm neither reads nor writes memory. Every call site does
+
+```rust
+stac();
+let b = core::ptr::read_volatile(addr as *const u8);
+clac();
+```
+
+A `read_volatile` cannot be *deleted* or moved relative to other volatile
+operations, but `nomem` asm is not a volatile operation, so the load was free to
+be scheduled after the `clac`. "Does not reliably write the expected values" is
+exactly what a reordering bug looks like from the outside.
+
+The `mov cr4` guard the pair had was wrong twice over: it put a second
+memory-opaque asm inside the window, and per Intel SDM Vol 2 `STAC` sets AC
+whether or not SMAP is enabled, and AC has no effect while SMAP is clear — so
+the guard was testing something that could not matter.
+
+Fixed in `crates/zenus-arch/src/cpu.rs`: `options(nostack, preserves_flags)`, no
+CR4 read, with the reason written down at the function.
+
+### 2. `sys_write` never called `stac` at all
+
+`crates/zenus-syscall/src/syscall.rs`, the fd 1/2 fast path:
+
+```rust
+// stdout/stderr (fd 1, 2): tulis langsung dari user buffer byte-by-byte
+// tanpa heap allocation. SMAP disabled, jadi kernel bisa akses user memory
+// langsung via raw pointer.
+let byte = unsafe { core::ptr::read_volatile((buf + i as u64) as *const u8) };
+```
+
+The comment is the bug report. This is a bug with SMAP off too: `validate_user_range`
+bounds the address but does not translate it, so `write(1, 0x400000, 1)` — a
+*present* page — took a ring-0 page fault and killed the machine.
+
+This is the fault the boot log actually showed, once the handler stopped eating
+its own `#PF`:
+
+```
+TYPE: supervisor-read-protection [SMAP: supervisor touched a user page without stac]
+ADDR=0x000000000040002A RIP=0xFFFFFFFF8008219C CS=0x01 CAUSE=read CODE=0x1
+```
+
+`0x40002a` is 42 bytes into the user's text segment — the program's own `buf`.
+Replaced with a fixed-size chunked stream through the direct map
+(`copy_user_chunk_hhdm`), which needs no `stac` because the HHDM is
+supervisor-only, and turns an unmapped buffer into `EFAULT`.
+
+### 3. The page-fault handler faulted itself
+
+`try_read_u8`/`try_read_u64` in `crates/zenus-arch/src/interrupts/idt.rs` walked
+the interrupted frame's `RSP` — which for a ring-3 task is a *user* address —
+with a bare `read_volatile`. With SMAP off that works; with SMAP on it is a
+nested `#PF` inside the handler, the handler re-enters itself, and the machine
+wedges printing one header and nothing else. That is the exact symptom in the
+previous entry of this log ("the handler itself faults reading the stack, so the
+dump never finishes"), previously blamed on the test runner.
+
+Now: walk the tables first, then read the *physical* address through the HHDM.
+The direct map is supervisor, so no `stac` is needed and the read cannot fault
+on the U/S bit at all. Every frame the allocator hands out comes out of a Limine
+usable region, which is what the HHDM covers.
+
+### Why it took so long to find
+
+The fault-type table in the same handler indexed the error code as
+present?/user?/write?. Bit 1 is W/R and bit 2 is U/S, so `0x1` — a supervisor
+read of a **present** page, i.e. exactly what SMAP raises — printed as
+"supervisor-write-nonpresent". Five of the eight encodings were mislabelled. A
+SMAP violation was being reported as a write to a missing page, which sends you
+looking for a mapping bug instead of a missing `stac`.
+
+The table is fixed, and the handler now prints `[SMAP: supervisor touched a user
+page without stac]` when the error code, the address and `CR4.SMAP` all agree.
+
+### Found along the way, not part of the above
+
+* `sys_execve` wrote the new image's argv into user addresses while the **old**
+  CR3 was still loaded. `load_elf` randomises `stack_top`, so those addresses
+  were essentially never mapped in the address space that was installed. It also
+  carried a dead, off-by-one duplicate of its own pointer-array loop, marked
+  `// Actually let me rewrite more carefully`.
+* The shell's `run` did switch CR3, but left interrupts enabled across the
+  window, so a timer tick could run the ISR on the half-built user address space.
+* `signal::setup_signal_frame`/`restore_signal_frame` pushed and popped the
+  frame through raw user pointers with no mapping check — from the timer
+  handler, so a bad pointer is a wedge.
+* `make test` did not pass `-cpu max`, and QEMU's default `qemu64` model has
+  neither SMEP nor SMAP. The in-kernel suite was not testing them and could not
+  have.
+
+### Verification
+
+* `make test-host` — 205 passed, 0 failed (was 199; +6 for the stack layout).
+* `make test` — 25/25 in-kernel, **with SMEP+SMAP actually on**.
+* `run /initrd/bin/hello` prints `Hello from userspace!` and exits 0 under
+  `-cpu max` with both features enabled.
+
+### What the layout helper is for
+
+`crates/zenus-syscall/src/userstack.rs` holds `layout_user_stack`, which is pure
+arithmetic over `stack_top` and the argument lengths, and
+`write_initial_user_stack`, which is the one place allowed to run with a
+foreign CR3 loaded. The two old implementations disagreed about the layout —
+the shell packed strings down from `stack_top`, `execve` grew them up from
+`stack_top - total` — so the same program saw argv at different addresses
+depending on how it was started. Both now call the same helper, which is
+host-tested; see `a_null_argument_still_costs_a_byte` and
+`an_argv_that_does_not_fit_is_refused_not_wrapped` for the two arithmetic traps
+that were in it.
 
 ---
 
@@ -1898,7 +2030,7 @@ yang tercatat, tapi yang **tidak** bisa diselesaikan di host:
 
 | Item | Kenapa belum selesai |
 |---|---|
-| SMAP/SMEP | Root cause-nya belum dipahami (interaksi U/S PML4 antara `ensure_kernel_pages_supervisor`, `create_address_space`, `map_user_page_raw`). Semua test userspace gagal saat diaktifkan. Butuh board QEMU + alasan yang benar, bukan tebakan. Ini item #1 di `ROADMAP.md` |
+| SMAP/SMEP | **SELESAI** — lihat BUG-033. Root cause-nya bukan PML4 U/S; ada tiga bug terpisah (`stac`/`clac` `nomem`, `sys_write` tanpa `stac`, page-fault handler yang fault dirinya sendiri). Sekarang aktif dan `run /initrd/bin/hello` lulus. |
 | `mapped_at` satu alamat per segmen SHM | `shmat` kedua untuk segmen yang sama menimpa yang pertama, jadi pemetaan pertama tidak bisa di-detach. Perbaikannya butuh daftar attachment per segmen, bukan skalar — perubahan struktural, di luar-fix yang bisa diverifikasi |
 | SHM end-to-end | Butuh page table sungguhan. Yang bisa diuji di host (bagian indeks) sudah ada test-nya |
 | `io_scheduler::io_stats()` | Mengembalikan total + dua nol hardcoded (`ARCHITECTURE.md`) |

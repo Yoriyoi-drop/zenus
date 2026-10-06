@@ -8,6 +8,7 @@ extern crate alloc;
 
 pub mod elf;
 pub mod syscall;
+pub mod userstack;
 /// Host-side unit tests (`cargo test --workspace`).
 ///
 /// The dispatcher itself needs a task context, but the *table* is pure data and

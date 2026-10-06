@@ -1,5 +1,20 @@
 use super::task::{SavedUserContext, Task, SIG_MAX};
 
+/// The CR3 the calling CPU is running with.
+///
+/// Signal delivery happens from the timer handler on the interrupted task's
+/// CR3, so this is the address space the user stack lives in — not the
+/// kernel's. A stale or wrong CR3 here means the mapping checks below validate
+/// the wrong address space.
+#[inline]
+fn current_cr3() -> u64 {
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
+    }
+    cr3
+}
+
 // Linux signal numbers
 pub const SIGHUP: usize = 1;
 pub const SIGINT: usize = 2;
@@ -148,10 +163,28 @@ pub fn setup_signal_frame(
         restorer,
     };
 
-    // Write frame to user stack
-    let frame_ptr = new_rsp as *mut SignalFrame;
+    // Write the frame to the user stack.
+    //
+    // Not a plain store: the page's U/S bit is 1, so with SMAP on a supervisor
+    // write to it faults even though the page is present. `stac`/`clac` open
+    // and close that window, and the compiler treats both as memory-opaque, so
+    // the store cannot be hoisted out of it.
+    //
+    // `new_rsp` is not checked for a mapping either. An unmapped frame lands as
+    // a ring-0 fault inside the scheduler, and the timer handler is the one
+    // asking, so the machine wedges; a `None` here makes delivery fail and the
+    // signal stay pending instead.
+    if zenus_mem::paging::virt_to_phys_raw(current_cr3(), new_rsp).is_none() {
+        return None;
+    }
     unsafe {
-        core::ptr::copy_nonoverlapping(&frame as *const SignalFrame, frame_ptr, 1);
+        zenus_arch::cpu::stac();
+        core::ptr::copy_nonoverlapping(
+            &frame as *const SignalFrame,
+            new_rsp as *mut SignalFrame,
+            1,
+        );
+        zenus_arch::cpu::clac();
     }
 
     // Clear pending signal
@@ -163,9 +196,20 @@ pub fn setup_signal_frame(
 /// Restore user context from signal frame.
 /// Called from rt_sigreturn syscall to recover pre-signal state.
 pub fn restore_signal_frame(user_rsp: u64) -> Option<(u64, SavedUserContext)> {
-    // Read signal frame from user stack
-    let frame_ptr = user_rsp as *const SignalFrame;
-    let frame = unsafe { core::ptr::read_volatile(frame_ptr) };
+    // `rt_sigreturn` hands us a user pointer, so the same two rules as
+    // `setup_signal_frame` apply in the other direction: the frame has to be
+    // mapped, and the read has to happen inside `stac`/`clac` or SMAP faults it.
+    // Without the translation check a bogus `rt_sigreturn` argument was a
+    // ring-0 page fault on the way into restoring the context.
+    if zenus_mem::paging::virt_to_phys_raw(current_cr3(), user_rsp).is_none() {
+        return None;
+    }
+    let frame = unsafe {
+        zenus_arch::cpu::stac();
+        let f = core::ptr::read_volatile(user_rsp as *const SignalFrame);
+        zenus_arch::cpu::clac();
+        f
+    };
 
     // Restore user context
     let saved_context = SavedUserContext {

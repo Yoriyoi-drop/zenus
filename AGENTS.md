@@ -7,8 +7,8 @@ Zenus is an x86_64 kernel written in Rust (`no_std`). It boots via Limine
 fuzzing framework and a host-side unit-test suite.
 
 State: **pre-alpha**. Core subsystems work; the security model is incomplete
-(see `SECURITY.md`) and several subsystems are deliberately shallow (see
-"Known shallow spots" below).
+(no KPTI, no capabilities — see `SECURITY.md`) and several subsystems are
+deliberately shallow (see "Known shallow spots" below).
 
 ## Build and run
 
@@ -92,11 +92,15 @@ Three things worth knowing before touching the scheduler:
 
 Do not assume these work; read the code first.
 
-- **SMAP/SMEP are implemented but disabled** at boot (`apps/src/lib.rs`, the
-  commented-out `enable_smep_smap`). They fault in userspace programs because
-  writing the user stack through HHDM with `stac` is unreliable; the suspected
-  cause is PML4 U/S handling in `create_address_space` / `map_user_page_raw`.
-  Until that is fixed the kernel can touch user memory freely.
+- **SMAP/SMEP are enabled** at boot (`apps/src/lib.rs`). What that costs you:
+  * any supervisor access to a user page must be inside `stac`/`clac` or
+    through the HHDM. `zenus_arch::cpu::stac` explains why it must not be
+    `nomem`.
+  * `write_initial_user_stack` in `zenus-syscall` is the *only* place that runs
+    with a foreign CR3 loaded, and it keeps interrupts off for the window.
+  * QEMU's default `qemu64` model has neither feature, so any test target that
+    should exercise them needs `-cpu max` — `make test` and the fuzz targets
+    have it.
 - No KPTI, no capabilities, no secure boot, no crypto library.
 - `zenus-fs/src/cgroup.rs` is a **read-only view** of the cgroup v2 layout:
   create/unlink/write all fail, no controller is enforced.

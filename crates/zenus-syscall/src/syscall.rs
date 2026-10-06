@@ -510,6 +510,65 @@ fn sys_read(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 
     }
 }
 
+/// Copy a user range into a kernel buffer through the direct map.
+///
+/// Two things this gets right that a bare `read_volatile` loop did not:
+///
+/// * **Ring 0 is allowed to read it.** SMAP makes a supervisor access to a page
+///   whose U/S bit is 1 fault even when the page is *present*, so the read has
+///   to happen either inside `stac`/`clac` or through the supervisor-only direct
+///   map. `sys_write`'s console path did neither, so with SMAP on the first
+///   `write(1, ...)` from a user program took a `#PF` in ring 0 — the "GPF in
+///   userspace programs" that kept SMAP switched off since it was introduced.
+/// * **The page has to exist.** `validate_user_range` only bounds the address;
+///   it does not translate it. Walking the tables here turns an unmapped
+///   pointer into `EFAULT` instead of a ring-0 fault that takes the kernel with
+///   it.
+///
+/// Returns `None` only when the very first byte is unmapped; a range that goes
+/// bad part-way returns the bytes that were copied first, which is what a
+/// short write means.
+fn copy_user_chunk_hhdm(src: u64, dst: &mut [u8]) -> Option<usize> {
+    let hhdm = zenus_mem::paging::hhdm_offset();
+    if hhdm == 0 || dst.is_empty() {
+        return None;
+    }
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
+    }
+    let mut done = 0usize;
+    while done < dst.len() {
+        let cur = src + done as u64;
+        let phys = match zenus_mem::paging::virt_to_phys_raw(cr3, cur) {
+            Some(p) => p,
+            None => break,
+        };
+        let chunk = (dst.len() - done).min(4096 - (cur & 0xFFF) as usize);
+        let p = (hhdm + phys) as *const u8;
+        // SAFETY: `virt_to_phys_raw` proved `cur` is present in the current
+        // CR3, and the allocator only hands out frames out of a Limine usable
+        // region, which is what the HHDM covers. `chunk` stops at the page
+        // boundary so it cannot run off the end of the mapping.
+        unsafe { core::ptr::copy_nonoverlapping(p, dst[done..].as_mut_ptr(), chunk) };
+        done += chunk;
+    }
+    if done == 0 {
+        None
+    } else {
+        Some(done)
+    }
+}
+
+/// How much of a console `write` is staged at a time.
+///
+/// Big enough that the per-chunk page walk is not the bottleneck for a
+/// terminal line, small enough to sit on the stack.
+const CONSOLE_CHUNK: usize = 256;
+
+/// How much of a console write is echoed to the framebuffer.
+const CONSOLE_ECHO: usize = 256;
+
 fn sys_write(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     if count > 1048576 {
         return -1i64 as u64;
@@ -523,24 +582,39 @@ fn sys_write(fd: u64, buf: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
 
     let count_usize = count as usize;
 
-    // stdout/stderr (fd 1, 2): tulis langsung dari user buffer byte-by-byte
-    // tanpa heap allocation. SMAP disabled, jadi kernel bisa akses user memory
-    // langsung via raw pointer.
+    // stdout/stderr (fd 1, 2): stream straight to the console in fixed chunks,
+    // so a `write(1, ...)` costs no heap allocation. Each chunk goes through
+    // `copy_user_chunk_hhdm` — see there for why a raw pointer read is not an
+    // option here.
     if fd == 1 || fd == 2 {
         let s = zenus_console::serial::SerialPort::new(0x3F8);
-        let mut display_buf = [0u8; 256];
-        let mut display_len = 0usize;
-        for i in 0..count_usize {
-            let byte = unsafe { core::ptr::read_volatile((buf + i as u64) as *const u8) };
-            s.write_byte_serial(byte);
-            if display_len < 256 {
-                display_buf[display_len] = byte;
-                display_len += 1;
+        let mut chunk = [0u8; CONSOLE_CHUNK];
+        // The framebuffer echo only ever shows the first screenful of a write,
+        // so this does not grow with `count`.
+        let mut echo = [0u8; CONSOLE_ECHO];
+        let mut echo_len = 0usize;
+        let mut done = 0u64;
+        while done < count {
+            let want = ((count - done) as usize).min(CONSOLE_CHUNK);
+            let got = match copy_user_chunk_hhdm(buf + done, &mut chunk[..want]) {
+                Some(n) => n,
+                None => {
+                    // Nothing at all was readable: EFAULT, exactly like every
+                    // other syscall handed an address that is not there.
+                    return if done == 0 { -1i64 as u64 } else { done };
+                }
+            };
+            for &byte in &chunk[..got] {
+                s.write_byte_serial(byte);
             }
+            let room = (CONSOLE_ECHO - echo_len).min(got);
+            echo[echo_len..echo_len + room].copy_from_slice(&chunk[..room]);
+            echo_len += room;
+            done += got as u64;
         }
-        if display_len > 0 {
-            if let Ok(s) = core::str::from_utf8(&display_buf[..display_len]) {
-                zenus_console::display::write_str(s);
+        if echo_len > 0 {
+            if let Ok(text) = core::str::from_utf8(&echo[..echo_len]) {
+                zenus_console::display::write_str(text);
             }
         }
         return count;
@@ -1073,66 +1147,28 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp_ptr: u64, _a4: u64, _a5: u64, 
 
     let argc = argv_strings.len();
     let stack_top = loaded.stack_top;
-    let stack_bottom = stack_top - 16 * 4096; // 16 pages allocated by load_elf
 
-    // Calculate total space for strings + pointer arrays
-    let total_str: usize = argv_strings.iter().map(|s| s.len()).sum();
-    let ptr_array_size = (argc + 1) * 8; // argv pointers + NULL
-    let total_needed = total_str + ptr_array_size + 8; // + 8 for argc
-
-    if total_needed > (stack_top - stack_bottom) as usize - 256 {
-        zenus_mem::paging::destroy_address_space(new_cr3);
-        return -1i64 as u64;
-    }
-
-    let str_start = stack_top - total_str as u64;
-    let str_start = str_start & !7;
-
-    // Write argv strings to user stack
-    let mut str_cur = str_start;
-    for s in &argv_strings {
-        let string_vaddr = str_cur;
-        unsafe {
-            core::ptr::copy_nonoverlapping(s.as_ptr(), string_vaddr as *mut u8, s.len());
+    // Compute the layout before touching anything: a refusal here has to leave
+    // the new address space destroyable and the old one untouched.
+    //
+    // This used to do its own arithmetic *and* write to the new image's user
+    // addresses while the old CR3 was still loaded. `load_elf` randomises
+    // `stack_top`, so those addresses are essentially never mapped in the
+    // address space that was actually installed, and with SMAP off the ring-0
+    // write silently landed on whatever did share the address.
+    let argv_lens: alloc::vec::Vec<usize> = argv_strings.iter().map(|s| s.len()).collect();
+    let layout = match crate::userstack::layout_user_stack(stack_top, &argv_lens) {
+        Some(l) => l,
+        None => {
+            zenus_mem::paging::destroy_address_space(new_cr3);
+            return -1i64 as u64;
         }
-        str_cur += s.len() as u64;
-    }
+    };
 
-    // Write argv pointer array (below strings)
-    let ptr_array_start = str_start - ptr_array_size as u64;
-    let mut argv_pos = ptr_array_start;
-    let mut str_cur2 = str_start;
-    for _ in &argv_strings {
-        unsafe {
-            *((argv_pos) as *mut u64) = str_cur2;
-        }
-        argv_pos += 8;
-        str_cur2 += argv_strings[(argv_pos - ptr_array_start - 8) as usize / 8].len() as u64;
-        // correct str_cur2
-    }
+    let argv_refs: alloc::vec::Vec<&[u8]> = argv_strings.iter().map(|s| s.as_slice()).collect();
+    crate::userstack::write_initial_user_stack(new_cr3, &layout, &argv_refs);
 
-    // Actually let me rewrite more carefully
-    let argv_array_start = ptr_array_start;
-    let mut argv_pos = argv_array_start;
-    let mut str_cur_pos = str_start;
-    for s in &argv_strings {
-        unsafe {
-            *((argv_pos) as *mut u64) = str_cur_pos;
-        }
-        argv_pos += 8;
-        str_cur_pos += s.len() as u64;
-    }
-
-    // NULL terminate argv array
-    unsafe {
-        *((argv_array_start + argc as u64 * 8) as *mut u64) = 0;
-    }
-
-    // Write argc
-    let user_rsp = argv_array_start - 8;
-    unsafe {
-        *((user_rsp) as *mut u64) = argc as u64;
-    }
+    let user_rsp = layout.user_rsp;
 
     zenus_console::kinfo!(
         "execve: {} argc={} entry=0x{:x} rsp=0x{:x} cr3=0x{:x}",
@@ -4086,17 +4122,23 @@ mod host_tests {
             None => source,
         };
 
-        // The only remaining raw accesses are the ELF loader building the
-        // initial user stack of an address space it just created (those
-        // addresses come from `loaded.stack_top`, not from the caller), and the
-        // two helpers that build a pointer from a value they just validated.
-        let allowed = [
-            concat!("*((argv_pos) as *mut u64", ") = str_cur2;"),
-            concat!("*((argv_pos) as *mut u64", ") = str_cur_pos;"),
-            concat!("*((argv_array_start + argc as u64 * 8) as *mut u64", ") = 0;"),
-            concat!("*((user_rsp) as *mut u64", ") = argc as u64;"),
-            concat!("Some(ptr as *mut T", ")"),
-        ];
+        // The only raw access left is the helper that builds a pointer from a
+        // value it just validated. The four entries that used to allow the
+        // `sys_execve` argv stores are gone: they moved to
+        // `userstack::write_initial_user_stack`, which is the one place allowed
+        // to run with another CR3 loaded and wraps them in `stac`/`clac`.
+        let allowed = [concat!("Some(ptr as *mut T", ")")];
+
+        // An allowlist that outlives its entries is worse than no allowlist: it
+        // reads as "this shape is fine here" long after the code that needed
+        // the exemption is gone, so a new store next to it sails through.
+        for entry in allowed {
+            assert!(
+                source.lines().any(|l| l.contains(entry)),
+                "the allowlist entry `{entry}` no longer matches any line in \
+                 syscall.rs; delete it so the exemption cannot rot"
+            );
+        }
 
         for (lineno, line) in source.lines().enumerate() {
             let trimmed = line.trim();
