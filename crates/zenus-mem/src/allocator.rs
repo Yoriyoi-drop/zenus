@@ -1,9 +1,24 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use zenus_sync::spinlock::SpinLock;
 
 static HEAP_LOCK: SpinLock<()> = SpinLock::new(());
+
+/// Only the first free-list fault is reported in full. After that the allocator
+/// is walking on broken data and every later report is the same fact; a loop of
+/// them buries the dump that actually identifies the corruption.
+static FAULT_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// The chain `alloc_mut` was walking when it last split a block: (addr, size,
+/// region_end) for each candidate it examined. `alloc_mut` cannot print on the
+/// happy path (the formatter allocates), so it records here and
+/// `report_list_fault` prints it. Static, so recording allocates nothing.
+static SPLIT_TRACE: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+
+fn trace_slot(i: usize) -> &'static AtomicU64 {
+    &SPLIT_TRACE[i]
+}
 
 const HEAP_SIZE: usize = 1024 * 1024 * 8; // 8 MB
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
@@ -74,25 +89,53 @@ impl FreeListAllocator {
         zenus_console::kinfo!("Heap: 8MB free-list allocator ready");
     }
 
-    /// Verify the free list is a chain of `MAGIC_FREE` blocks, ascending, and
-    /// inside the arena. Reports the first thing that is wrong, then returns.
+    /// Record what `alloc_mut` decided, for `report_list_fault` to print.
+    #[allow(clippy::too_many_arguments)]
+    fn record_split_trace(
+        &self,
+        prev: usize,
+        curr: usize,
+        aligned_data: usize,
+        size: usize,
+        block_size: usize,
+        region_end: usize,
+    ) {
+        for (i, v) in [curr as u64, block_size as u64, region_end as u64, prev as u64,
+                       aligned_data as u64, size as u64]
+            .into_iter()
+            .enumerate()
+        {
+            trace_slot(i).store(v, Ordering::Relaxed);
+        }
+    }
+
+    /// Verify the free list is a chain of `MAGIC_FREE` blocks, ascending and
+    /// inside the arena. Reports the first thing that is wrong.
     ///
-    /// This used to exist only as a temporary probe and is kept because the
-    /// failure it exists for is silent otherwise: a `size` field overwritten with
-    /// a small value leaves every `magic` intact, so `dealloc`'s own
-    /// double-free guard does not fire and the list quietly stops describing
-    /// the heap. Two rules for anyone changing it:
+    /// This exists because the failure it guards is otherwise silent.
+    /// `dealloc` refuses only a pointer whose header has the wrong `magic`, so a
+    /// header that is *partly* overwritten — `magic` and `canary` intact, the
+    /// fields between them clobbered — walks straight through it and the list
+    /// quietly stops describing the heap.
+    ///
+    /// Three rules for anyone changing this, all learned the hard way while
+    /// investigating BUG-034:
     ///
     /// * **Report, do not always print.** Every message goes through the
-    ///   formatter, which allocates. A check that allocates on the happy path
-    ///   changes the thing it measures — during the investigation of BUG-034 a
-    ///   probe like that replaced a clean free list with a corrupt one and the
-    ///   bisect pointed at the wrong function.
-    /// * Do not hold `HEAP_LOCK` expectations that the caller has not met; this
-    ///   is called with the lock held.
+    ///   formatter, which allocates. A version that printed on the happy path
+    ///   replaced a clean free list with a corrupt one and sent the bisect at
+    ///   the wrong function entirely.
+    /// * **Do not assert invariants that are not invariants.** This check
+    ///   originally required `size >= MIN_BLOCK` for every free block. That is
+    ///   false: `alloc_mut` only requires the *remainder* of a split to reach
+    ///   `MIN_BLOCK`, and the block it hands out keeps the caller's size, so a
+    ///   freed 3-byte `String` from `devfs::readdir` is a legal 3-byte free
+    ///   block. The check reported a healthy list as broken hundreds of times
+    ///   per `run` and buried the real fault under false positives.
+    /// * It is called with `HEAP_LOCK` held; do not take the lock again.
     fn debug_check_free_list(&self, where_: &str) {
-        // `addr_of!` and not `HEAP.as_ptr()`: this only needs the address, and the
-        // `&`-forming borrow of a `static mut` would need an `unsafe` block
+        // `addr_of!` and not `HEAP.as_ptr()`: this needs only the address, and
+        // the `&`-forming borrow of a `static mut` would need an `unsafe` block
         // here for nothing.
         let arena_lo = core::ptr::addr_of!(HEAP) as usize;
         let arena_hi = arena_lo + HEAP_SIZE;
@@ -108,23 +151,28 @@ impl FreeListAllocator {
                 self.report_list_fault(where_, n, cur, "block outside the arena");
                 return;
             }
+            // The block's *extent* has to fit too, not just its header. This is
+            // the check that matters: a header whose `size` has been inflated
+            // still has a valid magic and canary and a header that starts inside
+            // the arena, so the check above passes, but `alloc_mut` then computes
+            // a `region_end` past the end of the heap and hands out payload
+            // addresses beyond it. The BUG-034 run showed exactly this:
+            // `region_end=0xffffffff81031CF0` against an arena ending at
+            // `0xffffffff81030f70`.
+            let size = unsafe { (*(cur as *mut BlockHeader)).size };
+            if cur + HEADER_SIZE + size > arena_hi {
+                self.report_list_fault(where_, n, cur, "block extends past the arena");
+                return;
+            }
             if cur <= prev {
                 self.report_list_fault(where_, n, cur, "chain is not ascending");
                 return;
             }
             let b = cur as *mut BlockHeader;
-            let (magic, canary, size, next) = unsafe {
-                ((*b).magic, (*b).canary, (*b).size, (*b).next as usize)
-            };
+            let (magic, canary, next) =
+                unsafe { ((*b).magic, (*b).canary, (*b).next as usize) };
             if magic != MAGIC_FREE || canary != CANARY_VALUE {
                 self.report_list_fault(where_, n, cur, "bad magic or canary");
-                return;
-            }
-            // A free block is only ever created by splitting one, and a split
-            // leaves `size >= MIN_BLOCK`. Anything smaller means the header was
-            // overwritten, which is the signature this check was added for.
-            if size < MIN_BLOCK as usize {
-                self.report_list_fault(where_, n, cur, "size below MIN_BLOCK");
                 return;
             }
             prev = cur;
@@ -133,12 +181,62 @@ impl FreeListAllocator {
         }
     }
 
-    /// One line per fault, no formatting of the block itself.
+    /// One line per fault, plus a raw dump of the neighbourhood on the *first*
+    /// one only.
+    ///
+    /// The dump is the point. A list that reads as nonsense is either a corrupted
+    /// header or the allocator walking into some other structure entirely, and
+    /// the bytes settle that immediately — the BUG-034 dump showed `COLBERF`
+    /// (`MAGIC_FREE` backwards) interleaved with `dev` and `tmp`, which is what
+    /// finally showed the arena was full of legitimately tiny free blocks and
+    /// that the fault was elsewhere. Repeating the dump would bury it.
     fn report_list_fault(&self, where_: &str, index: usize, addr: usize, why: &str) {
+        if FAULT_REPORTED.swap(true, Ordering::AcqRel) {
+            return;
+        }
         zenus_console::kerror_code!(
             zenus_console::error::codes::MEM_PROTECTION,
             "free list broken at block {index} ({addr:#x}) during {where_}: {why}"
         );
+        // 24 qwords from 64 bytes before the header onwards: enough to see the
+        // neighbouring headers and whatever pattern sits in the payloads.
+        let start = addr.saturating_sub(64);
+        let s = zenus_console::serial::SerialPort::new(0x3F8);
+        s.write_str("\n[HEAP] raw qwords around the bad block:\n");
+        for i in 0..24usize {
+            let a = start + i * 8;
+            let v: u64 = unsafe { core::ptr::read_volatile(a as *const u64) };
+            s.write_str(if i % 4 == 0 { "\n  " } else { " " });
+            s.write_hex(a as u64);
+            s.write_str(": ");
+            s.write_hex(v);
+        }
+        s.write_str("\n[HEAP] last alloc_mut split: block={");
+        s.write_hex(trace_slot(0).load(Ordering::Relaxed));
+        s.write_str(" size=");
+        s.write_hex(trace_slot(1).load(Ordering::Relaxed));
+        s.write_str(" region_end=");
+        s.write_hex(trace_slot(2).load(Ordering::Relaxed));
+        s.write_str(" prev=");
+        s.write_hex(trace_slot(3).load(Ordering::Relaxed));
+        s.write_str(" aligned_data=");
+        s.write_hex(trace_slot(4).load(Ordering::Relaxed));
+        s.write_str(" req=");
+        s.write_hex(trace_slot(5).load(Ordering::Relaxed));
+        s.write_str("\n[HEAP] chain from head:");
+        let mut c = self.free_head.load(Ordering::Acquire);
+        let mut k = 0usize;
+        while c != 0 && k < 12 {
+            s.write_str(" [");
+            s.write_hex(c as u64);
+            s.write_str(" sz=");
+            s.write_hex(unsafe { (*(c as *mut BlockHeader)).size as u64 });
+            s.write_str("]");
+            c = unsafe { (*(c as *mut BlockHeader)).next as usize };
+            k += 1;
+        }
+        s.write_str("\n[HEAP] end dump\n");
+        zenus_console::serial::flush_output_blocking();
     }
 
     fn alloc_mut(&self, layout: Layout) -> *mut u8 {
@@ -156,6 +254,8 @@ impl FreeListAllocator {
 
         while curr != 0 {
             let block = curr as *mut BlockHeader;
+
+
             unsafe {
                 let block_size = (*block).size;
                 let region_start = curr + HEADER_SIZE;
@@ -209,6 +309,7 @@ impl FreeListAllocator {
                         },
                     );
 
+                    self.record_split_trace(prev, curr, aligned_data, size, block_size, region_end);
                     return aligned_data as *mut u8;
                 }
 
@@ -216,7 +317,6 @@ impl FreeListAllocator {
                 curr = (*block).next as usize;
             }
         }
-
         zenus_console::kerror_code!(
             zenus_console::error::codes::MEM_ALLOC_FAILED,
             "Heap exhausted! free_head={:#x}, size={}",
@@ -433,6 +533,14 @@ unsafe impl GlobalAlloc for FreeListAllocator {
 /// hung with no output at all, even for `--list`.
 #[cfg_attr(target_os = "none", global_allocator)]
 pub static ALLOCATOR: FreeListAllocator = FreeListAllocator::new();
+
+/// Check the free list from outside the allocator. Reports only on failure, so
+/// it does not perturb what it measures (see `debug_check_free_list`).
+pub fn check_free_list(tag: &str) {
+    let _lock = HEAP_LOCK.lock();
+    ALLOCATOR.ensure_initialized();
+    ALLOCATOR.debug_check_free_list(tag);
+}
 
 pub fn init_heap() {
     ALLOCATOR.ensure_initialized();

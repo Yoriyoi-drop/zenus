@@ -51,13 +51,24 @@
 
 ### Observability
 - The heap allocator verifies its own free list on every `alloc` and `dealloc`
-  and names the first thing wrong (bad magic, non-ascending chain, a block
-  outside the arena, a `size` below `MIN_BLOCK`). The corruption report now also
-  says whether the pointer is inside the arena and which free block encloses it.
-  Both were added for BUG-034, which is still open: one user program runs, then
-  the free list is corrupt and no further program can start. `DEVLOG.md` records
-  what is ruled out (the frame allocator, `alloc_mut`'s own writes) and what the
-  next step is.
+  and names the first thing wrong: bad magic or canary, a non-ascending chain, a
+  block outside the arena, or **a block whose extent runs past the end of the
+  arena**. That last one is the check that matters — a header with an inflated
+  `size` has a perfectly valid magic and canary and a header inside the arena, so
+  anything that only inspects the header passes it.
+- On the first fault the allocator dumps the raw qwords around the bad block
+  plus the chain from the head, and prints what `alloc_mut` last decided about
+  its split. `alloc_mut` cannot print on the happy path — the formatter
+  allocates, and a check that allocates changes the thing it measures — so the
+  split decision is recorded into a static array and printed later.
+- The corruption report also says whether the freed pointer is inside the arena
+  and which free block encloses it, which separates "stale pointer" from "double
+  free of a coalesced block".
+- All of it was added for BUG-034, still open: one user program runs, then the
+  free list is corrupt and no further program can start. `DEVLOG.md` records the
+  two distinct faults now characterised, and explicitly that hardware
+  watchpoints do not work on QEMU 8.2.2 TCG, so nobody spends another cycle
+  building one.
 
 ### Testing
 - Added a host unit-test layer: `#[cfg(test)] mod host_tests` inside the

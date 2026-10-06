@@ -2117,20 +2117,105 @@ overwritten header that still says `MAGIC_FREE` sails straight through.
 
 Verified: `make test-host` 206 passed, `make test` 25/25.
 
-### Next step for whoever picks this up
+### A hardware watchpoint was built, and it does not work here
 
-Not more probing. The writer is reachable from a single 64 KiB `alloc`, so the
-cheap decisive move is a **watchpoint on the first header the corruption touches**,
-armed from inside `alloc_stack` rather than from GDB — the address is not known
-until the split happens, which is why the external watchpoint attempts kept
-missing it. Concretely: set DR0 to the address of the block `alloc_mut` is about
-to split, take the write, and print the faulting RIP. Alternatively, poison every
-free block's payload with a pattern in `debug_check_free_list` so the next
-corruption reports which block's *contents* were overwritten rather than just
-that a header was.
+The obvious instrument for "who wrote this byte" is a data breakpoint, and one
+was written: `zenus_mem::watchpoint`, DR0, 8-byte write watch, `#DB` routed
+through the existing `debug_handler` to report the faulting RIP. It was armed
+from inside `alloc_mut` on the header of the block about to be split — which is
+the moment the address is known, and the reason every external GDB attempt
+missed.
 
-Do not guess. The two things ruled out above (frame allocator, `alloc_mut`'s own
-writes) are the two that look most likely from the outside.
+It never fired. 227 arms, zero hits. A `self_test()` was then added that arms on
+a private stack slot, writes it, and checks the handler ran, and **that failed
+too** — which is the useful part. It distinguishes "nothing wrote there" from
+"the mechanism is broken", and it was broken. Six plausible DR7 encodings were
+swept (enable bit at 16 per the SDM, at 8 as some emulators document, local vs
+global, 4-byte vs 8-byte length); every one read back as written and none raised
+`#DB`. QEMU 8.2.2 TCG does not implement DR0 data watchpoints.
+
+The instrument was removed rather than left in dead, because a self-test that
+prints FAILED on every boot is noise, not a tool. The finding that matters is
+recorded here and in the `debug_check_free_list` doc comment: on this platform
+the only way to catch a specific write is `-s` + GDB, and GDB cannot be used for
+a heap address because the block is only picked inside `alloc_mut`.
+
+Two bugs were found *in the instrument* on the way, both of which would have
+produced confident wrong answers:
+
+* The first version armed at the block address, which is `magic`. `magic` and
+  `canary` survive this corruption — only `size` is clobbered — so it watched a
+  field that is never written and reported nothing.
+* The first DR7 used bit 7 for the enable flag. Bit 7 is `LEN1`, the length of
+  DR1; the enable bits are 16-23. It read back `dr7=0x489`, which is the tell.
+
+### What the raw dump settled
+
+`report_list_fault` now dumps 24 qwords around the bad header on the first
+fault. That is what showed the arena is full of **legitimately tiny** free
+blocks: `COLBERF` (`MAGIC_FREE` backwards) interleaved with `dev` and `tmp`,
+`COLBDESU` (`MAGIC_USED` backwards), sizes 2, 3, 3, 3, 4, 8. Those are
+`devfs::readdir`'s per-entry `String::from(name)` allocations. The blocks are
+fine; the walk just ends at a zeroed header.
+
+It also caught a **false positive in the new check itself**. The check required
+every free block to have `size >= MIN_BLOCK`, reasoning that `alloc_mut` only
+creates remainders that large. That is wrong: only the *remainder* of a split has
+to reach `MIN_BLOCK`, and the block handed out keeps the caller's size, so a
+freed 3-byte `String` is a legal 3-byte free block. The check reported a
+perfectly healthy list as broken hundreds of times per `run` and buried the real
+fault. Removed, with the reasoning written down so it is not re-added.
+
+### The one measurement that is actually new
+
+`alloc_mut` records what it decided about each split into a static array
+(`record_split_trace`: block, size, region_end, prev, aligned_data, requested)
+and the fault report prints it. `alloc_mut` cannot print on the happy path —
+the formatter allocates — so recording is free and printing is deferred.
+
+The recorded split for the failing run:
+
+```
+block=0xFFFFFFFF80856A58 size=0x7DB278
+region_end=0xFFFFFFFF81031CF0 prev=0xFFFFFFFF80844840
+aligned_data=0xFFFFFFFF80856A80 req=0x10000
+```
+
+`region_end` is **past the end of the arena**. The arena is
+`[0xFFFFFFFF80830F70, 0xFFFFFFFF81030F70)`, so that block claims 0xD80 bytes
+more than exists. A block header with a valid magic, a valid canary and an
+inflated `size` passes every check that only looks at the header, and then
+`alloc_mut` computes a `region_end` outside the heap and will eventually hand out
+a payload pointer past the end. That is a new invariant to check, and it is now
+checked:
+
+```rust
+if cur + HEADER_SIZE + size > arena_hi {
+    self.report_list_fault(where_, n, cur, "block extends past the arena");
+}
+```
+
+This did not fire in the run above, because the faulting walk ended on a zeroed
+header before reaching the inflated block. Both faults are present; the zeroed
+header is found first.
+
+### Where this leaves BUG-034
+
+Two distinct problems in one symptom, both now characterised:
+
+1. **A zeroed 32-byte header** terminating the free list, found first, so it is
+   what every report shows. Its neighbours are intact.
+2. **A block whose `size` is inflated past the arena end.** Found by the split
+   trace, not by the list walk. How a `size` grows is the open question —
+   `dealloc_mut`'s coalescing writes `(*p).size += HEADER_SIZE + block_size`
+   and `(*n).size` into a neighbour, and a coalesce that runs against a header
+   that is not really a free block would inflate exactly like this.
+
+Next step, and it is a specific one: `dealloc_mut`'s coalescing is the only
+place `size` is ever increased, so log every coalesce (prev, block, next, and
+the three sizes before and after) into the same static trace and read back which
+coalesce inflated the block. That is a bounded, purely local question, and it
+does not need a write watchpoint.
 
 ---
 
@@ -2142,7 +2227,7 @@ yang tercatat, tapi yang **tidak** bisa diselesaikan di host:
 | Item | Kenapa belum selesai |
 |---|---|
 | SMAP/SMEP | **SELESAI** — lihat BUG-033. Root cause-nya bukan PML4 U/S; ada tiga bug terpisah (`stac`/`clac` `nomem`, `sys_write` tanpa `stac`, page-fault handler yang fault dirinya sendiri). Sekarang aktif dan `run /initrd/bin/hello` lulus. |
-| Heap free list korup setelah satu user task | **BUG-034, belum selesai.** Sudah dibatasi sampai `alloc_stack` (64 KiB) di dalam `create_user_task`; penulis byte-nya belumidentified. Frame allocator dan `alloc_mut` sudah disingkirkan. Yang perlu berikutnya: watchpoint *dari dalam* `alloc_stack` pada header yang akan di-split, bukan dari GDB — alamatnya baru diketahui setelah split terjadi, itu sebabnya percobaan watchpoint dari luar selalu miss. Detail lengkap di BUG-034 |
+| Heap free list korup setelah satu user task | **BUG-034, belum selesai, tapi oracle baru.** Dua masalah dalam satu gejala: (a) header 32-byte yang di-zero mengakhiri free list — ini yang selalu ditemukan pertama; (b) sebuah block yang `size`-nya **melewati ujung arena** (`region_end=0x81031CF0` vs arena berakhir `0x81030F70`), ditemukan lewat split-trace, bukan list walk. Watchpoint hardware sudah dicoba dan **tidak berfungsi di QEMU 8.2.2 TCG** (0 dari 6 encoding DR7 menghasilkan `#DB`), jadi jangan coba lagi. Langkah berikutnya sudah spesifik: `dealloc_mut` coalescing adalah satu-satunya tempat `size` pernah bertambah, jadi log setiap coalesce. Detail di BUG-034 |
 | `mapped_at` satu alamat per segmen SHM | `shmat` kedua untuk segmen yang sama menimpa yang pertama, jadi pemetaan pertama tidak bisa di-detach. Perbaikannya butuh daftar attachment per segmen, bukan skalar — perubahan struktural, di luar-fix yang bisa diverifikasi |
 | SHM end-to-end | Butuh page table sungguhan. Yang bisa diuji di host (bagian indeks) sudah ada test-nya |
 | `io_scheduler::io_stats()` | Mengembalikan total + dua nol hardcoded (`ARCHITECTURE.md`) |
