@@ -50,6 +50,23 @@
   not testing them at all.
 
 ### Fixed
+- **BUG-038: the frame allocator served memory that does not exist.** Its second
+  pass — the one that serves the pages below the 16 MiB floor that pass one
+  cannot see — advanced `regions[i].base` in place without shrinking `length`,
+  so a region's claimed end grew by a page per allocation until the *first* pass,
+  which trusts `base + length`, started handing it out. On a 32 MiB region that
+  was 3584 phantom pages, and `total_memory` drifted up with them. The pass now
+  keeps `regions` read-only and moves allocator-owned state instead: a `floor`
+  (the seeded `next_free`, and the ceiling the low pass may not cross) and a
+  per-region `low_cursor`, which `reserve_region` shifts along with the region it
+  belongs to. Two things had blocked the fix for three attempts: `reserve_region`
+  had no tests (six of the seven unnoticed mutations were of it), and the seeding
+  lives in `global_init`, which reads `rsp` and so no host test could call it.
+  The seeding decision is now the pure `plan_regions`, which `global_init` *and*
+  `FrameAllocator::new` both call — the two paths were previously equivalent only
+  by inspection. `plan_tests.rs` adds 11 tests; 15 of 16 mutations are caught and
+  the survivor is a dead store, with the reason recorded in `reset`. `DEVLOG.md`
+  BUG-038 has the full account.
 - **A sub-page `reserve_region` reserved nothing.** It split the region list on
   exact byte boundaries, so `[0x1000, 0x5000)` minus `[0x1800, 0x2000)` became
   `[0x1000, 0x1800)` and `[0x2000, 0x5000)`. `alloc_frame` rounds a region's base
@@ -123,7 +140,9 @@
 - Nothing this tick: `fuzz-coverage` ran clean at 50 000 cases again, and a
   third attempt at the frame allocator's second-pass fix was reverted for the
   third time. `DEVLOG.md` BUG-038 records the mutation results across all three
-  attempts (2/5, 4/10, 14/21 caught) and what would actually settle it.
+  attempts (2/5, 4/10, 14/21 caught) and what would actually settle it. Both
+  pieces it asked for now exist and the repair has landed — see the top of this
+  section.
 
 ### Observability
 - The heap allocator verifies its own free list on every `alloc` and `dealloc`

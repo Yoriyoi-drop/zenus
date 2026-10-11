@@ -2804,3 +2804,144 @@ says what the defect is and why the obvious repair was not applied.
 
 `make fuzz-coverage`: 50 000 cases, `crashes=0` (BUG-037). Nothing new from the
 fuzzer, so the remaining ROADMAP work is the audit findings, not parser holes.
+
+---
+
+## BUG-038 ditutup — pass kedua frame allocator sekarang punya cursor sendiri
+
+**Status:** sudah di-fix + mutation-checked (15/16 mutasi tertangkap; satu sisanya
+dead store, alasannya di bawah).
+
+### Apa yang salah
+
+`alloc_frame` punya dua pass. Pass pertama memakai `next_free` sebagai bump
+pointer dan menghormati `base + length`. Pass kedua melayani halaman di bawah
+`next_free` — memori yang dilewati karena `plan_regions` menaikkan floor ke
+16 MiB — dan melakukannya dengan **menulis balik `regions[i].base`** tanpa
+mengurangi `length`:
+
+```rust
+self.regions[reg_idx].base = start_aligned + frame_size;   // lama
+```
+
+Jadi `base + length` — ujung yang diklaim region itu — tumbuh satu halaman
+setiap kali pass kedua melayani satu halaman. Setelah cukup banyak alokasi,
+region itu mendeskripsikan memori yang tidak ada, dan pass *pertama* — yang
+mempercayai `base + length` — ikut membagikannya. `total_memory` ikut naik.
+
+Pada fixture 32 MiB di `distinct_pages_are_never_handed_out_twice` (region
+`[2 MiB, 34 MiB)`, floor 16 MiB) jumlahnya tepat: 4608 halaman asli di atas
+floor, 3584 di bawah, dan **3584 halaman hantu** di atas 34 MiB.
+
+### Kenapa tiga percobaan sebelumnya gagal
+
+Rencana perbaikannya sudah benar sejak awal — "tinggalkan `regions` sendiri,
+lacak cursor per region" — tapi test-nya tidak menahan invariant yang
+diklaimnya, dan DEVLOG ini menolak mengirim kode yang tidak dipegang test.
+Yang kurang dua:
+
+1. **`reserve_region` tidak punya test.** Enam dari tujuh mutasi yang lolos
+   adalah mutasi fungsi itu. Sudah ditutup di putaran sebelumnya
+   (`reserve_tests.rs`).
+2. **`global_init` tidak bisa dipanggil dari host test.** Ia membaca `rsp` dan
+   simbol linker, dan justru di situlah cursor di-seed. `FrameAllocator::new`
+   adalah salinan kedua dari logika seeding yang sama, dan kedua jalur itu
+   "identik hanya karena dilihat" — jadi test host bisa hijau sementara jalur
+   boot salah.
+
+### Yang dikerjakan
+
+**`plan_regions(fa, input)`** — keputusan seeding sebagai fungsi murni. Semua
+yang dipakai `global_init` (`memory_map`, batas image kernel, `rsp` boot stack)
+masuk sebagai nilai:
+
+```rust
+pub struct AllocPlanInput<'a> {
+    pub memory_map: &'a [MemoryRegion],
+    pub kernel_image_base: u64,
+    pub kernel_image_end: u64,
+    pub boot_stack_phys: u64,
+}
+```
+
+`global_init` hanya mengumpulkan nilai-nilai itu lalu memanggilnya. **`new`
+juga** — jadi tidak ada lagi dua salinan. `boot_stack_phys == 0` berarti "tidak
+ada boot stack untuk dilindungi" dan reservasinya dilewati, supaya test host
+tidak menelan region rendah.
+
+**Cursor keluar dari `regions`.** `alloc_frame` tidak lagi menulis ke `regions`
+sama sekali; yang bergerak adalah field milik allocator:
+
+- `floor` — nilai `next_free` saat di-seed, yaitu batas antara dua pass. Pass
+  kedua tidak boleh melewatinya. Kalau ia memakai `next_free` sebagai plafon
+  (seperti percobaan pertama saya), plafon itu sudah naik melewati semua yang
+  dilayani pass pertama, dan pass kedua berbalik melayani halaman-halaman itu
+  untuk kedua kalinya. Test menghitungnya sebagai "12800 halaman dari region
+  32 MiB" — dan itu yang menghentikannya sebelum masuk.
+- `low_cursor: [u64; MAX_REGIONS]` — watermark per region untuk pass kedua.
+  Per region, bukan satu alamat untuk seluruh pass: satu cursor monoton hanya
+  benar kalau region terurut naik, dan `reserve_region` boleh meninggalkannya
+  tidak terurut. `max(cursor[i], base)` membuat cursor yang basi (karena
+  reservasi menaikkan base) dibuang, bukan dipakai melayani halaman ter-reserve.
+- `reserve_region` memindahkan `low_cursor` bersama `regions`-nya, di cabang
+  removal dan di cabang split. Ini yang membuat cursor "milik region", bukan
+  "milik index".
+
+### Test yang mengunci
+
+`plan_tests.rs` (baru, 11 test) menaikkan jumlah test host crate ini dari 23
+menjadi 34, dan 217 → 228 di seluruh workspace. Yang penting:
+
+| Test | Invariant |
+|---|---|
+| `plan_keeps_exactly_the_usable_unreserved_pages` | daftar region persis, dan setiap halaman yang keluar ada di map yang masih hidup |
+| `serving_a_frame_never_changes_the_region_list` | **inti BUG-038**: alokasi tidak boleh mengubah `regions` maupun `total_memory` |
+| `distinct_pages_are_never_handed_out_twice` | tidak ada halaman keluar dua kali; hitungannya sekarang 8192, bukan 11776 |
+| `a_first_region_straddling_16_mib_is_split_across_both_passes` | floor 16 MiB benar-benar membelah kedua pass |
+| `the_second_pass_does_not_serve_a_reserved_page` | map tidak terurut sekaligus |
+| `planning_clears_whatever_the_allocator_already_held` | `reset` benar-benar membersihkan |
+| `planning_again_serves_the_same_pages_it_did_the_first_time` | cursor basi tidak ikut terbawa |
+| `a_reservation_keeps_the_low_cursor_with_its_region` | cabang removal menggeser cursor |
+| `a_split_shifts_the_cursor_of_the_regions_after_it` | cabang split menggeser cursor |
+| `a_split_does_not_let_the_tail_re_serve_what_the_low_pass_took` | cabang split mewariskan cursor ke tail |
+| `the_kernel_image_is_never_handed_out` | image kernel tidak ada di map, jadi hanya reservasi yang mengeluarkannya |
+
+### Mutation check
+
+16 mutasi, 15 tertangkap:
+
+```
+caught  low pass writes the region back (the original BUG-038 defect)
+caught  low pass ceiling is next_free, not floor
+caught  low pass cursor never advances
+caught  low pass drops the <= end bound
+caught  removal branch does not shift the cursor array
+caught  split does not carry the cursor into the tail
+caught  split does not shift the cursor array up
+caught  plan skips the kernel image reservation
+caught  plan keeps non-usable map entries
+caught  plan skips the boot stack reservation
+caught  plan never sets the floor
+caught  plan sets no 16 MiB floor for a straddling region
+caught  plan forgets total_memory
+caught  reset keeps the low cursors
+caught  plan skips reset entirely
+SURVIVED reset keeps the regions
+```
+
+Yang lolos adalah **dead store**, bukan cacat: `reset` tetap mengosongkan
+`region_count`, dan semua yang membaca `regions` dibatasi `region_count`, jadi
+entri basi di posisi setelahnya tidak bisa dijangkau. Ini jenis yang sama dengan
+"removal loop leaves a stale entry past `region_count`" di putaran
+`reserve_region`. `low_cursor` **tidak** begitu — ia dibaca untuk setiap index di
+bawah `region_count`, jadi cursor basi benar-benar membatasi pass kedua; itulah
+kenapa `reset keeps the low cursors` tertangkap sementara `regions` tidak.
+Perbedaan itu ditulis di `reset`.
+
+Skrip mutation-nya sendiri hanya alat sekali pakai; hasilnya di atas.
+
+### Catatan
+
+`free_frames_count()` masih melaporkan kedalaman free stack, bukan apa yang
+`alloc_frame` masih bisa layani — itu BUG-039 dan penyebab `mmap` dibatasi 16384
+halaman. Belum disentuh di putaran ini.

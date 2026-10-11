@@ -45,7 +45,7 @@ RTL8139, virtio-net.
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 217 host unit tests (`make test-host`), 25 in-kernel tests
+**Testing** — 228 host unit tests (`make test-host`), 25 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), CI running both.
 
 ## Partially done
@@ -72,12 +72,14 @@ watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
   `free_frames_count()`, which still returns the recycled stack's depth rather
   than what `alloc_frame` can serve, so large mappings are refused on a machine
   with 2 GiB spare. An availability limit, not a safety one.
-- **The frame allocator's second pass advances `regions[i].base` without
-  shrinking `length`,** so a region's claimed end grows by a page every time it
-  serves one. The repair (a per-region cursor and a fixed floor) was attempted
-  three times and reverted each time; BUG-038 records the mutation results. The
-  blocker is `reserve_region`'s reshape branches being untested, which is
-  ordinary missing work rather than a hard limit.
+- **The frame allocator's second pass is fixed.** It used to advance
+  `regions[i].base` without shrinking `length`, so a region's claimed end grew by
+  a page every time it served one and the first pass eventually handed out memory
+  that does not exist. It now keeps `regions` read-only and tracks a `floor` plus
+  a per-region `low_cursor`; and the seeding decision is the pure `plan_regions`,
+  which `global_init` and `FrameAllocator::new` both call. `DEVLOG.md` BUG-038 has
+  the account, including the mutation check (15 of 16 caught, the survivor a dead
+  store).
 - **`reap_terminated_stacks()` is unreachable**, and `TERMINATED_STACKS` is only
   filled by `task_exit()`, which no syscall reaches. `kill_task` and `reap_task`
   each free task stacks on their own path, with nothing keeping those paths

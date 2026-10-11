@@ -11,6 +11,8 @@ pub mod allocator;
 pub mod frame_allocator;
 pub mod paging;
 #[cfg(test)]
+mod plan_tests;
+#[cfg(test)]
 mod reserve_tests;
 pub mod vma;
 pub use vma::VmaTable;
@@ -138,45 +140,42 @@ mod host_tests {
         assert_eq!(fa.used_memory(), 0, "a double free must not decrement twice");
     }
 
-    /// The regression the region-`base` advance in `alloc_frame`'s second pass
-    /// deserves, stated as the invariant it breaks rather than as a fix.
+    /// The regression the second pass's cursors exist for.
     ///
-    /// That pass advances `regions[i].base` without shrinking `length`, so a
-    /// region's claimed end — `base + length` — grows by a page every time the
-    /// pass serves one. After enough allocations the region describes memory
-    /// that does not exist.
+    /// The old second pass advanced `regions[i].base` without shrinking
+    /// `length`, so a region's claimed end — `base + length` — grew by a page
+    /// every time the pass served one. On this exact map, once the pass had
+    /// served everything below 16 MiB the first pass started handing out pages
+    /// *past* the region's real end: 3584 pages of memory that does not exist.
+    /// The old version of this test could not see it — it asked only whether the
+    /// pages were distinct, and phantom pages are distinct — and its `TOTAL` was
+    /// sized to the buggy behaviour (11776 = 8192 real + 3584 phantom) so the
+    /// loop happened to stop exactly at the end of the phantoms.
     ///
-    /// It is written as a *demonstration*, not a regression test: the code does
-    /// not satisfy it, and `assert!` would fail on every run. `total_memory` and
-    /// `free_frames_count` are the observable consequences, and the honest
-    /// summary is in `DEVLOG.md` (BUG-036). What is pinned here is that the
-    /// allocator hands out distinct pages, which is the property that actually
-    /// matters for memory safety.
+    /// The fix keeps `regions` read-only and moves allocator-owned cursors
+    /// instead; `serving_a_frame_never_changes_the_region_list` in `plan_tests`
+    /// pins that directly. What this test pins is the property that actually
+    /// matters for memory safety — no page comes out twice — and that both
+    /// passes run, so a cursor that stopped advancing would be caught here
+    /// rather than as a page of somebody else's memory.
     #[test]
     fn distinct_pages_are_never_handed_out_twice() {
         use crate::frame_allocator::{FrameAllocator, MemoryRegion};
 
         // The region has to *straddle* the floor, or one pass serves all of it
-        // and the other is never reached. `global_init` raises the floor to
-        // 16 MiB only when the base is below it and the end is above it, so
-        // base = 32 MiB with 32 MiB of length puts the floor at 16 MiB, inside
-        // the region: `[0x20_0000, 0x100_0000)` comes from the second pass and
-        // `[0x100_0000, 0x40_00000)` from the first.
-        //
-        // An earlier version of this test used a region entirely below the floor.
-        // There the floor collapses onto the base, the first pass serves
-        // everything, and the second pass — the one with the defect — is dead
-        // code. The mutation check caught exactly that: stopping the second pass
-        // from advancing the region's base went unnoticed.
+        // and the other never runs. 2 MiB with 32 MiB of length puts the floor
+        // at 16 MiB, inside the region: `[0x20_0000, 0x100_0000)` comes from the
+        // second pass and `[0x100_0000, 0x220_0000)` from the first.
         const BELOW: usize = (0x100_0000 - 0x20_0000) / 0x1000;
-        const ABOVE: usize = 0x20_000_00 / 0x1000;
-        const TOTAL: usize = BELOW + ABOVE;
-        let map = [MemoryRegion { base: 0x20_0000, length: 0x20_000_00, kind: 0 }];
+        const TOTAL: usize = 0x0200_0000 / 0x1000;
+        const ABOVE: usize = TOTAL - BELOW;
+        let map = [MemoryRegion { base: 0x20_0000, length: 0x0200_0000, kind: 0 }];
         let mut fa = FrameAllocator::new(&map);
 
         let mut seen = [0u64; TOTAL];
         let mut n = 0usize;
         let mut below = 0usize;
+        let mut above = 0usize;
         for _ in 0..TOTAL {
             let a = fa
                 .alloc_frame()
@@ -187,13 +186,16 @@ mod host_tests {
             n += 1;
             if a < 0x100_0000 {
                 below += 1;
+            } else {
+                above += 1;
             }
         }
-        assert_eq!(
-            below, BELOW,
-            "the pages below the floor must come from the second pass, so a \
-             second pass that serves nothing would leave this short"
-        );
+        // Nothing left over. A cursor that failed to advance would loop on one
+        // page and be caught by the duplicate check; one that ran past the
+        // region's end would serve a page outside it and be caught here.
+        assert!(fa.alloc_frame().is_none(), "the allocator invented a {n}th page");
+        assert_eq!(below, BELOW, "the pages below the floor come from the second pass");
+        assert_eq!(above, ABOVE, "and the pages above it from the first");
     }
 
     /// `free_frame` must reject an address that is not a frame boundary.
