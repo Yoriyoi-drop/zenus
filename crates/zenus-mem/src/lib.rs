@@ -11,6 +11,8 @@ pub mod allocator;
 pub mod frame_allocator;
 pub mod paging;
 #[cfg(test)]
+mod free_count_tests;
+#[cfg(test)]
 mod plan_tests;
 #[cfg(test)]
 mod reserve_tests;
@@ -92,25 +94,26 @@ mod host_tests {
 
         let map = [MemoryRegion { base: 0x1000, length: 0x10_000, kind: 0 }];
         let mut fa = FrameAllocator::new(&map);
-        // `free_frames_count` is still the recycled stack's depth (see its own
-        // docs), so it is the right thing to watch here: one free must put
-        // exactly one entry on it.
-        assert_eq!(fa.free_frames_count(), 0);
+        // `recycled_frames_count` is the stack depth, so it is the right thing
+        // to watch here: one free must put exactly one entry on it. The
+        // *total*-free accessor (`free_frames_count`) also moves, but this small
+        // map has untouched pages behind it that would swamp a one-entry change.
+        assert_eq!(fa.recycled_frames_count(), 0);
 
         let a = fa.alloc_frame().expect("frame");
-        assert_eq!(fa.free_frames_count(), 0);
+        assert_eq!(fa.recycled_frames_count(), 0);
         fa.free_frame(a);
-        assert_eq!(fa.free_frames_count(), 1, "one free, one entry");
+        assert_eq!(fa.recycled_frames_count(), 1, "one free, one entry");
         fa.free_frame(a); // the double free
-        assert_eq!(fa.free_frames_count(), 1, "one frame back, not two");
+        assert_eq!(fa.recycled_frames_count(), 1, "one frame back, not two");
 
         // Re-allocate then free again: the frame was popped, so it is no longer
         // on the stack and this free must be accepted.
         let b = fa.alloc_frame().expect("frame");
         assert_eq!(b.as_u64(), a.as_u64());
-        assert_eq!(fa.free_frames_count(), 0);
+        assert_eq!(fa.recycled_frames_count(), 0);
         fa.free_frame(b);
-        assert_eq!(fa.free_frames_count(), 1);
+        assert_eq!(fa.recycled_frames_count(), 1);
     }
 
     /// `used_memory` is what `meminfo` prints, and it has to move in both
@@ -215,9 +218,9 @@ mod host_tests {
         for f in frames.iter_mut() {
             *f = fa.alloc_frame().expect("frame").as_u64();
         }
-        // `free_frames_count` still reports the recycled stack's depth (see
-        // BUG-036), so `used_memory` is what shows a stray entry here: a bad
-        // address landing on the stack decrements it once per accepted free.
+        // `recycled_frames_count` still reports the recycled stack's depth, so
+        // `used_memory` is what shows a stray entry here: a bad address landing
+        // on the stack decrements it once per accepted free.
         let used = fa.used_memory();
 
         fa.free_frame(x86_64::PhysAddr::new(0x1801));

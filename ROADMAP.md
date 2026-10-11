@@ -62,16 +62,13 @@ watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
 ## Known broken
 
-- **`meminfo`'s frame lines do not add up.** Recycling is fixed (BUG-036), so
-  "Free stack" now moves from 0 to 24 after a user program runs and is reaped.
-  "Used" stays 0, which is correct at the two points it is sampled — before
-  anything is mapped, and after everything is freed — but nothing samples it
-  while frames are actually outstanding, so the line is untested rather than
-  wrong.
-- **`mmap` is capped at 16384 pages.** `sys_mmap` budgets against
-  `free_frames_count()`, which still returns the recycled stack's depth rather
-  than what `alloc_frame` can serve, so large mappings are refused on a machine
-  with 2 GiB spare. An availability limit, not a safety one.
+- **`meminfo`'s `Used` line is untested rather than wrong.** Recycling is fixed
+  (BUG-036) and the free count is now exact (BUG-039), so the memory lines add
+  up: `Total` is what survived the reservations and `Free` is every frame
+  `alloc_frame` can still serve. `Used` stays 0, which is correct at the two
+  points it is sampled — before anything is mapped, and after everything is
+  freed — but nothing samples it while frames are actually outstanding, so that
+  one line still has no test behind it.
 - **The frame allocator's second pass is fixed.** It used to advance
   `regions[i].base` without shrinking `length`, so a region's claimed end grew by
   a page every time it served one and the first pass eventually handed out memory

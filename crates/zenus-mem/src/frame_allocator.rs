@@ -281,8 +281,96 @@ impl FrameAllocator {
     pub fn total_memory(&self) -> u64 {
         self.total_memory
     }
-    pub fn free_frames_count(&self) -> usize {
+    /// How many frames are still on the recycled stack.
+    ///
+    /// Not the same number as [`Self::free_frames_count`], which is what
+    /// `alloc_frame` can serve from *everywhere*. This one is the stack depth
+    /// alone, and exists so a test can watch a free land on the stack even when
+    /// thousands of untouched pages sit behind it.
+    pub fn recycled_frames_count(&self) -> usize {
         self.free_count
+    }
+
+    /// How many frames `alloc_frame` can still hand out, exactly.
+    ///
+    /// This used to be `free_count` — the depth of the recycled stack — which
+    /// was wrong in both directions and wrong in a way that mattered: `sys_mmap`
+    /// budgets against it, so with the stack below 16 384 entries it refused
+    /// mappings the machine could satisfy, and a fresh allocator reported zero
+    /// free memory. It is now the recycled stack plus the pages *each pass* can
+    /// still reach, computed the same way `alloc_frame` reaches them.
+    ///
+    /// Exact rather than an estimate, because the two passes are disjoint: the
+    /// high pass serves pages at or above `next_free` (which starts at `floor`
+    /// and only climbs), the low pass serves pages strictly below `floor`, and
+    /// the recycled stack holds pages both passes have already moved past. So
+    /// nothing is counted twice and no servable page is left out.
+    ///
+    /// ## When it can still over-count
+    ///
+    /// [`Self::clear_free_stack`] drops recycled frames on the floor. Those pages
+    /// were already served once, so no pass will reach them again, and this
+    /// counts them as free until they would have been popped — the one case
+    /// where the number is optimistic. `mmap` refusing on that number is the
+    /// safe failure, and the alternative (a stale set of frames) is not.
+    pub fn free_frames_count(&self) -> usize {
+        self.free_count + self.high_pass_frames() + self.low_pass_frames()
+    }
+
+    /// The pages the high (bump) pass can still serve.
+    ///
+    /// `alloc_frame` picks the *first* region, in list order, whose next page
+    /// fits — which drains region 0 completely before region 1 is ever touched,
+    /// and so on down the list. A single ordered walk here therefore describes
+    /// every future allocation: it advances the same cursor the allocator would,
+    /// and per region counts the pages from that cursor up to the last page
+    /// whose end stays inside the region.
+    fn high_pass_frames(&self) -> usize {
+        let frame = PAGE_SIZE_U64;
+        let mut cursor = self.next_free;
+        let mut total = 0usize;
+        for i in 0..self.region_count {
+            let reg = self.regions[i];
+            let start = (core::cmp::max(reg.base, cursor) + frame - 1) & !(frame - 1);
+            let end = reg.base + reg.length;
+            if start + frame <= end {
+                let pages = ((end - start) / frame) as usize;
+                total += pages;
+                cursor = start + (pages as u64) * frame;
+            }
+        }
+        total
+    }
+
+    /// The pages the low pass can still serve.
+    ///
+    /// Per region, from `low_cursor` (or the page-aligned base if it has not
+    /// started) up to the last page that fits before both the region's end and
+    /// `floor`. The bound is `floor`, not `next_free`, for the same reason
+    /// `alloc_frame` uses it: `next_free` has climbed past everything the high
+    /// pass served, and a low pass bounded by it would count those pages twice.
+    fn low_pass_frames(&self) -> usize {
+        let frame = PAGE_SIZE_U64;
+        let mut total = 0usize;
+        for i in 0..self.region_count {
+            let reg = self.regions[i];
+            let base = (reg.base + frame - 1) & !(frame - 1);
+            let cursor = core::cmp::max(self.low_cursor[i], base);
+            let end = reg.base + reg.length;
+            // The pass serves page `p` when `p + frame <= end` and `p < floor`,
+            // so the last candidate is the page-aligned top that satisfies both.
+            // Taking `floor - frame` directly would be wrong for a `floor` that
+            // is not page aligned, which `plan_regions` does not promise.
+            let limit = core::cmp::min(end, self.floor);
+            if limit < frame {
+                continue;
+            }
+            let last = (limit - frame) & !(frame - 1);
+            if last >= cursor {
+                total += ((last - cursor) / frame) as usize + 1;
+            }
+        }
+        total
     }
 
     /// Clear all entries from the free stack.

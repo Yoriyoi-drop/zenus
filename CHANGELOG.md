@@ -50,6 +50,20 @@
   not testing them at all.
 
 ### Fixed
+- **BUG-039: `free_frames_count` reported the recycled stack, not the free
+  memory.** It used to be `free_count` — the depth of the stack of frames handed
+  back by `free_frame` — which is zero on a fresh allocator. `sys_mmap` budgets
+  against this number, so on a 2 GiB machine `mmap` was capped at 16 384 pages
+  (the stack size) no matter how much was actually free, and `meminfo`'s free
+  line bore no relation to the machine. It is now the recycled stack **plus** the
+  pages each of `alloc_frame`'s two passes can still reach, computed the same way
+  the allocator reaches them, and it is exact: the two passes are disjoint and
+  the stack holds pages both have moved past. `meminfo` prints it as `Free:`
+  rather than `Free stack:`, and the seven new tests in `free_count_tests.rs`
+  check the number against a real drain at every step rather than against a
+  second copy of the allocator's arithmetic.
+
+### Fixed
 - **BUG-038: the frame allocator served memory that does not exist.** Its second
   pass — the one that serves the pages below the 16 MiB floor that pass one
   cannot see — advanced `regions[i].base` in place without shrinking `length`,

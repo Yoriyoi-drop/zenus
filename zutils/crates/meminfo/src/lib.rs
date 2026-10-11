@@ -37,7 +37,10 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     w.write_str(" frames (");
     w.write_u64(fa.used_memory() / (1024 * 1024));
     w.write_str(" MB)\r\n");
-    w.write_str("  Free stack: ");
+    // Not "Free stack": this is every frame `alloc_frame` can still serve —
+    // the recycled stack plus both passes — which is what the number always
+    // meant to be (BUG-039). The stack depth alone is a much smaller number.
+    w.write_str("  Free:  ");
     w.write_u64(fa.free_frames_count() as u64);
     w.write_str(" frames\r\n");
 }

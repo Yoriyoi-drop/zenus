@@ -2943,5 +2943,118 @@ Skrip mutation-nya sendiri hanya alat sekali pakai; hasilnya di atas.
 ### Catatan
 
 `free_frames_count()` masih melaporkan kedalaman free stack, bukan apa yang
-`alloc_frame` masih bisa layani — itu BUG-039 dan penyebab `mmap` dibatasi 16384
-halaman. Belum disentuh di putaran ini.
+`alloc_frame` masih bisa layani — itu BUG-039, dan sudah dikerjakan di bawah.
+
+---
+
+## BUG-039 — `free_frames_count()` melaporkan kedalaman free stack, bukan memori bebas
+
+**Status:** sudah di-fix + mutation-checked (5 dari 5 mutasi yang bisa dijangkau
+tertangkap; satu sisanya dead store, alasannya di bawah).
+
+### Apa yang salah
+
+`free_frames_count()` mengembalikan `self.free_count` — kedalaman stack frame
+yang sudah di-`free_frame`. Di alokator yang baru dibuat, stack itu kosong, jadi
+jawabannya **0** di mesin dengan 2 GiB bebas:
+
+```rust
+pub fn free_frames_count(&self) -> usize { self.free_count }   // lama
+```
+
+Dua pembaca, dua kerusakan:
+
+* `sys_mmap` menganggarkan terhadap angka ini (`mmap_extent`), jadi setiap
+  mapping yang lebih besar dari isi stack ditolak. Stack 16384 entri itulah
+  asal batas "16384 halaman" di `ROADMAP.md` — batas *nilai* stack, bukan batas
+  memori.
+* `meminfo` mencetaknya sebagai "Free stack", jadi baris itu tidak pernah
+  berhubungan dengan mesin yang dilaporkan.
+
+### Kenapa baru sekarang
+
+BUG-038 baru selesai: pass kedua sekarang punya `low_cursor` per region dan
+`floor` tetap, tidak lagi menulis balik `regions`. Tanpa cursor itu tidak ada
+cara menghitung sisa pass kedua, dan itu yang membuat tiga percobaan sebelumnya
+mentok.
+
+### Perbaikan
+
+`free_frames_count = free_count + high_pass_frames() + low_pass_frames()`.
+Ketiganya saling lepas, jadi jumlahnya eksak, bukan taksiran:
+
+* `free_count` — frame yang sudah diserve lalu di-free; kedua pass sudah
+  melewatinya, jadi tidak ada yang dihitung dua kali.
+* `high_pass_frames` — satu jalan berurutan atas `regions()`, memajukan cursor
+  yang sama dengan `alloc_frame`. `alloc_frame` memilih region *pertama* yang
+  halaman berikutnya muat, jadi region 0 habis dulu, lalu region 1, dst — dan
+  satu jalan terurut itu menggambarkan semua alokasi berikutnya.
+* `low_pass_frames` — per region, dari `max(low_cursor[i], base)` sampai halaman
+  terakhir yang muat sebelum `end` **dan** sebelum `floor`. Plafonnya `floor`,
+  bukan `next_free`: `next_free` sudah naik melewati semua yang diserve pass
+  pertama, dan plafon yang salah itu menghitung halaman-halaman itu dua kali.
+
+Batas `floor` dihitung sebagai `min(end, floor) - frame` lalu dibulatkan ke
+bawah ke halaman, bukan `floor - frame`, supaya `floor` yang tidak page-aligned
+(`plan_regions` tidak menjanjikannya) tetap benar.
+
+`meminfo` mencetak barisnya sebagai `Free:` — angka itu memang bukan lagi
+kedalaman stack.
+
+### Test yang mengunci
+
+`free_count_tests.rs` (baru, 7 test), total host test crate ini 34 → 41, dan
+228 → 235 di seluruh workspace. Orakelnya bukan daftar region:
+
+> Bangun alokator **kedua** dari map yang sama, kuras sampai kering, dan
+> wajibkan angka yang dilaporkan sama dengan jumlah frame yang benar-benar
+> keluar dari kurasan itu, di **setiap langkah**.
+
+Salinan kedua dari aritmetika alokator bisa saja setuju dengan bugnya; kurasan
+nyata tidak bisa. Test yang penting:
+
+| Test | Invariant |
+|---|---|
+| `a_fresh_allocator_reports_every_page_it_can_serve` | alokator baru melaporkan seluruh region, bukan stack kosong |
+| `free_frames_count_is_exact_at_every_step_of_a_drain` | angka turun satu per frame, dari awal sampai 0 |
+| `the_reported_count_tracks_the_low_pass_to_zero` | hal yang sama di region yang menyeberangi floor — ini yang mencapai `low_cursor` |
+| `a_straddling_region_counts_the_pages_of_both_passes` | setengah di bawah floor ikut dihitung, dan bertahan setelah pass atas habis |
+| `a_recycled_frame_is_not_counted_twice` | free lalu alloc tidak menambah hitungan |
+| `reserving_pages_lowers_the_reported_free_count` | `reserve_region` mengurangi angka |
+| `the_reported_count_does_not_under_count_a_large_region` | region 32 MiB melaporkan 8192 halaman |
+
+### Mutation check
+
+Tujuh test gagal terhadap badan lama (`self.free_count`). Terhadap badan baru:
+
+```
+caught  drop the free-stack term
+caught  drop the low-pass term
+caught  ignore low_cursor
+caught  low pass bounded by next_free instead of floor
+caught  high pass drops max(base, cursor)
+SURVIVED  high_pass_frames never advances its cursor
+```
+
+Yang lolos adalah dead store: cursor di `high_pass_frames` hanya masuk
+`max(reg.base, cursor)`, dan untuk daftar region yang **well-formed** —
+terurut, tidak tumpang tindih, dan hanya itu yang bisa dibuat `plan_regions`
+atau `reserve_region` — base region berikutnya selalu ≥ ujung region
+sebelumnya, jadi `max` didominasi base dan kemajuan cursor tidak berpengaruh.
+Menjadi load-bearing hanya untuk region yang tumpang tindih, dan tidak ada
+pemanggil yang bisa membuatnya. Tidak ada fixture yang mencapainya tanpa
+mengarang input yang tidak bisa dilihat alokator; alasannya dicatat di kepala
+`free_count_tests.rs`.
+
+### Verifikasi
+
+`make test-host` 235 (dari 228), `make test` 25/25 di QEMU, kernel build bersih.
+
+---
+
+### Catatan putaran ini
+
+`free_frames_count` sudah eksak. Sisa `ROADMAP.md` "Next, in order" yang belum:
+cgroup enforcement, KPTI, driver model (AHCI), capabilities/`prctl` sungguhan,
+dan smoke test boot di CI. `reap_terminated_stacks()` masih jalur mati.
+

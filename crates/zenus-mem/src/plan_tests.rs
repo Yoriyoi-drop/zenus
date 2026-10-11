@@ -237,7 +237,7 @@ fn planning_clears_whatever_the_allocator_already_held() {
     let freed = fa.alloc_frame().expect("a frame");
     fa.free_frame(freed);
     assert!(fa.used_memory() > 0);
-    assert_eq!(fa.free_frames_count(), 1, "the free stack is not empty");
+    assert_eq!(fa.recycled_frames_count(), 1, "the free stack is not empty");
     assert!(fa.alloc_frame().is_some(), "the low cursor has moved");
 
     // Re-plan with a different map, through the same `&mut`.
@@ -256,7 +256,7 @@ fn planning_clears_whatever_the_allocator_already_held() {
         "the old regions must be gone, not appended to"
     );
     assert_eq!(fa.used_memory(), 0, "the counters reset");
-    assert_eq!(fa.free_frames_count(), 0, "the free stack reset");
+    assert_eq!(fa.recycled_frames_count(), 0, "the free stack reset");
     assert_eq!(
         fa.total_memory(),
         0x10_000,
