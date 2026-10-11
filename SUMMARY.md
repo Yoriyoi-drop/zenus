@@ -51,7 +51,8 @@ The in-kernel suite is for hardware paths.
 
 ## Things that are views, not implementations
 
-- `cgroup2`: read-only layout, create/write fail, no enforcement.
+- `cgroup2`: `pids`/`memory` limits are enforced (a fork or `mmap` is refused
+  over them); `cpu`/`io` are advertised but not, and the hierarchy is flat.
 - `ZENUS_SSH/1.0`: not SSH.
 - `userspace/`: hand-built ring-3 programs, no libc.
 - Storage: PIO only, no AHCI/NVMe.

@@ -54,9 +54,9 @@ smoke test that requires the *ordinary* kernel to reach the shell prompt
 
 - **User-mode hardening** — SMAP/SMEP are **enabled**; KPTI is not, so a
   user CR3 still has the whole kernel mapped.
-- **Container story** — the six namespace types exist and work, but there is no
-  OCI runtime, no cgroup enforcement (the cgroup2 tree is read-only) and no
-  overlayfs.
+- **Container story** — the six namespace types exist and work, and cgroup
+  `pids` and `memory` limits are now enforced; there is still no OCI runtime, no
+  `cpu`/`io` enforcement, and no overlayfs.
 - **Service management** — the init system supervises and restarts services, but
   there is no dependency ordering, no health checking beyond "still running",
   and no declarative manifests.
@@ -90,7 +90,6 @@ Do not build on these without reading the code:
 
 | Thing | Reality |
 |---|---|
-| cgroups | Read-only view of the v2 layout; create/write fail |
 | SSH | `ZENUS_SSH/1.0`, a homegrown line protocol with a weak keystream and a default password |
 | Capabilities / seccomp | `prctl` returns success and does nothing |
 | Container runtime / OCI | Does not exist |
@@ -104,12 +103,16 @@ Do not build on these without reading the code:
    cases (`crashes=0`), and the harness reports its verdict correctly (BUG-037).
    The remaining work is audit findings, not fuzzer findings — `DEVLOG.md`
    tracks them, ranked by impact.
-2. **Real cgroup enforcement** — at least `memory` and `pids` — so the existing
-   namespace work has teeth.
-3. **KPTI**, so a user CR3 does not have the kernel half mapped. SMEP/SMEP
+
+**Real cgroup enforcement is done for `pids` and `memory`** (BUG-041):
+`pids.max` refuses a task creation and `memory.max` refuses an `mmap`, both
+checked against a pure, host-tested controller table. `cpu`/`io` remain
+advertised but unenforced, and the hierarchy is flat. Next:
+
+2. **KPTI**, so a user CR3 does not have the kernel half mapped. SMEP/SMEP
    being on (done) is not the same thing.
-4. **A driver model** so storage stops being PIO-only: AHCI first.
-5. **Capabilities and a real `prctl`**, replacing the current no-ops.
+3. **A driver model** so storage stops being PIO-only: AHCI first.
+4. **Capabilities and a real `prctl`**, replacing the current no-ops.
 
 Boot testing is done: `make smoke` boots the ordinary kernel headless and fails
 unless the shell prompt appears, and `make test-quiet` now fails when the

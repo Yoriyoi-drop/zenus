@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+- **cgroup v2 `pids` and `memory` limits are enforced (BUG-041).** The
+  `/sys/fs/cgroup` tree was a read-only view — `mkdir`, `unlink` and every
+  `write` returned failure — and this replaces it with a real controller:
+  `mkdir` creates a group, `pids.max`/`memory.max` are writable, and the limits
+  bind. `zenus_sched` refuses a task creation that would push a group past
+  `pids.max`, and `zenus_syscall` refuses an `mmap` that would push it past
+  `memory.max`. The controller table is pure and host-tested (15 tests:
+  `pids.max`/`memory.max` binding, moving a task carrying its charge, a
+  non-empty group refusing removal, unlimited round-tripping as `max`); the two
+  enforcement points are its only callers. `cpu`/`io` remain advertised but
+  unenforced and the hierarchy is flat.
+
 ### Testing
 - **A boot smoke test, and a `test-quiet` that can actually fail.** `make smoke`
   builds the ordinary kernel's ISO, boots it headless under `-cpu max`, and fails

@@ -748,6 +748,16 @@ pub fn clone_task(
         task.net_ns = new_net_ns;
         task.user_ns = new_user_ns;
         task.ipc_ns = new_ipc_ns;
+        task.cgroup = parent.cgroup;
+
+        // `pids.max` enforcement. The child joins the parent's cgroup, and a
+        // group already at its limit refuses the creation here. This call is the
+        // whole point of `pids.max`: without it the file would be a number
+        // nothing reads, which is the "view, not implementation" this replaced.
+        if !zenus_fs::cgroup::attach_task(parent.cgroup, id) {
+            dealloc_stack(stack_base, stack_size);
+            return 0;
+        }
 
         let mut tasks = TASKS.lock();
         match tasks.find_free() {
@@ -876,6 +886,14 @@ pub fn create_user_task(
                 .and_then(|g| g.tasks[idx].as_ref().map(|t| t.id))
                 .unwrap_or(0)
         };
+        // The child joins the creating task's cgroup, and a `pids.max` at the
+        // limit refuses the creation — the enforcement point for a user program
+        // (`run`, `execve`, `fork`).
+        task.cgroup = current_cgroup();
+        if !zenus_fs::cgroup::attach_task(task.cgroup, id) {
+            dealloc_stack(stack_base, stack_size);
+            return 0;
+        }
 
         let mut tasks = TASKS.lock();
         match tasks.find_free() {
@@ -959,6 +977,14 @@ pub fn create_task_named(entry: fn(), stack_size: usize, name: &str) -> u64 {
         // report it, because the loop never yielded).
         task.heap_brk = DEFAULT_HEAP_BRK;
         task.heap_floor = DEFAULT_HEAP_BRK;
+        task.cgroup = current_cgroup();
+
+        // Kernel tasks join the creating task's cgroup too, so `pids.current` at
+        // the root counts everything rather than a subset.
+        if !zenus_fs::cgroup::attach_task(task.cgroup, id) {
+            dealloc_stack(stack_base, stack_size);
+            return 0;
+        }
 
         let mut tasks = TASKS.lock();
         match tasks.find_free() {
@@ -1272,6 +1298,26 @@ pub fn current_task_id() -> u64 {
     tasks.tasks[idx as usize]
         .as_ref()
         .map(|t| t.id)
+        .unwrap_or(0)
+}
+
+/// The cgroup of the task running on this CPU, or the root (`0`) when there is
+/// none.
+///
+/// Uses `try_lock` and falls back to the root: task creation calls this while it
+/// may already hold no lock, but `create_user_task`'s parent lookup also runs
+/// from inside the syscall path, and a contended `TASKS` there would deadlock the
+/// CPU. A missed read only means the child lands in the root group, which is
+/// unlimited — the conservative direction, never an over-limit one.
+fn current_cgroup() -> u64 {
+    let cpu = current_cpu();
+    if cpu as usize >= MAX_CPUS {
+        return 0;
+    }
+    let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
+    TASKS
+        .try_lock()
+        .and_then(|g| g.tasks[idx as usize].as_ref().map(|t| t.cgroup))
         .unwrap_or(0)
 }
 
@@ -2140,6 +2186,10 @@ pub fn exit_current_task(code: u64) -> ! {
     tasks.tasks[idx as usize].as_mut().unwrap().state = TaskState::Terminated;
     tasks.tasks[idx as usize].as_mut().unwrap().exit_code = code;
 
+    // The process leaves its cgroup on exit, not when the parent reaps it: a
+    // zombie no longer holds a `pids` slot or a memory charge.
+    zenus_fs::cgroup::detach_task(task_id);
+
     // Set atomic child-exit notification (bypasses ZOMBIE_LIST issues)
     CHILD_EXIT_NOTIFY.store(
         (1u64 << 63) | ((code & 0xFFFF) << 32) | (task_id & 0xFFFFFFFF),
@@ -2222,6 +2272,9 @@ pub fn reap_task(task_id: u64) {
             if pid_ns != 0 {
                 zenus_ns::pid::unregister_task(pid_ns, task_id);
             }
+            // Leave the cgroup: this also releases whatever memory the task had
+            // charged, which is why every teardown path calls it.
+            zenus_fs::cgroup::detach_task(task_id);
             // Free the task slot
             tasks.mark_freed(i);
             tasks.tasks[i] = None;
@@ -2304,6 +2357,9 @@ pub fn task_exit() {
             zenus_ns::pid::unregister_task(pid_ns, tid);
         }
     }
+    if let Some(tid) = task_id {
+        zenus_fs::cgroup::detach_task(tid);
+    }
     // Free the user address space
     if let Some(cr3) = task_cr3 {
         if cr3 != 0 {
@@ -2351,6 +2407,7 @@ pub fn kill_task(id: u64) -> bool {
             if pid_ns != 0 {
                 zenus_ns::pid::unregister_task(pid_ns, tid);
             }
+            zenus_fs::cgroup::detach_task(tid);
             tasks.mark_freed(i);
             if state == TaskState::Running {
                 tasks.tasks[i] = None;

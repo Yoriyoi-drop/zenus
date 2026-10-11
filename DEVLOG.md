@@ -3126,4 +3126,100 @@ Kasus negatif pertama penting: ISO `testing` **lulus** suite-nya (25/25) tapi
 tidak mencetak prompt, dan smoke test tetap menolaknya. Itu bukti bahwa yang
 diuji memang kernel yang benar, bukan sekadar "ada output".
 
+---
+
+## BUG-041 — cgroup `pids`/`memory` sekarang benar-benar di-enforce
+
+**Status:** sudah di-fix + host-tested (15 test) + smoke-tested. Ini item 2 di
+`ROADMAP.md` "Next, in order".
+
+### Apa yang salah
+
+`crates/zenus-fs/src/cgroup.rs` adalah **tampilan read-only**: `create`,
+`unlink`, `chmod`, `chown`, dan setiap `write` mengembalikan gagal. Yang jujur
+dari dirinya hanya itu — ia bilang tidak bisa. Tapi `ROADMAP.md` menargetkan
+"cgroup enforcement nyata, minimal `memory` dan `pids`", dan tidak ada satu pun
+batas yang ditegakkan di belakangnya.
+
+### Yang dikerjakan (tahap ini)
+
+**Tabel controller murni + filesystem dinamis + dua titik enforcement.**
+
+* `CgroupTable` — data murni, tanpa lock/hardware/global. `create`, `remove`,
+  `attach`, `detach`, `charge`, `uncharge`, plus `pids_max`/`memory_max`/….
+  Semuanya bisa diuji di host tanpa scheduler atau page table.
+* Filesystem `/sys/fs/cgroup` sekarang benar-benar berfungsi: `mkdir` membuat
+  group, file per-group (`pids.max`, `pids.current`, `memory.max`,
+  `memory.current`, `cgroup.procs`, …) bisa dibaca/ditulis, dan inode-nya
+  diturunkan dari id group (`dir_inode`/`file_inode`), bukan konstanta.
+* Dua titik enforcement, dan hanya dua:
+  1. **`pids.max`** — `zenus_sched` memanggil `cgroup::attach_task(group, id)`
+     di `create_user_task`, `clone_task`, dan `create_task_named`; gagal →
+     pembuatan task ditolak. `Task` dapat field `cgroup`, diwarisi dari parent.
+     Semua jalur teardown (`reap_task`, `kill_task`, `task_exit`,
+     `exit_current_task`) memanggil `detach_task`.
+  2. **`memory.max`** — `zenus_syscall` men-charge tiap halaman di loop `mmap`
+     (`charge_memory`) dan menolak mapping saat gagal; `unwind_mapping`
+     mengembalikan charge halaman yang sudah dipetakan ketika unwinding, dan
+     `sys_munmap` men-`uncharge` per halaman yang benar-benar dilepas.
+
+Charge/tidak-charge per halaman, bukan sekaligus di muka: `munmap` parsial
+hanya tahu halaman mana yang benar-benar hilang, jadi kedua sisi harus
+menghitung unit yang sama. Kalau tidak, memetakan 1 MiB lalu `munmap` 1 halaman
+akan melepaskan seluruh charge berulang kali dan menembus `memory.max`.
+
+### Bug yang ditemukan smoke test di detik yang sama
+
+Versi `CgroupTable` pertama menyimpan **root sebagai elemen pertama `groups`**,
+dan hanya `reset()` yang menambahkannya. `empty()` — yang dipakai static global
+`CGROUP_TABLE` — menghasilkan tabel **tanpa root**. Jadi `attach(0, id)`
+mengembalikan `Err(NoSuchGroup)` untuk setiap task, setiap pembuatan task gagal,
+**shell tidak pernah dibuat, dan prompt tidak pernah muncul.**
+
+Yang menangkapnya: `make smoke` yang baru masuk di putaran lalu. Tepat nol
+baris log setelah "Shell PID=0". Ini persis alasan item 6 dikerjakan: kernel
+biasa (bukan `testing`) tidak diuji boot oleh apa pun sebelum ini, dan perubahan
+yang mematikan boot akan lolos semua test lain.
+
+Perbaikannya struktural: root **keluar dari `groups`** — `root_members`
+terpisah, dan root tidak punya id/nama/limit yang bisa salah atau dihapus.
+`empty()` jadi tabel yang sudah valid sejak instruksi pertama, tanpa
+inisialisasi malas dan tanpa urutan yang bisa salah.
+
+Test host yang menangkapnya seharusnya ada, tapi tidak: test crate memanggil
+`reset()` dulu, jadi mereka selalu punya root dan tidak pernah melihat
+`empty()`. Pelajaran yang sama dengan `global_init` di BUG-038 — test yang tidak
+menyentuh jalur boot bisa hijau sementara boot mati.
+
+### Test yang mengunci
+
+`crates/zenus-fs/src/cgroup_tests.rs` (15 test; total host test crate ini
+62 → 77, workspace 235 → 249). Yang penting:
+
+| Test | Invariant |
+|---|---|
+| `pids_max_refuses_the_attach_that_would_exceed_it` | batas benar-benar mengikat, task yang ditolak tidak dihitung |
+| `re_attaching_a_task_does_not_count_twice` | attach idempoten |
+| `moving_a_task_carries_its_charge_and_leaves_no_copy_behind` | pindah group membawa charge, tidak ada salinan |
+| `memory_max_refuses_the_charge_that_would_exceed_it` | charge yang ditolak tidak dihitung; tepat di batas masih muat |
+| `uncharging_more_than_was_charged_saturates_at_zero` | over-release tidak wrap |
+| `a_non_empty_group_cannot_be_removed` | group berisi task tidak bisa dihapus |
+| `the_root_group_accepts_everything_and_cannot_be_removed` | root unlimited & tak terhapus — inilah yang membuat default no-op |
+| `writing_pids_max_through_the_filesystem_enforces_it` | tulis lewat FS benar-benar mengikat tabel |
+| `unlimited_limits_read_and_write_as_max` | `max` bolak-balik; sampah ditolak, bukan di-parse jadi 0 |
+| `a_directory_inode_is_not_mistaken_for_a_file` | inode direktori ≠ inode file di dalamnya |
+
+### Verifikasi
+
+`make test-host` 249 (dari 235), `make smoke` mencapai prompt (74 baris serial),
+kernel build bersih. `make test` dijalankan di putaran yang sama.
+
+### Yang belum
+
+`cpu` dan `io` masih diiklankan di `cgroup.controllers` tapi tidak ditegakkan;
+`cgroup.subtree_control` menolak write (lebih baik daripada no-op diam-diam).
+Hierarki masih datar. Tiga hal itu ditulis di dokumentasi modul, `ROADMAP.md`,
+dan `SECURITY.md` supaya tidak jadi "view" generasi berikutnya.
+
+
 

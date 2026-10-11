@@ -26,7 +26,7 @@ make smoke          # boot the ordinary kernel headless, require the shell promp
 | `crates/zenus-arch/` | Limine, CPU, GDT/IDT, APIC/IOAPIC/PIT, PCI, ACPI, SMP, ATA, RTC, keyboard, crash dump |
 | `crates/zenus-mem/` | Frame allocator, 4-level paging, VMA tracking, kernel heap |
 | `crates/zenus-sched/` | Preemptive round-robin scheduler, signals, init/service supervision |
-| `crates/zenus-fs/` | VFS, ext2 (R/W + journal + fsck), tmpfs, devfs, tarfs, procfs, cgroup2 view, sysctl, package manager, block cache |
+| `crates/zenus-fs/` | VFS, ext2 (R/W + journal + fsck), tmpfs, devfs, tarfs, procfs, cgroup2 (`pids`/`memory` enforcement), sysctl, package manager, block cache |
 | `crates/zenus-net/` | ARP, IPv4, ICMP, TCP, UDP, DHCP client+server, DNS, routing, firewall, RTL8139 |
 | `crates/zenus-syscall/` | Syscall dispatch (109 syscalls) and the ELF loader |
 | `crates/zenus-sync/` | Spinlock, IRQ guard, lockdep |
@@ -48,7 +48,9 @@ Implemented and exercised:
 - ext2 read/write with journalling, fsck, and a write-back block cache
 - TCP/UDP/ICMP/DHCP/DNS with static routing, a netfilter-style firewall and
   BSD sockets
-- procfs, a read-only cgroup v2 view, sysctl, a `.zpk` package manager
+- procfs, a `.zpk` package manager, and cgroup v2 `pids`/`memory` limits that
+  are actually enforced (a fork over `pids.max` and an `mmap` over `memory.max`
+  are refused)
 - PID/UTS/mount/net/user/IPC namespaces
 - Init system (PID 1) with service supervision and restart policies
 - A ZENUS_SSH/1.0 line protocol (**not** SSH, and not cryptographically sound —

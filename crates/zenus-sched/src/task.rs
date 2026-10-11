@@ -146,6 +146,12 @@ pub struct Task {
     pub egid: u32,
     pub parent_pid: u64,
     pub exit_code: u64,
+    /// Which cgroup this task belongs to (`0` is the root).
+    ///
+    /// The scheduler owns this: it is set at creation from the parent's group
+    /// and read by `zenus_fs::cgroup` when a limit has to be checked. Nothing
+    /// else writes it.
+    pub cgroup: u64,
     pub uts_ns: NsId,
     pub pid_ns: NsId,
     pub mnt_ns: NsId,
@@ -186,6 +192,7 @@ impl Task {
             egid: 0,
             parent_pid: 0,
             exit_code: 0,
+            cgroup: 0,
             uts_ns: 0,
             pid_ns: 0,
             mnt_ns: 0,

@@ -23,6 +23,7 @@ deploy this on anything you care about.
 | Pointer validation on copy-in | `validate_user_range` + per-page `virt_to_phys_raw` revalidation |
 | NX | Set on user mappings without `PROT_EXEC` |
 | Heap/stack guard | `STACK_GUARD` at the top of every task stack; `stack_size_is_valid` refuses undersized stacks |
+| cgroup `pids.max` / `memory.max` | Enforced: a task creation over `pids.max` and an `mmap` over `memory.max` are refused. `cpu`/`io` are not enforced, and the hierarchy is flat |
 
 ## The gaps that matter
 

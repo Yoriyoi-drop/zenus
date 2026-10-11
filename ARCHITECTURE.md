@@ -87,7 +87,7 @@ running because `get_ticks()` feeds uptime.
 | Block cache | 512 sectors, 4-way associative, write-back |
 | tmpfs | 128 nodes, 1 KiB per file, `reset()` |
 | devfs | Device nodes + block devices behind a `fn`-pointer vtable |
-| tarfs | initrd (CPIO-style tar), procfs, cgroup2 view, sysctl, `.zpk` packages |
+| tarfs | initrd (CPIO-style tar), procfs, cgroup2, sysctl, `.zpk` packages |
 
 The block layer is exercised in host tests through a fake block device
 registered in devfs, which covers the cache, the I/O scheduler and the journal
@@ -99,8 +99,13 @@ revives a stale header), and `journal_replay` flushes the redo data before
 retiring the header — otherwise a crash in that window loses the transaction
 with no journal left.
 
-`cgroup.rs` is a read-only view of the cgroup v2 layout: create, unlink and
-write all fail, because no controller is enforced behind it.
+`cgroup.rs` is a real `pids` and `memory` controller, not the read-only view it
+used to be: `mkdir` creates a group, `pids.max`/`memory.max` are writable, and
+the limits are enforced — `zenus_sched` refuses a task creation that would
+exceed `pids.max`, and `zenus_syscall` refuses an `mmap` that would exceed
+`memory.max`. The table itself is pure and host-tested; the two enforcement
+points are the only callers. The hierarchy is flat and `cpu`/`io` are advertised
+but not enforced.
 
 ## Layer 5 — Networking (`zenus-net`)
 

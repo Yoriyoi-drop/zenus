@@ -9,6 +9,8 @@ extern crate std;
 
 pub mod block_cache;
 pub mod cgroup;
+#[cfg(test)]
+mod cgroup_tests;
 pub mod devfs;
 pub mod ext2;
 pub mod ext2_fsck;
@@ -628,9 +630,11 @@ mod host_tests {
 
     #[test]
     fn cgroup_fs_exposes_v2_layout() {
-        use crate::cgroup::CgroupFs;
+        use crate::cgroup::{CgroupFs, reset_for_tests};
         use crate::vfs::FileSystem;
 
+        let _serial = serial();
+        reset_for_tests();
         let fs = CgroupFs;
         let entries = fs.read_dir(fs.root_inode());
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -642,6 +646,10 @@ mod host_tests {
             "cpu.pressure",
             "io.pressure",
             "memory.pressure",
+            "pids.max",
+            "pids.current",
+            "memory.max",
+            "memory.current",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");
         }
@@ -650,15 +658,33 @@ mod host_tests {
         let n = fs.read(4, 0, &mut buf).expect("controllers readable");
         assert_eq!(&buf[..n as usize], b"cpu io memory pids\n");
 
-        // This is a read-only view: no cgroup can be created, removed or
-        // configured here, and every mutation must report failure instead of a
-        // silent no-op.
-        assert!(fs.create(fs.root_inode(), "test", FileType::Directory).is_none());
-        assert!(!fs.unlink(fs.root_inode(), "cgroup.procs"));
-        assert!(fs.write(4, 0, b"+cpu").is_none());
-        assert!(fs.write(2, 0, b"1").is_none(), "cgroup.procs is not writable");
-        assert!(fs.lookup(fs.root_inode(), "cgroup.procs").is_some());
-        assert!(fs.lookup(fs.root_inode(), "nope").is_none());
+        // A cgroup can now be created, configured and removed — it is a real
+        // controller, not the read-only mock this used to be.
+        let dir = fs
+            .create(fs.root_inode(), "test", FileType::Directory)
+            .expect("mkdir must create a cgroup");
+        assert_eq!(fs.lookup(fs.root_inode(), "test"), Some(dir));
+        assert_eq!(fs.lookup(fs.root_inode(), "nope"), None);
+
+        // Its directory lists the controller files, each with a stable inode.
+        let inner: Vec<String> = fs.read_dir(dir).iter().map(|e| e.name.clone()).collect();
+        for expected in ["cgroup.procs", "pids.max", "pids.current", "memory.max"] {
+            assert!(
+                inner.iter().any(|n| n == expected),
+                "missing {expected} in {inner:?}"
+            );
+        }
+
+        // subtree_control is still refused: enabling a controller would be a
+        // silent no-op, since limits apply whether or not it was written.
+        assert!(fs.write(5, 0, b"+cpu").is_none());
+        // cgroup.procs is writable now: it moves a task into the group.
+        assert!(fs.write(2, 0, b"1").is_some(), "cgroup.procs is attachable");
+        // And the group can be removed once it is empty again.
+        let pids_max = fs.lookup(dir, "pids.max").expect("listed");
+        assert!(fs.write(pids_max, 0, b"4").is_some(), "pids.max is writable");
+        assert!(fs.unlink(fs.root_inode(), "test"));
+        assert_eq!(fs.lookup(fs.root_inode(), "test"), None);
     }
 
     // ── sysctl ────────────────────────────────────────────────────────────
@@ -1891,6 +1917,7 @@ mod host_tests {
         use crate::cgroup::CgroupFs;
         use crate::vfs::FileSystem;
 
+        let _serial = serial();
         let fs = CgroupFs;
         let mut buf = [0u8; 8];
         let n = fs.read(4, 0, &mut buf).unwrap();

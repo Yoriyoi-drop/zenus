@@ -2143,6 +2143,18 @@ pub fn mmap_extent(length: u64, max_size: u64, free_frames: usize) -> Option<(u6
     Some((pages, size))
 }
 
+/// Undo the first `count` pages of a mapping that is being abandoned.
+///
+/// Unmaps them, returns their frames, and releases the `memory.max` charge that
+/// `sys_mmap` took for each — the charge and the mapping are taken together, so
+/// they have to be given back together or the group's accounting drifts.
+fn unwind_mapping(cr3: u64, start: u64, count: u64, task_id: u64) {
+    for done in 0..count {
+        zenus_mem::paging::unmap_page_raw(cr3, start + done * 0x1000);
+    }
+    zenus_fs::cgroup::uncharge_memory(task_id, count * 0x1000);
+}
+
 fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, _fd: u64, _offset: u64) -> u64 {
     let free_frames = zenus_mem::frame_allocator::FRAME_ALLOCATOR
         .lock()
@@ -2186,15 +2198,24 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, _fd: u64, _offset: u6
     // all — which is exactly what wedged the fuzzing campaign at case 5506.
     for i in 0..page_count {
         let page_virt = vma_start + i * 0x1000;
+
+        // `memory.max` enforcement, one page at a time. Charging the whole
+        // mapping up front would be simpler and wrong on a partial `munmap`:
+        // the release side can only see which pages actually went away, so both
+        // sides have to count the same unit. This call is the only reader of the
+        // limit — without it `memory.max` would be a number nothing enforces.
+        if !zenus_fs::cgroup::charge_memory(task_id, 0x1000) {
+            unwind_mapping(cr3, vma_start, i, task_id);
+            return -1i64 as u64;
+        }
+
         let frame = {
             let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
             match allocator.alloc_frame() {
                 Some(f) => f,
                 None => {
                     drop(allocator);
-                    for done in 0..i {
-                        zenus_mem::paging::unmap_page_raw(cr3, vma_start + done * 0x1000);
-                    }
+                    unwind_mapping(cr3, vma_start, i, task_id);
                     return -1i64 as u64;
                 }
             }
@@ -2245,6 +2266,9 @@ fn sys_munmap(addr: u64, length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) ->
                 let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
                 allocator.free_frame(x86_64::PhysAddr::new(phys & !0xFFF));
             }
+            // Release the `memory.max` charge taken for this page when it was
+            // mapped, so an unmap genuinely returns the budget.
+            zenus_fs::cgroup::uncharge_memory(task_id, 0x1000);
             // Clear PTE
             let hhdm = zenus_mem::paging::hhdm_offset();
             let cr3_phys = cr3 & !0xFFF;
