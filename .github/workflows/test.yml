@@ -66,6 +66,11 @@ jobs:
           echo "Running unit tests in QEMU..."
           make test-quiet
 
+      - name: Boot Smoke Test
+        run: |
+          echo "Booting the ordinary kernel; it must reach the shell prompt..."
+          make smoke
+
       - name: Upload Test Results
         if: always()
         uses: actions/upload-artifact@v3

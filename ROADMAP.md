@@ -45,8 +45,10 @@ RTL8139, virtio-net.
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 228 host unit tests (`make test-host`), 25 in-kernel tests
-(`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), CI running both.
+**Testing** — 235 host unit tests (`make test-host`), 25 in-kernel tests
+(`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), a headless boot
+smoke test that requires the *ordinary* kernel to reach the shell prompt
+(`make smoke`), CI running all of them.
 
 ## Partially done
 
@@ -108,8 +110,10 @@ Do not build on these without reading the code:
    being on (done) is not the same thing.
 4. **A driver model** so storage stops being PIO-only: AHCI first.
 5. **Capabilities and a real `prctl`**, replacing the current no-ops.
-6. **Boot testing**: a QEMU smoke test in CI that boots to the shell prompt and
-   fails the build if it does not.
+
+Boot testing is done: `make smoke` boots the ordinary kernel headless and fails
+unless the shell prompt appears, and `make test-quiet` now fails when the
+in-kernel suite fails and returns instead of hanging (it did neither before).
 
 ## Explicitly not planned
 

@@ -3055,6 +3055,75 @@ mengarang input yang tidak bisa dilihat alokator; alasannya dicatat di kepala
 ### Catatan putaran ini
 
 `free_frames_count` sudah eksak. Sisa `ROADMAP.md` "Next, in order" yang belum:
-cgroup enforcement, KPTI, driver model (AHCI), capabilities/`prctl` sungguhan,
-dan smoke test boot di CI. `reap_terminated_stacks()` masih jalur mati.
+cgroup enforcement, KPTI, driver model (AHCI), dan capabilities/`prctl`
+sungguhan. `reap_terminated_stacks()` masih jalur mati.
+
+---
+
+## BUG-040 — smoke test boot, dan `test-quiet` yang tidak pernah bisa gagal
+
+**Status:** sudah di-fix. Ini item 6 di `ROADMAP.md` "Next, in order".
+
+### Dua hal, satu target CI
+
+**Kernel yang dikirim tidak pernah diuji boot.** `make test` membangun kernel
+`testing` dan menjalankan suite in-kernel di dalamnya — itu binary yang berbeda
+dari yang masuk ISO dan yang dijalankan `make run`. Jadi panic saat boot, triple
+fault, atau kernel yang salah ter-link tidak terlihat oleh apa pun sampai
+kejadian di tangan pengguna. Itu persis mode kegagalan BUG-035 (kernel testing
+masuk ISO yang seharusnya kernel biasa, ISO boot langsung ke suite, shell tidak
+pernah muncul) — dan pada waktu itu tidak ada satu pun test yang menangkapnya.
+
+**`make test-quiet` tidak bisa gagal, dan juga tidak bisa selesai.** Barisnya:
+
+```make
+	qemu-system-x86_64 ... 2>&1 | grep -a "\[TEST\]"
+```
+
+Dua cacat dengan penyebab sama:
+
+1. Status exit sebuah pipeline adalah status perintah **terakhir** — `grep` —
+   jadi target mengembalikan 0 selama suite *jalan*, lulus atau tidak. Langkah
+   CI yang bergantung padanya tidak bisa merah.
+2. Kernel **tidak** mematikan mesin setelah suite selesai; ia `hlt`-loop. Jadi
+   `grep` terus membaca output QEMU yang tidak pernah berhenti, dan target tidak
+   pernah kembali. Langkah CI yang menjalankannya menggantung sampai timeout job
+   — enam jam secara bawaan.
+
+### Yang dikerjakan
+
+**`boot-smoke.sh` + `make smoke`.** Jalankan ISO kernel biasa dengan
+`-display none -serial file:…`, tunggu sampai prompt `zenus$ ` muncul di log,
+lalu matikan QEMU. Ada → exit 0, tidak ada dalam `SMOKE_TIMEOUT` (default 120 dtk)
+→ cetak 40 baris serial terakhir dan exit 1. Tanpa input: ia tidak menyetir
+shell, hanya membuktikan kernelnya hidup sampai prompt. Kegagalan yang terlihat:
+panic, triple fault, dan **image yang salah ter-link** (kernel `testing` tidak
+pernah mencetak prompt).
+
+`-cpu max` wajib di sini dengan alasan yang sama seperti `make test`: model
+`qemu64` bawaan tidak punya SMEP/SMAP, jadi boot yang menguji keduanya butuh
+model yang memilikinya.
+
+**`test-quiet` sekarang punya timeout dan gerbang.** QEMU dibungkus `timeout`,
+log-nya disimpan, dan baris kedua mensyaratkan `[OK] All tests passed`; kalau
+tidak ada, ia mencetak ekornya dan exit 1. Perhatikan bahwa `timeout` keluar 124
+saat membunuh VM yang masih looping — itu akhir yang **normal** di sini — jadi
+gerbangnya adalah baris kedua, bukan status baris pertama.
+
+**CI.** `make smoke` ditambahkan ke `test.yml` (job `unit-tests`) dan `ci.yml`
+(job `test-integration`).
+
+### Verifikasi
+
+```
+make smoke            -> [SMOKE] OK: reached the shell prompt (74 serial lines)
+boot-smoke.sh <test-iso> -> [SMOKE] FAIL: no shell prompt within 40s   (exit 1)
+make test-quiet       -> 25 passed, 0 failed; selesai ~180 dtk         (exit 0)
+TEST_TIMEOUT=6 make test-quiet -> gate merah, exit 2                    (exit 1)
+```
+
+Kasus negatif pertama penting: ISO `testing` **lulus** suite-nya (25/25) tapi
+tidak mencetak prompt, dan smoke test tetap menolaknya. Itu bukti bahwa yang
+diuji memang kernel yang benar, bukan sekadar "ada output".
+
 

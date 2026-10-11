@@ -16,6 +16,7 @@ LD := ld.lld
 
 .PHONY: all build clean run run-serial run-gui run-bios run-uefi run-gdb iso img test test-quiet bochs
 .PHONY: test-host test-host-quiet
+.PHONY: smoke
 .PHONY: build-fuzz fuzz-smoke fuzz-coverage fuzz-regression fuzz-clean
 
 all: $(KERNEL)
@@ -237,9 +238,37 @@ test: test-iso
 	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
 		-cpu max -drive file=ext2_test.img,format=raw,if=ide 2>&1
 
+# `test-quiet` used to end in `| grep -a "\[TEST\]"`, and a pipeline's exit
+# status is the *last* command's — grep — so it returned 0 whenever the suite
+# ran at all, whether or not it passed. Worse, the kernel does not power off
+# after the suite (it `hlt`-loops), so the target also never returned: a CI step
+# running it hung until the job timeout. Two defects with the same fix — cap the
+# VM with `timeout`, keep the log, and let the summary line decide.
+#
+# `timeout` has to be tolerated: it exits 124 when it kills a VM that was still
+# looping, which is the *normal* end here, so the gate is the second line and
+# not the first line's status.
+TEST_TIMEOUT ?= 180
 test-quiet: test-iso
-	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
-		-cpu max -drive file=ext2_test.img,format=raw,if=ide 2>&1 | grep -a "\[TEST\]"
+	@timeout $(TEST_TIMEOUT) qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
+		-cpu max -drive file=ext2_test.img,format=raw,if=ide 2>&1 \
+		| tee $(BUILD_DIR)/test.log | grep -a "\[TEST\]" || true
+	@grep -aq "\[OK\] All tests passed" $(BUILD_DIR)/test.log || { \
+		echo "=== in-kernel suite did not report success; tail: ==="; \
+		tail -30 $(BUILD_DIR)/test.log; exit 1; }
+
+# ── Boot smoke test (ROADMAP item 6) ──
+#
+# `test` runs the `testing` kernel; nothing checked that the *ordinary* kernel —
+# the one the ISO and `make run` ship — boots at all. This boots it headless and
+# fails unless the shell prompt appears. A panic, a triple fault, or the
+# testing kernel linked into the wrong image all look the same here: no prompt,
+# non-zero exit. That last case is BUG-035's failure mode, and this is the check
+# that would have caught it at the point of the mistake.
+SMOKE_TIMEOUT ?= 120
+.PHONY: smoke
+smoke: $(ISO)
+	SMOKE_TIMEOUT=$(SMOKE_TIMEOUT) bash boot-smoke.sh $(ISO)
 
 clean:
 	rm -rf $(BUILD_DIR) $(ISO_DIR)

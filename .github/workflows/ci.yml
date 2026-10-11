@@ -122,6 +122,13 @@ jobs:
         run: |
           make test-quiet
 
+      - name: Boot Smoke Test
+        run: |
+          # ROADMAP item 6: boot the *ordinary* kernel headless and fail unless it
+          # reaches the shell prompt. `make test-quiet` covers the `testing`
+          # kernel only; this is what asserts the shipping one boots.
+          make smoke
+
   build-packages:
     name: Build Packages
     runs-on: ubuntu-latest

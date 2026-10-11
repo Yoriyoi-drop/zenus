@@ -15,6 +15,7 @@ make run-tcp        # serial over TCP, then: nc localhost 45678
 
 make test-host      # cargo test --workspace --target x86_64-unknown-linux-gnu
 make test           # in-kernel test suite inside QEMU
+make smoke          # boot the ordinary kernel headless, require the shell prompt
 ```
 
 ## Workspace Layout
@@ -68,7 +69,7 @@ make test-host   # == cargo test --workspace --target x86_64-unknown-linux-gnu
 
 Host unit tests are `#[cfg(test)]` modules inside the kernel crates. They cover
 the pure logic — VMA arithmetic, packet parsing, permission bits, syscall
-numbering, journal replay, the fuzzing bookkeeping — and need no VM. 228 tests
+numbering, journal replay, the fuzzing bookkeeping — and need no VM. 235 tests
 across 11 crates.
 
 ```bash

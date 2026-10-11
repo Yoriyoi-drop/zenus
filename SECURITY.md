@@ -119,6 +119,7 @@ to bounds-checked code. Run `cargo clippy --all-targets --all-features
 - [ ] `make test-host` (`cargo test --workspace --target x86_64-unknown-linux-gnu`)
       passes, and a test exists for the new behaviour
 - [ ] `make test` (QEMU) still passes if you touched MMIO, the IDT or paging
+- [ ] `make smoke` if you touched boot, paging or the link step
 - [ ] `make fuzz-smoke` if you touched a parser
 
 ## Reporting a vulnerability

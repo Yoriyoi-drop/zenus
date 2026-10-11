@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Testing
+- **A boot smoke test, and a `test-quiet` that can actually fail.** `make smoke`
+  builds the ordinary kernel's ISO, boots it headless under `-cpu max`, and fails
+  unless the shell prompt (`zenus$ `) appears on the serial line. Nothing before
+  it checked that the *shipping* kernel boots — `make test` runs the `testing`
+  kernel, which is a different binary — so a panic or a triple fault at boot was
+  invisible until it shipped. `make test-quiet` had two defects in one line: it
+  ended in `| grep -a "\[TEST\]"`, so its exit status was grep's and it reported
+  success whenever the suite merely ran; and the kernel does not power off after
+  the suite, so the target never returned and a CI step running it hung until the
+  job timeout. It now caps the VM with `timeout`, keeps the log, and requires the
+  `[OK] All tests passed` summary. CI runs `make smoke` in both pipelines.
+
 ### Security
 - **SMAP and SMEP are enabled at boot.** This was item 1 of `ROADMAP.md` and
   the top gap in `SECURITY.md`; it is done. Five separate defects had to be
