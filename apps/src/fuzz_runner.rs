@@ -45,7 +45,11 @@ fn print_banner(mode: zenus_fuzz::Mode, cases: u64) {
     flush();
     zenus_console::serial::uart_write_byte_emergency(b'\n');
     zenus_console::kinfo!("[FUZZ] === Zenus Fuzzing Campaign: {} ===", mode.name());
-    zenus_console::kinfo!("[FUZZ] cases={} seed=0xDEADBEEF timeout={}s", cases, TIMEOUT_SECS);
+    zenus_console::kinfo!(
+        "[FUZZ] cases={} seed=0xDEADBEEF timeout={}s",
+        cases,
+        TIMEOUT_SECS
+    );
     flush();
 }
 
@@ -131,7 +135,10 @@ fn abort(reason: &str) -> ! {
 
 /// Body of the campaign task.
 fn campaign_task() {
-    zenus_console::kinfo!("[FUZZ] campaign task entered, tid={}", zenus_sched::scheduler::current_task_id());
+    zenus_console::kinfo!(
+        "[FUZZ] campaign task entered, tid={}",
+        zenus_sched::scheduler::current_task_id()
+    );
     let mode = mode_from_u8(MODE.load(Ordering::Relaxed));
     let cases = CASES.load(Ordering::Relaxed);
     let stats = zenus_fuzz::run_campaign(mode, cases, 0xDEAD_BEEF);

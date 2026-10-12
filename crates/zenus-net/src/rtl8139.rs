@@ -289,13 +289,7 @@ impl Rtl8139 {
         // The old value was a bare `0x8BD` literal, which had AB set but AM
         // clear — so DHCP offers (broadcast) worked while every multicast
         // address was dropped. The named bits below document and fix that.
-        let rcr = RCR_AB
-            | RCR_AM
-            | RCR_APM
-            | RCR_AAP
-            | RCR_WRAP
-            | RCR_MXDMA_1024
-            | RCR_RBLEN_8K;
+        let rcr = RCR_AB | RCR_AM | RCR_APM | RCR_AAP | RCR_WRAP | RCR_MXDMA_1024 | RCR_RBLEN_8K;
         self.write32(RTL_RCR, rcr);
         // 8 KiB buffer: the receive buffer is RX_BUF_PAGES pages, so the
         // length field has to agree with it.

@@ -35,6 +35,12 @@ pub struct CrashDump {
     pub backtrace_count: usize,
 }
 
+impl Default for CrashDump {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CrashDump {
     pub const fn new() -> Self {
         CrashDump {
@@ -236,9 +242,9 @@ pub fn crash_dump_print(dump: &CrashDump) {
     serial.write_hex(dump.registers.rflags);
     serial.write_str("\n");
     serial.write_str("CS: ");
-    serial.write_hex(dump.registers.cs as u64);
+    serial.write_hex(dump.registers.cs);
     serial.write_str("  SS: ");
-    serial.write_hex(dump.registers.ss as u64);
+    serial.write_hex(dump.registers.ss);
     serial.write_str("\n");
     serial.write_str("CR3: ");
     serial.write_hex(dump.cr3);

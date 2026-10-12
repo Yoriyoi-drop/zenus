@@ -258,7 +258,11 @@ mod host_tests {
         // A second mapping for the same inner uid is refused, so the mapping
         // can never depend on insertion order.
         assert!(!user::map_uid(ns, 0, 2000), "duplicate inner uid must fail");
-        assert_eq!(user::translate_uid(ns, 0), Some(1000), "first wins, no shadowing");
+        assert_eq!(
+            user::translate_uid(ns, 0),
+            Some(1000),
+            "first wins, no shadowing"
+        );
 
         // A different inner uid still maps.
         assert!(user::map_uid(ns, 1, 2001));

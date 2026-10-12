@@ -59,6 +59,12 @@ pub struct FreeListAllocator {
     initialized: AtomicBool,
 }
 
+impl Default for FreeListAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FreeListAllocator {
     pub const fn new() -> Self {
         FreeListAllocator {
@@ -86,7 +92,7 @@ impl FreeListAllocator {
                 },
             );
         }
-        self.free_head.store(heap_start as usize, Ordering::Release);
+        self.free_head.store(heap_start, Ordering::Release);
         self.initialized.store(true, Ordering::Release);
 
         zenus_console::kinfo!("Heap: 8MB free-list allocator ready");
@@ -103,10 +109,16 @@ impl FreeListAllocator {
         block_size: usize,
         region_end: usize,
     ) {
-        for (i, v) in [curr as u64, block_size as u64, region_end as u64, prev as u64,
-                       aligned_data as u64, size as u64]
-            .into_iter()
-            .enumerate()
+        for (i, v) in [
+            curr as u64,
+            block_size as u64,
+            region_end as u64,
+            prev as u64,
+            aligned_data as u64,
+            size as u64,
+        ]
+        .into_iter()
+        .enumerate()
         {
             trace_slot(i).store(v, Ordering::Relaxed);
         }
@@ -150,7 +162,7 @@ impl FreeListAllocator {
                 self.report_list_fault(where_, n, cur, "chain longer than 4096 blocks");
                 return;
             }
-            if cur < arena_lo || cur.checked_add(HEADER_SIZE).map_or(true, |e| e > arena_hi) {
+            if cur < arena_lo || cur.checked_add(HEADER_SIZE).is_none_or(|e| e > arena_hi) {
                 self.report_list_fault(where_, n, cur, "block outside the arena");
                 return;
             }
@@ -166,7 +178,10 @@ impl FreeListAllocator {
             // `checked_add`: a corrupt `size` is exactly what this is looking
             // for, and `cur + HEADER_SIZE + size` panicking on overflow turns a
             // reportable heap fault into an unhandled exception.
-            match cur.checked_add(HEADER_SIZE).and_then(|e| e.checked_add(size)) {
+            match cur
+                .checked_add(HEADER_SIZE)
+                .and_then(|e| e.checked_add(size))
+            {
                 Some(end) if end <= arena_hi => {}
                 _ => {
                     self.report_list_fault(where_, n, cur, "block extends past the arena");
@@ -178,8 +193,7 @@ impl FreeListAllocator {
                 return;
             }
             let b = cur as *mut BlockHeader;
-            let (magic, canary, next) =
-                unsafe { ((*b).magic, (*b).canary, (*b).next as usize) };
+            let (magic, canary, next) = unsafe { ((*b).magic, (*b).canary, (*b).next as usize) };
             if magic != MAGIC_FREE || canary != CANARY_VALUE {
                 self.report_list_fault(where_, n, cur, "bad magic or canary");
                 return;
@@ -189,7 +203,7 @@ impl FreeListAllocator {
             // is the signature of a header that was placed at a payload's end
             // instead of at a rounded-up address, which is how BUG-034's chain
             // got destroyed in the first place.
-            if cur % core::mem::align_of::<BlockHeader>() != 0 {
+            if !cur.is_multiple_of(core::mem::align_of::<BlockHeader>()) {
                 self.report_list_fault(where_, n, cur, "misaligned block header");
                 return;
             }
@@ -322,7 +336,10 @@ impl FreeListAllocator {
                 // to be false and neither was checked, which is how BUG-034
                 // produced free blocks that claimed memory past the arena.
                 debug_assert!(used_hdr >= curr, "used header before its block");
-                debug_assert!(aligned_data >= used_hdr + HEADER_SIZE, "payload overlaps header");
+                debug_assert!(
+                    aligned_data >= used_hdr + HEADER_SIZE,
+                    "payload overlaps header"
+                );
                 debug_assert!(
                     leftover >= aligned_data + size,
                     "leftover overlaps the payload"
@@ -331,7 +348,8 @@ impl FreeListAllocator {
                 if leftover + HEADER_SIZE + MIN_BLOCK > region_end {
                     // Not enough room to leave a valid free block behind.
                     if prev == 0 {
-                        self.free_head.store((*block).next as usize, Ordering::Release);
+                        self.free_head
+                            .store((*block).next as usize, Ordering::Release);
                     } else {
                         (*(prev as *mut BlockHeader)).next = (*block).next;
                     }
@@ -438,7 +456,7 @@ impl FreeListAllocator {
                 let arena_hi = arena_lo + HEAP_SIZE;
                 let p = ptr as usize;
                 let mut enclosing = 0usize;
-                let mut inside_arena = p >= arena_lo && p < arena_hi;
+                let inside_arena = p >= arena_lo && p < arena_hi;
                 if inside_arena {
                     let mut cur = self.free_head.load(Ordering::Acquire);
                     while cur != 0 {
@@ -504,7 +522,6 @@ impl FreeListAllocator {
             block_start = block as usize;
             block_end = block_start + HEADER_SIZE + block_size;
         }
-
 
         let mut prev: usize = 0;
         let mut curr = self.free_head.load(Ordering::Acquire);

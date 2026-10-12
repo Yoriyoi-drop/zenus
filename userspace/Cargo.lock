@@ -19,6 +19,10 @@ name = "exitonly"
 version = "0.1.0"
 
 [[package]]
+name = "fault"
+version = "0.1.0"
+
+[[package]]
 name = "hello"
 version = "0.1.0"
 

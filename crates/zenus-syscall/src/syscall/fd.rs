@@ -105,12 +105,7 @@ impl FdTable {
         }
     }
 
-    fn alloc(
-        &mut self,
-        task_id: u64,
-        node: vfs::VfsNode,
-        file_type: FileType,
-    ) -> Option<u64> {
+    fn alloc(&mut self, task_id: u64, node: vfs::VfsNode, file_type: FileType) -> Option<u64> {
         for i in 0..MAX_FDS {
             if self.entries[i].is_none() {
                 self.entries[i] = Some(FdEntry {
@@ -588,8 +583,16 @@ pub fn vfs_chmod(path: &str, mode: u16) -> bool {
 /// never reached from here.
 pub fn vfs_chown(path: &str, owner: u32, group: u32) -> bool {
     // `-1` is "leave unchanged" in the syscall ABI, and arrives as `u32::MAX`.
-    let owner = if owner == u32::MAX { -1i64 } else { owner as i64 };
-    let group = if group == u32::MAX { -1i64 } else { group as i64 };
+    let owner = if owner == u32::MAX {
+        -1i64
+    } else {
+        owner as i64
+    };
+    let group = if group == u32::MAX {
+        -1i64
+    } else {
+        group as i64
+    };
     vfs::chown_permitted(zenus_ns::NS_ROOT, path, owner, group, &cred())
 }
 

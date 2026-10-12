@@ -71,11 +71,7 @@ fn region(base: u64, length: u64, kind: u64) -> MemoryRegion {
 /// `(base, length)`. Getting that wrong silently disables the reservation: `end`
 /// lands below `base`, `plan_regions` skips it because there is no image to
 /// reserve, and the test then fails on the *reservation*, not on the mistake.
-fn planned(
-    map: &[MemoryRegion],
-    kernel_image: (u64, u64),
-    boot_stack_phys: u64,
-) -> FrameAllocator {
+fn planned(map: &[MemoryRegion], kernel_image: (u64, u64), boot_stack_phys: u64) -> FrameAllocator {
     let mut fa = FrameAllocator::new(&[]);
     let input = AllocPlanInput {
         memory_map: map,
@@ -148,7 +144,10 @@ fn plan_keeps_exactly_the_usable_unreserved_pages() {
     }
     for &p in &served {
         let in_usable = (p >= LOW.0 && p < LOW.0 + LOW.1) || (BIG_BASE..BIG_END).contains(&p);
-        assert!(in_usable, "page {p:#x} was served from outside the usable map");
+        assert!(
+            in_usable,
+            "page {p:#x} was served from outside the usable map"
+        );
     }
 
     let want_pages = reachable(&fa);
@@ -179,7 +178,10 @@ fn a_first_region_straddling_16_mib_is_split_across_both_passes() {
     let mut fa = planned(&map, (0, 0), 0);
     assert_eq!(
         fa.regions(),
-        &[crate::frame_allocator::MemRegion { base: LO, length: LEN }],
+        &[crate::frame_allocator::MemRegion {
+            base: LO,
+            length: LEN
+        }],
         "no reservation applies, so the region is untouched"
     );
 
@@ -252,7 +254,10 @@ fn planning_clears_whatever_the_allocator_already_held() {
 
     assert_eq!(
         fa.regions(),
-        &[crate::frame_allocator::MemRegion { base: 0x2000_0000, length: 0x10_000 }],
+        &[crate::frame_allocator::MemRegion {
+            base: 0x2000_0000,
+            length: 0x10_000
+        }],
         "the old regions must be gone, not appended to"
     );
     assert_eq!(fa.used_memory(), 0, "the counters reset");
@@ -302,7 +307,11 @@ fn serving_a_frame_never_changes_the_region_list() {
             "total_memory changed after {n} allocations"
         );
     }
-    assert_eq!(n, 0x0200_0000 / 0x1000, "and it still served every page once");
+    assert_eq!(
+        n,
+        0x0200_0000 / 0x1000,
+        "and it still served every page once"
+    );
 }
 
 /// Pop the next `n` frames into `out`. Panics if the allocator runs dry.
@@ -373,7 +382,11 @@ fn a_reservation_keeps_the_low_cursor_with_its_region() {
     take(&mut fa, 3584, &mut served);
     // And its first step into r1, which is what leaves r1's cursor non-zero.
     take(&mut fa, 1, &mut served);
-    assert_eq!(*served.last().expect("a frame"), 0x0, "the low pass reached r1");
+    assert_eq!(
+        *served.last().expect("a frame"),
+        0x0,
+        "the low pass reached r1"
+    );
 
     // Remove r0 outright. r1 shifts from index 1 to index 0 and must take its
     // cursor with it.
@@ -422,7 +435,11 @@ fn a_split_shifts_the_cursor_of_the_regions_after_it() {
     fa.reserve_region(0x80_0000, 0x4_0000); // 8 MiB .. 8.25 MiB
     assert_eq!(fa.region_count(), 3, "the straddler must have split");
     assert_eq!(fa.regions()[1].base, 0x84_0000, "the tail at 8.25 MiB");
-    assert_eq!(fa.regions()[2].base, 0x0, "the low region shifted to the end");
+    assert_eq!(
+        fa.regions()[2].base,
+        0x0,
+        "the low region shifted to the end"
+    );
 
     while let Some(f) = fa.alloc_frame() {
         served.push(f.as_u64());
@@ -479,7 +496,11 @@ fn a_split_does_not_let_the_tail_re_serve_what_the_low_pass_took() {
         sorted, uniq,
         "the tail re-served a page the low pass had already handed out"
     );
-    assert_eq!(sorted.len(), 8192, "every page of the original region, once");
+    assert_eq!(
+        sorted.len(),
+        8192,
+        "every page of the original region, once"
+    );
 }
 
 /// A reservation inside the low half must stay reserved even though the second
@@ -510,7 +531,9 @@ fn the_second_pass_does_not_serve_a_reserved_page() {
 
     assert_eq!(served.len(), total, "every unreserved page, and only those");
     assert!(
-        !served.iter().any(|&p| p >= RESERVE.0 && p < RESERVE.0 + RESERVE.1),
+        !served
+            .iter()
+            .any(|&p| p >= RESERVE.0 && p < RESERVE.0 + RESERVE.1),
         "a page from the reserved window was served"
     );
     assert!(
@@ -530,7 +553,7 @@ fn the_second_pass_does_not_serve_a_reserved_page() {
 #[test]
 fn the_kernel_image_is_never_handed_out() {
     const KERNEL: (u64, u64) = (0x1000_0000, 0x1020_0000); // 256 MiB .. 258 MiB
-    // A region that comfortably straddles both 16 MiB and the image.
+                                                           // A region that comfortably straddles both 16 MiB and the image.
     let map = [region(0x0010_0000, 0x3000_0000, 0)];
 
     let mut fa = planned(&map, KERNEL, 0);

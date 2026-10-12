@@ -194,12 +194,11 @@ impl BlockCache {
     pub fn flush_all(&mut self) -> bool {
         let mut success = true;
         for i in 0..CACHE_SIZE {
-            if self.entries[i].valid && self.entries[i].dirty {
-                if !self.flush_entry(i) {
+            if self.entries[i].valid && self.entries[i].dirty
+                && !self.flush_entry(i) {
                     success = false;
                     // Lanjutkan untuk mencoba flush entry lain
                 }
-            }
         }
         success
     }
@@ -263,31 +262,31 @@ pub fn bc_invalidate_all() -> bool {
 pub mod tests {
     use super::*;
 
-/// A cache in `.bss` — not on the stack, and not on the heap either.
-///
-/// `BlockCache::new()` is 512 entries of 512 bytes plus bookkeeping: 270 KiB.
-/// That is fine for the kernel's real cache, which is a `static`
-/// (`BLOCK_CACHE`) initialised in place. It is not fine anywhere else:
-///
-/// * On the stack it blows the boot stack, which is the only stack the
-///   in-kernel suite runs on.
-/// * `Box::new(BlockCache::new())` does **not** fix that. The function returns
-///   by value, so the compiler materialises a 270 KiB temporary on the stack
-///   first and then copies it into the box. Verified with a breakpoint, which
-///   stopped inside `BlockCache::new` at the first test, i.e. the frame was
-///   still on the stack.
-///
-/// `BlockCache::new()` is a `const fn`, so a `static` can hold one directly and
-/// nothing is ever built on the stack. One shared cache is enough: none of
-/// these tests insert an entry, so none of them can disturb another's state.
-static mut TEST_CACHE: BlockCache = BlockCache::new();
+    /// A cache in `.bss` — not on the stack, and not on the heap either.
+    ///
+    /// `BlockCache::new()` is 512 entries of 512 bytes plus bookkeeping: 270 KiB.
+    /// That is fine for the kernel's real cache, which is a `static`
+    /// (`BLOCK_CACHE`) initialised in place. It is not fine anywhere else:
+    ///
+    /// * On the stack it blows the boot stack, which is the only stack the
+    ///   in-kernel suite runs on.
+    /// * `Box::new(BlockCache::new())` does **not** fix that. The function returns
+    ///   by value, so the compiler materialises a 270 KiB temporary on the stack
+    ///   first and then copies it into the box. Verified with a breakpoint, which
+    ///   stopped inside `BlockCache::new` at the first test, i.e. the frame was
+    ///   still on the stack.
+    ///
+    /// `BlockCache::new()` is a `const fn`, so a `static` can hold one directly and
+    /// nothing is ever built on the stack. One shared cache is enough: none of
+    /// these tests insert an entry, so none of them can disturb another's state.
+    static mut TEST_CACHE: BlockCache = BlockCache::new();
 
-fn test_cache() -> &'static mut BlockCache {
-    // SAFETY: the in-kernel suite is single-threaded on the boot CPU and these
-    // tests are registered to run in sequence, so there is no aliasing. The
-    // `&raw mut` avoids creating a second reference to the same place.
-    unsafe { &mut *core::ptr::addr_of_mut!(TEST_CACHE) }
-}
+    fn test_cache() -> &'static mut BlockCache {
+        // SAFETY: the in-kernel suite is single-threaded on the boot CPU and these
+        // tests are registered to run in sequence, so there is no aliasing. The
+        // `&raw mut` avoids creating a second reference to the same place.
+        unsafe { &mut *core::ptr::addr_of_mut!(TEST_CACHE) }
+    }
 
     pub fn test_new_cache_empty() -> Result<(), &'static str> {
         let cache = test_cache();

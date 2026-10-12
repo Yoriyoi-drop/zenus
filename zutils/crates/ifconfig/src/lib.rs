@@ -3,7 +3,6 @@
 #[cfg(test)]
 extern crate std;
 
-
 use zenus_net::nic;
 use zutils_common::{Args, Writer};
 

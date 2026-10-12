@@ -93,9 +93,18 @@ mod host_tests {
             let rest = a.code.strip_prefix("ZN-").expect("code starts with ZN-");
             let dash = rest.find('-').expect("code has second dash");
             let (prefix, suffix) = (&rest[..dash], &rest[dash + 1..]);
-            assert_eq!(prefix, a.module.prefix(), "code/module mismatch: {}", a.code);
+            assert_eq!(
+                prefix,
+                a.module.prefix(),
+                "code/module mismatch: {}",
+                a.code
+            );
             assert_eq!(suffix.len(), 4, "bad code shape: {}", a.code);
-            assert!(suffix.bytes().all(|b| b.is_ascii_digit()), "bad code shape: {}", a.code);
+            assert!(
+                suffix.bytes().all(|b| b.is_ascii_digit()),
+                "bad code shape: {}",
+                a.code
+            );
             for b in catalog.iter().skip(i + 1) {
                 assert_ne!(a.code, b.code, "duplicate code {}", a.code);
             }

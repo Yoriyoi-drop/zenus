@@ -1,4 +1,5 @@
 pub mod apic;
+pub mod faults;
 pub mod handler;
 pub mod idt;
 pub mod ioapic;

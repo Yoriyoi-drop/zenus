@@ -3,7 +3,6 @@
 #[cfg(test)]
 extern crate std;
 
-
 pub trait Writer {
     fn write_str(&mut self, s: &str);
     fn write_byte(&mut self, b: u8);
@@ -98,7 +97,7 @@ impl<'a> Args<'a> {
     }
 
     pub fn has_flag(&self, flag: &str) -> bool {
-        self.parts[..self.count].iter().any(|a| *a == flag)
+        self.parts[..self.count].contains(&flag)
     }
 
     pub fn get(&self, index: usize) -> Option<&'a str> {

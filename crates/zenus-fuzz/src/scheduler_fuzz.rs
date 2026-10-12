@@ -35,16 +35,13 @@ pub fn execute(input: &[u8]) -> FuzzResult {
     };
 
     let arg0 = u64::from_le_bytes([
-        input[1], input[2], input[3], input[4],
-        input[5], input[6], input[7], input[8],
+        input[1], input[2], input[3], input[4], input[5], input[6], input[7], input[8],
     ]);
     let arg1 = u64::from_le_bytes([
-        input[9], input[10], input[11], input[12],
-        input[13], input[14], input[15], input[16],
+        input[9], input[10], input[11], input[12], input[13], input[14], input[15], input[16],
     ]);
     let arg2 = u64::from_le_bytes([
-        input[17], input[18], input[19], input[20],
-        input[21], input[22], input[23], input[24],
+        input[17], input[18], input[19], input[20], input[21], input[22], input[23], input[24],
     ]);
     let _ = arg2;
 
@@ -106,7 +103,7 @@ fn fuzz_clone(flags: u64, stack: u64) -> FuzzResult {
     }
 
     // Check for invalid stack pointer
-    if stack != 0 && (stack < 0x1000 || stack > 0x0000800000000000) {
+    if stack != 0 && !(0x1000..=0x0000800000000000).contains(&stack) {
         return FuzzResult::Normal;
     }
 

@@ -308,7 +308,7 @@ impl Ext2Fs {
         let offset_in_sector = (inode_offset % 512) as usize;
 
         let raw_size = core::mem::size_of::<RawInode>();
-        let needed_sectors = (offset_in_sector + raw_size + 511) / 512;
+        let needed_sectors = (offset_in_sector + raw_size).div_ceil(512);
         let mut buf = [0u8; 2048];
         for i in 0..needed_sectors as u64 {
             let s = i as usize;
@@ -322,7 +322,7 @@ impl Ext2Fs {
 
     fn read_block_data(&self, block: u32, buf: &mut [u8]) -> bool {
         let sector = block as u64 * self.block_size / 512;
-        let sectors = (self.block_size as usize + 511) / 512;
+        let sectors = (self.block_size as usize).div_ceil(512);
         for i in 0..sectors {
             let off = i * 512;
             if off >= buf.len() {
@@ -423,7 +423,7 @@ impl Ext2Fs {
 
     fn write_block_data(&self, block: u32, buf: &[u8]) -> bool {
         let sector = block as u64 * self.block_size / 512;
-        let sectors = (self.block_size as usize + 511) / 512;
+        let sectors = (self.block_size as usize).div_ceil(512);
         for i in 0..sectors {
             let off = i * 512;
             if off >= buf.len() {
@@ -440,7 +440,7 @@ impl Ext2Fs {
     fn read_block_bitmap(&self, group: u32) -> Option<alloc::vec::Vec<u8>> {
         let bgd = self.read_bgdt(group)?;
         let sector = bgd.block_bitmap as u64 * self.block_size / 512;
-        let sectors = (self.block_size as usize + 511) / 512;
+        let sectors = (self.block_size as usize).div_ceil(512);
         let bsz = self.block_size as usize;
         let mut buf = alloc::vec![0u8; bsz];
         for i in 0..sectors {
@@ -462,7 +462,7 @@ impl Ext2Fs {
             None => return false,
         };
         let sector = bgd.block_bitmap as u64 * self.block_size / 512;
-        let sectors = (self.block_size as usize + 511) / 512;
+        let sectors = (self.block_size as usize).div_ceil(512);
         for i in 0..sectors {
             let off = i * 512;
             if off >= bitmap.len() {
@@ -578,7 +578,7 @@ impl Ext2Fs {
 
         let raw_size = core::mem::size_of::<RawInode>();
         let inode_read_size = core::cmp::max(raw_size, self.inode_size as usize);
-        let needed_sectors = (offset_in_sector + inode_read_size + 511) / 512;
+        let needed_sectors = (offset_in_sector + inode_read_size).div_ceil(512);
         let mut buf = alloc::vec![0u8; needed_sectors * 512];
 
         for i in 0..needed_sectors as u64 {
@@ -626,7 +626,7 @@ impl FileSystem for Ext2Fs {
         let block_size = self.block_size;
         let start_block = (offset / block_size) as u32;
         let end = core::cmp::min(offset + buf.len() as u64, size);
-        let end_block = ((end + block_size - 1) / block_size) as u32;
+        let end_block = end.div_ceil(block_size) as u32;
         let mut written = 0u64;
 
         for b in start_block..end_block {
@@ -790,7 +790,7 @@ impl FileSystem for Ext2Fs {
                     size,
                     file_type: Self::inode_file_type(raw.mode),
                     inode,
-                    blocks: (size + 511) / 512,
+                    blocks: size.div_ceil(512),
                     uid: raw.uid as u32,
                     gid: raw.gid as u32,
                     mode: raw.mode,

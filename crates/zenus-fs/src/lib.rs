@@ -34,8 +34,8 @@ mod host_tests {
     use crate::block_cache::{bc_flush, bc_read, bc_stats, bc_write};
     use crate::devfs::{block_device_count, register_block_device, BlockDeviceOps};
     use crate::vfs::{
-        self, FileStat, FileType, S_IFDIR, S_IFREG, S_IROTH, S_IRGRP, S_IRUSR, S_IWGRP, S_IWOTH,
-        S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR, MAX_PATH_SEGMENTS,
+        self, FileStat, FileType, MAX_PATH_SEGMENTS, S_IFDIR, S_IFREG, S_IRGRP, S_IROTH, S_IRUSR,
+        S_IWGRP, S_IWOTH, S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR,
     };
     use alloc::string::String;
     use alloc::vec;
@@ -190,7 +190,12 @@ mod host_tests {
     #[test]
     fn access_check_directory_write_needs_execute_bit() {
         // rwx for owner: write ok.
-        let rwx = stat(1000, 1000, S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR, FileType::Directory);
+        let rwx = stat(
+            1000,
+            1000,
+            S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR,
+            FileType::Directory,
+        );
         assert!(vfs::access_check(1000, 1000, 1000, 1000, &rwx, true));
 
         // rw- without x: creating entries inside would be unresolvable, so
@@ -206,15 +211,28 @@ mod host_tests {
         let file = vfs::perm_str(S_IFREG | S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXOTH);
         assert_eq!(&file[..], b"-rwxr----x");
 
-        let dir = vfs::perm_str(S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP | S_IXGRP);
+        let dir =
+            vfs::perm_str(S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP | S_IXGRP);
         // No "other" bits were passed, so they must render as dashes.
         assert_eq!(&dir[..], b"drwxrwx---");
 
         // `perm_str` decodes the type from the 0x2/0x4/0x6/0xA/0x8 nibble of
         // the mode; those bits are not exported as S_IF* constants.
-        assert_eq!(&vfs::perm_str(0x2000 | S_IWUSR)[..], b"c-w-------", "char device");
-        assert_eq!(&vfs::perm_str(0x6000 | S_IRUSR)[..], b"br--------", "block device");
-        assert_eq!(&vfs::perm_str(0xA000 | S_IRUSR | S_IWUSR)[..], b"lrw-------", "symlink");
+        assert_eq!(
+            &vfs::perm_str(0x2000 | S_IWUSR)[..],
+            b"c-w-------",
+            "char device"
+        );
+        assert_eq!(
+            &vfs::perm_str(0x6000 | S_IRUSR)[..],
+            b"br--------",
+            "block device"
+        );
+        assert_eq!(
+            &vfs::perm_str(0xA000 | S_IRUSR | S_IWUSR)[..],
+            b"lrw-------",
+            "symlink"
+        );
         // Mode 0 has no type nibble at all, which `perm_str` renders as '?'.
         assert_eq!(&vfs::perm_str(0)[..], b"?---------");
     }
@@ -288,13 +306,17 @@ mod host_tests {
         // A completed write *through the scheduler* is counted. (Calling
         // `bc_write` directly was the bug in this test: it never touches
         // `total_ios`.)
-        assert!(crate::io_scheduler::io_submit_write(dev as u8, 5, &[0x42; 4]));
+        assert!(crate::io_scheduler::io_submit_write(
+            dev as u8, 5, &[0x42; 4]
+        ));
         let (after_write, _, _) = crate::io_scheduler::io_stats();
         assert_eq!(after_write, before + 1, "one completed IO must be counted");
 
         // A failing read is not counted.
         let mut buf = [0u8; 4];
-        assert!(!crate::io_scheduler::io_submit_read(dev as u8, 999, &mut buf));
+        assert!(!crate::io_scheduler::io_submit_read(
+            dev as u8, 999, &mut buf
+        ));
         assert_eq!(crate::io_scheduler::io_stats().0, after_write);
 
         // A succeeding one is.
@@ -396,7 +418,11 @@ mod host_tests {
         assert!(fake_write(START + 1, &data));
 
         assert!(crate::journal::journal_replay(dev as u8, START, 16));
-        assert_eq!(fake_sector(57)[0], 0, "a torn transaction must not be redone");
+        assert_eq!(
+            fake_sector(57)[0],
+            0,
+            "a torn transaction must not be redone"
+        );
     }
 
     /// Regression: `journal_write` bounded entries by `MAX_ENTRIES` (123), the
@@ -505,7 +531,11 @@ mod host_tests {
             "an empty journal is not an error"
         );
         for (lba, sector) in before.iter().enumerate() {
-            assert_eq!(fake_sector(lba as u64), *sector, "sector {lba} was modified");
+            assert_eq!(
+                fake_sector(lba as u64),
+                *sector,
+                "sector {lba} was modified"
+            );
         }
     }
 
@@ -535,7 +565,11 @@ mod host_tests {
         let n = node.fs.read(node.inode, 0, &mut buf).unwrap();
         assert_eq!(n, 11);
         assert_eq!(&buf[..2], b"hi", "the first two bytes were overwritten");
-        assert_eq!(&buf[2..5], b"llo", "the tail survives, as POSIX write() says");
+        assert_eq!(
+            &buf[2..5],
+            b"llo",
+            "the tail survives, as POSIX write() says"
+        );
 
         let entries = vfs::read_dir("/");
         assert!(entries.iter().any(|e| e.name == "hello.txt"));
@@ -597,7 +631,10 @@ mod host_tests {
 
         let mut buf = [0u8; 128];
         let n = procfs_fs.read(1, 0, &mut buf).expect("cpuinfo readable");
-        assert_eq!(&buf[..n as usize], b"processor\t: 0\nmodel name\t: Test CPU\n");
+        assert_eq!(
+            &buf[..n as usize],
+            b"processor\t: 0\nmodel name\t: Test CPU\n"
+        );
 
         let n = procfs_fs.read(2, 0, &mut buf).expect("meminfo readable");
         assert_eq!(&buf[..n as usize], b"MemTotal: 2048 kB\n");
@@ -630,7 +667,7 @@ mod host_tests {
 
     #[test]
     fn cgroup_fs_exposes_v2_layout() {
-        use crate::cgroup::{CgroupFs, reset_for_tests};
+        use crate::cgroup::{reset_for_tests, CgroupFs};
         use crate::vfs::FileSystem;
 
         let _serial = serial();
@@ -682,7 +719,10 @@ mod host_tests {
         assert!(fs.write(2, 0, b"1").is_some(), "cgroup.procs is attachable");
         // And the group can be removed once it is empty again.
         let pids_max = fs.lookup(dir, "pids.max").expect("listed");
-        assert!(fs.write(pids_max, 0, b"4").is_some(), "pids.max is writable");
+        assert!(
+            fs.write(pids_max, 0, b"4").is_some(),
+            "pids.max is writable"
+        );
         assert!(fs.unlink(fs.root_inode(), "test"));
         assert_eq!(fs.lookup(fs.root_inode(), "test"), None);
     }
@@ -797,7 +837,8 @@ mod host_tests {
         image[88..92].copy_from_slice(&(body.len() as u32).to_le_bytes());
 
         let base = header_size;
-        image[base..base + path.len().min(128)].copy_from_slice(&path.as_bytes()[..path.len().min(128)]);
+        image[base..base + path.len().min(128)]
+            .copy_from_slice(&path.as_bytes()[..path.len().min(128)]);
         image[base + 128..base + 132].copy_from_slice(&(body.len() as u32).to_le_bytes());
         image[base + 132..base + 134].copy_from_slice(&0o644u16.to_le_bytes());
         image[base + 134] = 0; // regular file
@@ -998,15 +1039,14 @@ mod host_tests {
             !vfs::chmod_permitted(zenus_ns::NS_ROOT, "/f", 0o777, &stranger),
             "chmod by a non-owner must be refused"
         );
-        assert_eq!(node.fs.stat(node.inode).mode & 0o777, 0o644, "mode unchanged");
+        assert_eq!(
+            node.fs.stat(node.inode).mode & 0o777,
+            0o644,
+            "mode unchanged"
+        );
 
         // …but the owner can.
-        assert!(vfs::chmod_permitted(
-            zenus_ns::NS_ROOT,
-            "/f",
-            0o600,
-            &owner
-        ));
+        assert!(vfs::chmod_permitted(zenus_ns::NS_ROOT, "/f", 0o600, &owner));
         assert_eq!(node.fs.stat(node.inode).mode & 0o777, 0o600);
 
         // Changing the owner requires root, whoever asks.
@@ -1147,7 +1187,7 @@ mod host_tests {
         assert!(!vfs::owns(1000, 2000, &file));
     }
 
-        /// An `MS_RDONLY` mount must produce a read-only view, all the way down to
+    /// An `MS_RDONLY` mount must produce a read-only view, all the way down to
     /// the descriptor. `sys_mount` used to accept the flag and drop it — and
     /// `vfs::Mount` had no field for flags at all — so a read-only mount was
     /// writable.
@@ -1157,7 +1197,12 @@ mod host_tests {
         fresh_fs();
 
         assert!(vfs::create_dir("/ro"));
-        assert!(vfs::mount_with_flags(zenus_ns::NS_ROOT, "/ro", &MARKER, vfs::MS_RDONLY));
+        assert!(vfs::mount_with_flags(
+            zenus_ns::NS_ROOT,
+            "/ro",
+            &MARKER,
+            vfs::MS_RDONLY
+        ));
 
         let node = vfs::open("/ro").expect("/ro is the mount point");
         assert!(node.read_only, "the mount point itself");
@@ -1176,7 +1221,10 @@ mod host_tests {
         // The pure predicate that both the node and the syscall rely on.
         assert!(vfs::mount_is_read_only("/ro", "/ro", vfs::MS_RDONLY));
         assert!(vfs::mount_is_read_only("/ro/x", "/ro", vfs::MS_RDONLY));
-        assert!(!vfs::mount_is_read_only("/ro", "/ro", 0), "no flag, no read-only");
+        assert!(
+            !vfs::mount_is_read_only("/ro", "/ro", 0),
+            "no flag, no read-only"
+        );
         assert!(
             !vfs::mount_is_read_only("/roevil", "/ro", vfs::MS_RDONLY),
             "the flag must not extend past the mount boundary"
@@ -1205,7 +1253,10 @@ mod host_tests {
 
         // A file outside the install dir that a tampered manifest points at.
         assert!(vfs::create_dir("/etc"), "set up the victim");
-        assert!(vfs::create_file("/etc/shadow"), "the file that must survive");
+        assert!(
+            vfs::create_file("/etc/shadow"),
+            "the file that must survive"
+        );
 
         // Install normally, then rewrite the manifest to name the victim.
         let image = zpk_image("demo", "1.0", "/bin/demo", b"payload");
@@ -1314,7 +1365,10 @@ mod host_tests {
             deep.push_str("/x");
         }
         deep.push_str("/secret");
-        assert!(vfs::open(&deep).is_none(), "over-long path must not resolve");
+        assert!(
+            vfs::open(&deep).is_none(),
+            "over-long path must not resolve"
+        );
 
         // Exactly at the limit is still resolved (and simply not found).
         let mut at_limit = String::new();
@@ -1369,7 +1423,11 @@ mod host_tests {
             None,
             "inodes_per_group == 0 must not be used as a divisor"
         );
-        assert_eq!(group_count(0, 0), None, "a zero divisor is invalid regardless of count");
+        assert_eq!(
+            group_count(0, 0),
+            None,
+            "a zero divisor is invalid regardless of count"
+        );
 
         // Ceiling division: exact multiples do not round up.
         assert_eq!(group_count(8192, 8192), Some(1));
@@ -1424,13 +1482,20 @@ mod host_tests {
             0,
             "an impossible last group clamps to 0 instead of wrapping"
         );
-        assert_eq!(last_group_size(blocks_count, blocks_per_group, num_groups), 1024);
+        assert_eq!(
+            last_group_size(blocks_count, blocks_per_group, num_groups),
+            1024
+        );
 
         // A filesystem whose group counts agree is unaffected: the last group
         // holds the remainder.
         assert_eq!(last_group_size(8193, 8192, 2), 1);
         assert_eq!(last_group_size(8192, 4096, 2), 4096);
-        assert_eq!(last_group_size(1, 8192, 1), 1, "a single group holds everything");
+        assert_eq!(
+            last_group_size(1, 8192, 1),
+            1,
+            "a single group holds everything"
+        );
         assert_eq!(last_group_size(0, 8192, 1), 0);
 
         // Exactly divisible: the last group is full, and a zero total is 0
@@ -1578,7 +1643,9 @@ mod host_tests {
         use crate::vfs::FileSystem;
 
         let fs = CgroupFs;
-        let ino = fs.lookup(fs.root_inode(), "cgroup.defaults").expect("listed");
+        let ino = fs
+            .lookup(fs.root_inode(), "cgroup.defaults")
+            .expect("listed");
         let stat = fs.stat(ino);
         assert_eq!(stat.file_type, FileType::File);
         assert_ne!(stat.mode, 0, "a listed file must have a mode");
@@ -1599,7 +1666,10 @@ mod host_tests {
 
         assert!(vfs::create_dir("/d"));
         assert!(vfs::create_file("/d/child"));
-        assert!(!vfs::remove("/d"), "non-empty directory must not be removed");
+        assert!(
+            !vfs::remove("/d"),
+            "non-empty directory must not be removed"
+        );
         assert!(vfs::open("/d").is_some());
         assert!(vfs::open("/d/child").is_some(), "child is not orphaned");
 
@@ -1621,7 +1691,11 @@ mod host_tests {
         sysctl::sysctl_init();
         let first = sysctl::sysctl_count();
         sysctl::sysctl_init();
-        assert_eq!(sysctl::sysctl_count(), first, "init must not grow the table");
+        assert_eq!(
+            sysctl::sysctl_count(),
+            first,
+            "init must not grow the table"
+        );
 
         // The write must be visible on the same key afterwards.
         let level = sysctl::sysctl_find("kernel.log_level").expect("key exists");
@@ -1642,7 +1716,10 @@ mod host_tests {
         assert!(vfs::create_dir("/mnt"));
 
         let ns = zenus_ns::mnt::create().expect("create mount namespace");
-        assert!(vfs::create_mnt_ns(ns), "namespace needs its own mount table");
+        assert!(
+            vfs::create_mnt_ns(ns),
+            "namespace needs its own mount table"
+        );
 
         static OTHER_FS: crate::procfs::ProcFs = crate::procfs::ProcFs;
         assert!(vfs::mount_in_ns(ns, "/mnt", &OTHER_FS));
@@ -1951,7 +2028,10 @@ mod host_tests {
 
         // Dirty entries are still pending: nothing may have been lost.
         assert!(bc_flush());
-        assert_eq!(fake_sector(FAKE_SECTORS as u64 - 1)[0], (FAKE_SECTORS - 1) as u8);
+        assert_eq!(
+            fake_sector(FAKE_SECTORS as u64 - 1)[0],
+            (FAKE_SECTORS - 1) as u8
+        );
     }
 
     /// Regression: a write to a sector the device rejects used to be cached
@@ -1965,7 +2045,10 @@ mod host_tests {
         wipe_fake_device();
 
         assert!(bc_write(dev as u8, 7, &[0x11; 8]));
-        assert!(!bc_write(dev as u8, 9_000, &[0x22; 8]), "out-of-range write");
+        assert!(
+            !bc_write(dev as u8, 9_000, &[0x22; 8]),
+            "out-of-range write"
+        );
         assert!(bc_flush(), "a rejected write must not wedge later flushes");
 
         let mut buf = [0u8; 8];

@@ -67,11 +67,11 @@ fn scroll() {
     let line_bytes = WIDTH * 2;
     unsafe {
         for row in 1..HEIGHT {
-            let src = base.add((row * line_bytes));
-            let dst = base.add(((row - 1) * line_bytes));
+            let src = base.add(row * line_bytes );
+            let dst = base.add((row - 1) * line_bytes );
             core::ptr::copy_nonoverlapping(src, dst, line_bytes);
         }
-        let last_line = base.add(((HEIGHT - 1) * line_bytes));
+        let last_line = base.add((HEIGHT - 1) * line_bytes );
         let attr = ATTR.load(Ordering::Relaxed) as u8;
         for col in 0..WIDTH {
             core::ptr::write_volatile(last_line.add(col * 2), b' ');

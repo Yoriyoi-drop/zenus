@@ -69,7 +69,7 @@ $(KERNEL): $(KERNEL_SOURCES) target/$(TARGET)/$(PROFILE_DIR)/libzenus.a
 		--no-whole-archive
 
 # Build userspace programs
-USERSPACE_PROGS := hello echo cat exitonly args minimal
+USERSPACE_PROGS := hello echo cat exitonly args minimal fault
 USERSPACE_BUILD := userspace/build
 $(USERSPACE_BUILD)/%: userspace/%/src/lib.rs userspace/userspace.ld
 	$(MAKE) -C userspace $(notdir $@)

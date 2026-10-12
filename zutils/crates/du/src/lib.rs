@@ -3,7 +3,6 @@
 #[cfg(test)]
 extern crate std;
 
-
 extern crate alloc;
 
 use zenus_fs::vfs::{self, FileType};
@@ -19,11 +18,11 @@ fn du_recursive<W: Writer + ?Sized>(path: &str, w: &mut W) -> u64 {
             for entry in entries {
                 let mut full = alloc::string::String::new();
                 if path == "/" {
-                    full.push_str("/");
+                    full.push('/');
                     full.push_str(&entry.name);
                 } else {
                     full.push_str(path);
-                    full.push_str("/");
+                    full.push('/');
                     full.push_str(&entry.name);
                 }
                 total += du_recursive(&full, w);

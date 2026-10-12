@@ -89,7 +89,7 @@ fn bit_flip(data: &mut [u8]) {
         return;
     }
     let idx = (data[0] as usize) % data.len();
-    let bit = (data.get(1).copied().unwrap_or(0) % 8) as u8;
+    let bit = (data.get(1).copied().unwrap_or(0) % 8);
     data[idx] ^= 1 << bit;
 }
 
@@ -126,16 +126,16 @@ fn interesting_values(data: &mut [u8]) {
 fn dictionary(data: &mut Vec<u8>) {
     // Insert common syscall / length / boundary patterns.
     static DICT: &[&[u8]] = &[
-        &[0, 0, 0, 0],               // read
-        &[1, 0, 0, 0],               // write
-        &[2, 0, 0, 0],               // open
-        &[60, 0, 0, 0],              // exit
-        &[9, 0, 0, 0],               // mmap
-        &[11, 0, 0, 0],              // munmap
-        &[0x00, 0x10, 0, 0],         // page size
-        &[0xFF, 0xFF, 0xFF, 0xFF],   // -1
-        &[0x00, 0x00, 0x00, 0x80],   // kernel-space address
-        &[0x00, 0x10, 0x00, 0x00],   // 0x1000 boundary
+        &[0, 0, 0, 0],             // read
+        &[1, 0, 0, 0],             // write
+        &[2, 0, 0, 0],             // open
+        &[60, 0, 0, 0],            // exit
+        &[9, 0, 0, 0],             // mmap
+        &[11, 0, 0, 0],            // munmap
+        &[0x00, 0x10, 0, 0],       // page size
+        &[0xFF, 0xFF, 0xFF, 0xFF], // -1
+        &[0x00, 0x00, 0x00, 0x80], // kernel-space address
+        &[0x00, 0x10, 0x00, 0x00], // 0x1000 boundary
     ];
 
     if data.is_empty() {
@@ -161,7 +161,8 @@ fn splice(data: &mut Vec<u8>) {
         return;
     }
     let split = (data[0] as usize) % data.len();
-    let other_len = ((data[1] as usize) % 64).min(MAX_MUTATED_SIZE - data.len().min(MAX_MUTATED_SIZE));
+    let other_len =
+        ((data[1] as usize) % 64).min(MAX_MUTATED_SIZE - data.len().min(MAX_MUTATED_SIZE));
     let other: Vec<u8> = (0..other_len)
         .map(|i| data.get(i + 2).copied().unwrap_or(0).wrapping_add(i as u8))
         .collect();

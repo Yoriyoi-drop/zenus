@@ -182,9 +182,9 @@ pub fn handle_irq1() {
             SCANCODE_SET1
         };
         let mut c = base[key as usize];
-        if kbd.caps && c >= b'a' && c <= b'z' {
+        if kbd.caps && c.is_ascii_lowercase() {
             c -= 32;
-        } else if kbd.caps && c >= b'A' && c <= b'Z' {
+        } else if kbd.caps && c.is_ascii_uppercase() {
             c += 32;
         }
 
@@ -286,9 +286,9 @@ pub fn poll_ps2_controller() -> bool {
             SCANCODE_SET1
         };
         let mut c = base[key as usize];
-        if kbd.caps && c >= b'a' && c <= b'z' {
+        if kbd.caps && c.is_ascii_lowercase() {
             c -= 32;
-        } else if kbd.caps && c >= b'A' && c <= b'Z' {
+        } else if kbd.caps && c.is_ascii_uppercase() {
             c += 32;
         }
         if c != 0 {

@@ -36,6 +36,12 @@ pub struct VmaRegion {
     pub valid: bool,
 }
 
+impl Default for VmaRegion {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VmaRegion {
     pub const fn new() -> Self {
         VmaRegion {
@@ -80,6 +86,12 @@ pub struct VmaTable {
     pub regions: [VmaRegion; MAX_VMAS],
     pub count: usize,
     pub mmap_base: u64,
+}
+
+impl Default for VmaTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VmaTable {
@@ -189,9 +201,7 @@ impl VmaTable {
                     continue;
                 }
                 // Proper half-open overlap test.
-                if candidate < region.end
-                    && candidate.saturating_add(size) > region.start
-                {
+                if candidate < region.end && candidate.saturating_add(size) > region.start {
                     bump = Some(region.end);
                     break;
                 }

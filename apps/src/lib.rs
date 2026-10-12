@@ -451,7 +451,11 @@ pub extern "C" fn entry() -> ! {
     // Route IRQ4 (COM1) through IOAPIC → vector 36, then enable IER bit 0.
     if zenus_arch::interrupts::ioapic::is_initialized() {
         let apic_id = zenus_arch::interrupts::apic::current_apic_id() as u8;
-        if zenus_arch::interrupts::ioapic::route_irq(4, zenus_arch::interrupts::SERIAL_VECTOR, apic_id) {
+        if zenus_arch::interrupts::ioapic::route_irq(
+            4,
+            zenus_arch::interrupts::SERIAL_VECTOR,
+            apic_id,
+        ) {
             zenus_console::kinfo!("Serial IRQ4 -> vector 36 (IOAPIC)");
         } else {
             zenus_console::kwarn!("Serial IRQ4 -> IOAPIC FAILED");
@@ -459,6 +463,13 @@ pub extern "C" fn entry() -> ! {
     }
     zenus_console::serial::enable_serial_interrupts();
     scheduler::init();
+    // A ring-3 task that faults is killed, not the machine: the page-fault
+    // handler is in `zenus-arch`, the layer *below* the scheduler, so the kill
+    // action is registered here where both are in scope. Until this runs the
+    // handler falls back to its pre-existing dump-and-halt.
+    zenus_arch::interrupts::faults::register_user_fault_handler(
+        zenus_sched::scheduler::user_fault_kill,
+    );
     zenus_console::serial::flush_output_blocking();
 
     zenus_fs::vfs::init();
@@ -731,7 +742,11 @@ pub extern "C" fn entry() -> ! {
     zenus_arch::keyboard::init();
     if zenus_arch::interrupts::ioapic::is_initialized() {
         let apic_id = zenus_arch::interrupts::apic::current_apic_id() as u8;
-        if zenus_arch::interrupts::ioapic::route_irq(4, zenus_arch::interrupts::SERIAL_VECTOR, apic_id) {
+        if zenus_arch::interrupts::ioapic::route_irq(
+            4,
+            zenus_arch::interrupts::SERIAL_VECTOR,
+            apic_id,
+        ) {
             zenus_console::kinfo!("Serial IRQ4 -> vector 36 (IOAPIC)");
         } else {
             zenus_console::kwarn!("Serial IRQ4 -> IOAPIC FAILED");
@@ -739,6 +754,13 @@ pub extern "C" fn entry() -> ! {
     }
     zenus_console::serial::enable_serial_interrupts();
     scheduler::init();
+    // A ring-3 task that faults is killed, not the machine: the page-fault
+    // handler is in `zenus-arch`, the layer *below* the scheduler, so the kill
+    // action is registered here where both are in scope. Until this runs the
+    // handler falls back to its pre-existing dump-and-halt.
+    zenus_arch::interrupts::faults::register_user_fault_handler(
+        zenus_sched::scheduler::user_fault_kill,
+    );
     zenus_console::serial::flush_output_blocking();
 
     zenus_fs::vfs::init();

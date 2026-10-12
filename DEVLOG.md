@@ -3166,9 +3166,7 @@ batas yang ditegakkan di belakangnya.
 Charge/tidak-charge per halaman, bukan sekaligus di muka: `munmap` parsial
 hanya tahu halaman mana yang benar-benar hilang, jadi kedua sisi harus
 menghitung unit yang sama. Kalau tidak, memetakan 1 MiB lalu `munmap` 1 halaman
-akan melepaskan seluruh charge berulang kali dan menembus `memory.max`.
-
-### Bug yang ditemukan smoke test di detik yang sama
+akan melepaskan seluruh charge berulang kali dan menembus `memory.max`.### Bug yang ditemukan smoke test di detik yang sama
 
 Versi `CgroupTable` pertama menyimpan **root sebagai elemen pertama `groups`**,
 dan hanya `reset()` yang menambahkannya. `empty()` — yang dipakai static global

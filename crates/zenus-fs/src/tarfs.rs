@@ -130,7 +130,7 @@ impl TarFs {
 
             offset += 512;
             if entry_type == b'0' || entry_type == b'\0' {
-                offset += (file_size + 511) / 512 * 512;
+                offset += file_size.div_ceil(512) * 512;
             }
         }
 
@@ -204,12 +204,11 @@ impl FileSystem for TarFs {
             if parent_inode == 0 {
                 alloc::string::String::new()
             } else {
-                match tar.entries[..tar.count]
-                    .iter()
-                    .find(|e| e.inode == parent_inode)
                 {
-                    Some(e) => alloc::string::String::from(e.name),
-                    None => return None,
+                    let e = tar.entries[..tar.count]
+                    .iter()
+                    .find(|e| e.inode == parent_inode)?;
+                    alloc::string::String::from(e.name)
                 }
             }
         };
@@ -345,7 +344,7 @@ impl FileSystem for TarFs {
                 size: e.data_len,
                 file_type: e.file_type,
                 inode: e.inode,
-                blocks: (e.data_len + 511) / 512,
+                blocks: e.data_len.div_ceil(512),
                 uid: 0,
                 gid: 0,
                 mode: vfs::DEFAULT_FILE_MODE,

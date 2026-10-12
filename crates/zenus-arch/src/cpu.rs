@@ -129,13 +129,13 @@ core::arch::global_asm!(
     "  call syscall_dispatch6",
     // After call+ret: RSP = KSP - 56 (ret_addr consumed by ret inside dispatch)
     // Pop deep copies, then skip the arg slots + corrupted originals:
-    "  pop rcx",     // RCX = saved RIP from DEEP COPY (safe), RSP = KSP - 48
-    "  pop r11",     // R11 = saved RFLAGS from DEEP COPY (safe), RSP = KSP - 40
+    "  pop rcx", // RCX = saved RIP from DEEP COPY (safe), RSP = KSP - 48
+    "  pop r11", // R11 = saved RFLAGS from DEEP COPY (safe), RSP = KSP - 40
     // Restore the user-visible arg registers clobbered above.
-    "  mov r10, [rsp]",      // orig r10 (arg4)
-    "  mov r8, [rsp + 8]",   // orig r8  (arg5)
-    "  mov r9, [rsp + 16]",  // orig r9  (arg6)
-    "  add rsp, 40", // Skip arg slots + corrupted originals, RSP = KSP
+    "  mov r10, [rsp]",     // orig r10 (arg4)
+    "  mov r8, [rsp + 8]",  // orig r8  (arg5)
+    "  mov r9, [rsp + 16]", // orig r9  (arg6)
+    "  add rsp, 40",        // Skip arg slots + corrupted originals, RSP = KSP
     // Validate saved RCX before SYSRET.
     // Kernel-space RCX or NULL RCX indicates corruption; route to debug loop.
     "  mov rax, rcx",

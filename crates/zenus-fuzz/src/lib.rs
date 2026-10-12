@@ -3,21 +3,20 @@
 #[cfg(test)]
 extern crate std;
 
-
 extern crate alloc;
 
 pub mod corpus;
-pub mod mutator;
 pub mod coverage;
-pub mod syscall_fuzz;
-pub mod memory_fuzz;
+pub mod crash;
 pub mod device_fuzz;
 pub mod filesystem_fuzz;
-pub mod shell_fuzz;
-pub mod crash;
+pub mod memory_fuzz;
 pub mod minimizer;
-pub mod snapshot;
+pub mod mutator;
 pub mod scheduler_fuzz;
+pub mod shell_fuzz;
+pub mod snapshot;
+pub mod syscall_fuzz;
 
 use alloc::vec::Vec;
 
@@ -29,11 +28,9 @@ pub static FUZZ_STATS: SpinLock<FuzzStats> = SpinLock::new(FuzzStats::new());
 /// Index of the subsystem the current test case belongs to (0..6), plus one
 /// past the end for "none". Written by the campaign so an aborted run can say
 /// where it stopped.
-pub static CURRENT_SUBSYSTEM: core::sync::atomic::AtomicU8 =
-    core::sync::atomic::AtomicU8::new(0);
+pub static CURRENT_SUBSYSTEM: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 /// Number of cases started so far.
-pub static CASE_COUNTER: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+pub static CASE_COUNTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Index of the case currently executing, published *before* it runs.
 ///
@@ -41,8 +38,7 @@ pub static CASE_COUNTER: core::sync::atomic::AtomicU64 =
 /// campaign got, which is the same number for "stopped cleanly on case 313" and
 /// "wedged inside case 313" — so it could not distinguish a hang from a
 /// campaign that simply ran out of budget.
-pub static CURRENT_CASE: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+pub static CURRENT_CASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Copy, Default)]
 pub struct FuzzStats {
@@ -289,7 +285,11 @@ pub fn run_campaign(mode: Mode, cases: u64, seed: u64) -> FuzzStats {
     corpus::seed_defaults();
     coverage::reset_delta();
 
-    let mut rng = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+    let mut rng = if seed == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        seed
+    };
     let ratio = mode.mutation_ratio();
 
     zenus_console::kinfo!(
@@ -328,7 +328,7 @@ pub fn run_campaign(mode: Mode, cases: u64, seed: u64) -> FuzzStats {
 
         // Heartbeat: keeps the serial output alive if the campaign wedges and
         // gives the Makefile targets a progress line to watch.
-        if executed % 500 == 0 {
+        if executed.is_multiple_of(500) {
             let stats = *FUZZ_STATS.lock();
             zenus_console::kinfo!(
                 "[FUZZ] progress cases={} crashes={} edges={} corpus={}",
@@ -433,7 +433,11 @@ pub fn print_stats() {
     let stats = *FUZZ_STATS.lock();
     let elapsed = zenus_arch::interrupts::pit::get_ticks().wrapping_sub(stats.start_time);
     let secs = elapsed / 100;
-    let cps = if secs > 0 { stats.total_cases / secs } else { 0 };
+    let cps = if secs > 0 {
+        stats.total_cases / secs
+    } else {
+        0
+    };
 
     zenus_console::kinfo!("[FUZZ] === Zenus Fuzz Stats ===");
     zenus_console::kinfo!("[FUZZ] total cases: {}", stats.total_cases);
@@ -485,11 +489,11 @@ pub fn reset() {
 mod host_tests {
     use crate::corpus;
     use crate::coverage;
-    use zenus_sync::spinlock::{SpinLock, SpinLockGuard};
     use crate::minimizer::{minimize, minimize_all, minimize_with};
     use crate::mutator::{generate_mutations, mutate, MutationStrategy, STRATEGIES};
     use alloc::vec;
     use alloc::vec::Vec;
+    use zenus_sync::spinlock::{SpinLock, SpinLockGuard};
 
     /// Corpus and coverage are process-global, and `cargo test` runs tests on
     /// parallel threads: without this the cases reset each other's state
@@ -654,10 +658,7 @@ mod host_tests {
     fn an_empty_corpus_is_not_a_clean_regression_run() {
         use crate::{regression_exit_code, regression_verdict, RegressionVerdict};
 
-        assert_eq!(
-            regression_verdict(0, 0),
-            RegressionVerdict::NothingToReplay
-        );
+        assert_eq!(regression_verdict(0, 0), RegressionVerdict::NothingToReplay);
         assert_eq!(regression_exit_code(RegressionVerdict::NothingToReplay), 2);
 
         assert_eq!(regression_verdict(3, 0), RegressionVerdict::Clean);

@@ -47,11 +47,10 @@ fn ensure_dir(path: &str) -> bool {
             None => break,
         };
         let sub = &trimmed[..=segment_end];
-        if !sub.is_empty() && sub != "/" && vfs::open(sub).is_none() {
-            if !vfs::create_dir(sub) {
+        if !sub.is_empty() && sub != "/" && vfs::open(sub).is_none()
+            && !vfs::create_dir(sub) {
                 return false;
             }
-        }
         prev_end = segment_end + 1;
     }
     if vfs::open(trimmed).is_none() {
@@ -354,7 +353,10 @@ pub fn pkg_install(data: &[u8], _dev_id: usize) -> bool {
 
     let mut manifest = alloc::format!(
         "{}\n{}\n{}\n{}\n",
-        pkg_name, pkg_version, file_count, total_size
+        pkg_name,
+        pkg_version,
+        file_count,
+        total_size
     );
     for f in &installed_files {
         manifest.push_str(f);

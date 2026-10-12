@@ -581,7 +581,9 @@ pub fn init() {
     // TEMP DEBUG: print every stack region so overlaps are visible.
     {
         let boot_rsp: u64;
-        unsafe { core::arch::asm!("mov {}, rsp", out(reg) boot_rsp, options(nostack, preserves_flags)) };
+        unsafe {
+            core::arch::asm!("mov {}, rsp", out(reg) boot_rsp, options(nostack, preserves_flags))
+        };
         zenus_console::kinfo!(
             "DBG stacks: boot_rsp={:#x} idle={:#x}..{:#x} idlersp={:#x}",
             boot_rsp,
@@ -1709,27 +1711,34 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         // prompt). Set to true only while debugging the scheduler.
         const SCHED_TRACE: bool = false;
         if SCHED_TRACE {
-        let n_rsp = tasks.tasks[next as usize].as_ref().map(|t| t.rsp).unwrap_or(0);
-        emergency_str(b"\r\nT");
-        emergency_hex(SYS_TICKS.load(Ordering::Relaxed));
-        emergency_str(b" ");
-        emergency_hex(current as u64);
-        emergency_str(b"->");
-        emergency_hex(next as u64);
-        emergency_str(b" S=");
-        emergency_hex(current_rsp);
-        emergency_str(b" N=");
-        emergency_hex(n_rsp);
-        let cs = if n_rsp != 0 { unsafe { *(n_rsp as *const u64).add(16) } } else { 0 };
-        emergency_str(b" cs=");
-        emergency_hex(cs);
-        emergency_str(b" ktop=");
-        emergency_hex(
-            tasks.tasks[next as usize]
+            let n_rsp = tasks.tasks[next as usize]
                 .as_ref()
-                .map(|t| t.kernel_rsp_top)
-                .unwrap_or(0),
-        );
+                .map(|t| t.rsp)
+                .unwrap_or(0);
+            emergency_str(b"\r\nT");
+            emergency_hex(SYS_TICKS.load(Ordering::Relaxed));
+            emergency_str(b" ");
+            emergency_hex(current as u64);
+            emergency_str(b"->");
+            emergency_hex(next as u64);
+            emergency_str(b" S=");
+            emergency_hex(current_rsp);
+            emergency_str(b" N=");
+            emergency_hex(n_rsp);
+            let cs = if n_rsp != 0 {
+                unsafe { *(n_rsp as *const u64).add(16) }
+            } else {
+                0
+            };
+            emergency_str(b" cs=");
+            emergency_hex(cs);
+            emergency_str(b" ktop=");
+            emergency_hex(
+                tasks.tasks[next as usize]
+                    .as_ref()
+                    .map(|t| t.kernel_rsp_top)
+                    .unwrap_or(0),
+            );
         }
     }
 
@@ -2160,6 +2169,33 @@ pub fn reap_terminated_stacks() {
         }
     }
     list.count = 0;
+}
+
+/// Terminate the current task because it faulted in user mode.
+///
+/// Registered with `zenus_arch::interrupts::faults::register_user_fault_handler`
+/// at boot (see `apps::entry`), and called from the page-fault handler through
+/// that pointer — `zenus-arch` is the layer below this one and cannot name it.
+///
+/// It never returns. The faulting task is marked terminated and switched away
+/// from by [`exit_current_task`]; because it is `Terminated` the scheduler will
+/// not pick it again, so the faulting instruction is never retried and the
+/// machine keeps running the other tasks. That is the whole fix: a ring-3
+/// NULL-pointer dereference used to stop the kernel, and now it stops the task.
+///
+/// Called with interrupts already disabled, on the faulting task's own kernel
+/// stack (the ISR descended from `TSS.RSP0`), which is why it can use the same
+/// `exit_current_task` path the `exit` syscall uses.
+pub extern "C" fn user_fault_kill(addr: u64, rip: u64) -> ! {
+    let tid = current_task_id();
+    zenus_console::kinfo!(
+        "[FAULT] task {} killed: unrecoverable user fault addr={:#x} rip={:#x} (SIGSEGV)",
+        tid,
+        addr,
+        rip
+    );
+    zenus_console::serial::flush_output_blocking();
+    exit_current_task(super::signal::SIGSEGV as u64)
 }
 
 pub fn exit_current_task(code: u64) -> ! {

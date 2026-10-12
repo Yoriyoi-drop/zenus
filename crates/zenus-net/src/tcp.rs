@@ -595,7 +595,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                         send_una: isn,
                         send_nxt: isn + 1,
                         recv_nxt: seq_advance(seq, 0, 1),
-        peer_window: 0,
+                        peer_window: 0,
                         listening: false,
                         rx_data: [0; RX_BUF_LEN],
                         rx_data_len: 0,
@@ -684,8 +684,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                     zenus_console::kdebug!("TCP SYN_RCVD->ESTABLISHED");
 
                     if !payload.is_empty() {
-                        let copy_len =
-                            core::cmp::min(payload.len(), rx_free(tcb.rx_data_len));
+                        let copy_len = core::cmp::min(payload.len(), rx_free(tcb.rx_data_len));
                         if copy_len > 0 {
                             tcb.rx_data[tcb.rx_data_len..tcb.rx_data_len + copy_len]
                                 .copy_from_slice(&payload[..copy_len]);
@@ -764,7 +763,8 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
                 // restarts from *now*, which is why this needs a clock rather
                 // than the old counter of `poll_retransmit` calls.
                 tcb.keepalive_probes = 0;
-                tcb.keepalive_due = keepalive_idle_deadline(zenus_arch::interrupts::pit::get_ticks());
+                tcb.keepalive_due =
+                    keepalive_idle_deadline(zenus_arch::interrupts::pit::get_ticks());
                 // Additive increase: +MSS per RTT below ssthresh (slow
                 // start), +1 MSS per RTT above it (congestion avoidance).
                 if tcb.cwnd < tcb.ssthresh {
@@ -777,8 +777,7 @@ pub fn handle_receive(iface_idx: usize, src_ip: [u8; 4], dst_ip: [u8; 4], segmen
 
             if !payload.is_empty() && (flags & TCP_FLAG_ACK) != 0 {
                 if seq == tcb.recv_nxt {
-                    let copy_len =
-                        core::cmp::min(payload.len(), rx_free(tcb.rx_data_len));
+                    let copy_len = core::cmp::min(payload.len(), rx_free(tcb.rx_data_len));
                     if copy_len > 0 {
                         tcb.rx_data[tcb.rx_data_len..tcb.rx_data_len + copy_len]
                             .copy_from_slice(&payload[..copy_len]);
@@ -1378,7 +1377,7 @@ pub fn connection_count() -> usize {
 mod host_tests {
     use super::{
         advertised_window, keepalive_action, keepalive_idle_deadline, keepalive_probe_deadline,
-        rx_free, seq_advance, Keepalive, RX_BUF_LEN, KEEPALIVE_PROBES,
+        rx_free, seq_advance, Keepalive, KEEPALIVE_PROBES, RX_BUF_LEN,
     };
 
     /// Regression: the advertised window was computed in the 65535 space of the
@@ -1447,9 +1446,15 @@ mod host_tests {
         assert_eq!(idle_deadline, 720_000);
 
         // Not due yet.
-        assert_eq!(keepalive_action(idle_deadline - 1, idle_deadline, 0), Keepalive::Wait);
+        assert_eq!(
+            keepalive_action(idle_deadline - 1, idle_deadline, 0),
+            Keepalive::Wait
+        );
         // Due, budget left.
-        assert_eq!(keepalive_action(idle_deadline, idle_deadline, 0), Keepalive::Probe);
+        assert_eq!(
+            keepalive_action(idle_deadline, idle_deadline, 0),
+            Keepalive::Probe
+        );
 
         // After the first probe the next one is 75 s out, not immediately.
         let probe_deadline = keepalive_probe_deadline(idle_deadline);
@@ -1470,7 +1475,10 @@ mod host_tests {
             Keepalive::GiveUp,
             "the ninth unanswered probe must close the connection"
         );
-        assert_eq!(keepalive_action(0, 0, KEEPALIVE_PROBES + 1), Keepalive::GiveUp);
+        assert_eq!(
+            keepalive_action(0, 0, KEEPALIVE_PROBES + 1),
+            Keepalive::GiveUp
+        );
 
         // Probes are due at increasing deadlines, never all at one instant:
         // this is what the discarded constant would have produced.
@@ -1479,7 +1487,10 @@ mod host_tests {
             assert_eq!(keepalive_action(due, due, sent), Keepalive::Probe);
             due = keepalive_probe_deadline(due);
         }
-        assert_eq!(keepalive_action(due, due, KEEPALIVE_PROBES), Keepalive::GiveUp);
+        assert_eq!(
+            keepalive_action(due, due, KEEPALIVE_PROBES),
+            Keepalive::GiveUp
+        );
 
         // Deadlines saturate rather than wrapping on a saturated tick counter.
         assert_eq!(keepalive_idle_deadline(u64::MAX), u64::MAX);

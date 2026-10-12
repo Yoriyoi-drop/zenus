@@ -345,8 +345,7 @@ impl Shell {
                         // Tab completion: detect if we're completing a command or a path
                         if self.line_pos > 0 {
                             // Check if buffer contains a space (meaning command + argument)
-                            let has_space =
-                                self.line_buf[..self.line_pos].contains(&b' ');
+                            let has_space = self.line_buf[..self.line_pos].contains(&b' ');
                             if has_space {
                                 // ── File path completion ──
                                 self.tab_complete_path();
@@ -1446,8 +1445,7 @@ impl Shell {
 
         let user_stack_top = loaded.stack_top;
 
-        let argv_lens: alloc::vec::Vec<usize> =
-            (0..argc).map(|i| argv_strings[i].len()).collect();
+        let argv_lens: alloc::vec::Vec<usize> = (0..argc).map(|i| argv_strings[i].len()).collect();
         let layout = match zenus_syscall::userstack::layout_user_stack(user_stack_top, &argv_lens) {
             Some(l) => l,
             None => {
@@ -1552,10 +1550,11 @@ impl Shell {
         for cmd in COMMANDS {
             if cmd.len() >= prefix_lower.len()
                 && cmd[..prefix_lower.len()].eq_ignore_ascii_case(&prefix_lower)
-                && match_count < 32 {
-                    matches[match_count] = cmd;
-                    match_count += 1;
-                }
+                && match_count < 32
+            {
+                matches[match_count] = cmd;
+                match_count += 1;
+            }
         }
         if match_count == 1 {
             // Unique match: complete the command name
@@ -1651,11 +1650,10 @@ impl Shell {
         let mut match_indices: [usize; 64] = [0; 64];
         let mut match_count = 0usize;
         for (idx, entry) in entries.iter().enumerate() {
-            if entry.name.starts_with(file_prefix)
-                && match_count < 64 {
-                    match_indices[match_count] = idx;
-                    match_count += 1;
-                }
+            if entry.name.starts_with(file_prefix) && match_count < 64 {
+                match_indices[match_count] = idx;
+                match_count += 1;
+            }
         }
 
         if match_count == 0 {

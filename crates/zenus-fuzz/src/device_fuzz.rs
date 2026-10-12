@@ -29,13 +29,13 @@ pub fn execute(input: &[u8]) -> FuzzResult {
     };
 
     let operation = input[1];
-    let data = if input.len() > 2 {
-        &input[2..]
-    } else {
-        &[]
-    };
+    let data = if input.len() > 2 { &input[2..] } else { &[] };
 
-    coverage::record_edge((device as u8 as u64).wrapping_mul(100).wrapping_add(operation as u64));
+    coverage::record_edge(
+        (device as u8 as u64)
+            .wrapping_mul(100)
+            .wrapping_add(operation as u64),
+    );
 
     match device {
         DeviceType::Keyboard => fuzz_keyboard(operation, data),
@@ -108,12 +108,11 @@ fn fuzz_disk(operation: u8, data: &[u8]) -> FuzzResult {
         1 => {
             // Write sector
         }
-        2 => {
+        2
             // DMA transfer
-            if data.len() < 16 {
+            if data.len() < 16 => {
                 return FuzzResult::Normal;
             }
-        }
         3 => {
             // Invalid sector
         }
@@ -151,7 +150,7 @@ fn fuzz_pci(operation: u8, data: &[u8]) -> FuzzResult {
             if data.len() < 4 {
                 return FuzzResult::Normal;
             }
-            let bus = data[0] & 0xFF;
+            let bus = data[0];
             // Masking first is what a PCI config-cycle accessor does, so the
             // original code's `dev > 0x1F || func > 0x07` could never be true —
             // the "validation" was dead code. Validate the raw bytes instead,
@@ -181,12 +180,11 @@ fn fuzz_pci(operation: u8, data: &[u8]) -> FuzzResult {
 
 fn fuzz_serial(operation: u8, data: &[u8]) -> FuzzResult {
     match operation % 4 {
-        0 => {
+        0
             // Write byte
-            if data.is_empty() {
+            if data.is_empty() => {
                 return FuzzResult::Normal;
             }
-        }
         1 => {
             // Read byte
         }

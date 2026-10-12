@@ -3,7 +3,6 @@
 #[cfg(test)]
 extern crate std;
 
-
 use zutils_common::Writer;
 
 pub fn execute<W: Writer + ?Sized>(w: &mut W) {

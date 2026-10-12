@@ -11,7 +11,7 @@ fn lapic_read(reg: u32) -> u32 {
     if X2APIC_MODE.load(Ordering::Relaxed) {
         // x2APIC: use MSR-based access. MSR = 0x800 + (reg >> 4)
         let msr = 0x800u32 + (reg >> 4);
-        unsafe { crate::cpu::read_msr(msr as u32) as u32 }
+        unsafe { crate::cpu::read_msr(msr) as u32 }
     } else {
         // xAPIC: use memory-mapped access
         unsafe {
@@ -26,7 +26,7 @@ fn lapic_write(reg: u32, val: u32) {
         // x2APIC: use MSR-based access. MSR = 0x800 + (reg >> 4)
         let msr = 0x800u32 + (reg >> 4);
         unsafe {
-            crate::cpu::write_msr(msr as u32, val as u64);
+            crate::cpu::write_msr(msr, val as u64);
         }
     } else {
         // xAPIC: use memory-mapped access
@@ -107,9 +107,7 @@ fn enable_lapic() {
             );
         }
         x2apic = false;
-        zenus_console::kwarn!(
-            "x2APIC MSRs non-functional (QEMU TCG) — fell back to xAPIC MMIO"
-        );
+        zenus_console::kwarn!("x2APIC MSRs non-functional (QEMU TCG) — fell back to xAPIC MMIO");
     }
 
     if x2apic {
@@ -190,7 +188,7 @@ pub fn enable_tick_source(vector: u8) {
     lapic_write(0x380, 0);
     lapic_write(0x380, count);
     lapic_write(0x320, vector as u32 | 0x20000); // periodic, unmasked
-    // LINT0: masked (bit 16), spurious vector 0xFF — the PIT can no longer inject IRQ0.
+                                                 // LINT0: masked (bit 16), spurious vector 0xFF — the PIT can no longer inject IRQ0.
     lapic_write(0x350, 0x0001_00FF);
     zenus_console::kinfo!(
         "tick source: LAPIC timer (100 Hz), LINT0 masked (calibrated count={})",
@@ -268,7 +266,7 @@ fn calibrate_lapic_count_per_pit_period() -> u32 {
     }
     let per_period = elapsed / PERIODS;
     // Reject nonsense (PIT reprogrammed by something else, LAPIC dead).
-    if per_period < 1_000 || per_period > 4_000_000_000 {
+    if !(1_000..=4_000_000_000).contains(&per_period) {
         zenus_console::kinfo!("LAPIC calibration: rejecting per_period={}", per_period);
         return 0;
     }

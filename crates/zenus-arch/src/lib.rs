@@ -82,4 +82,114 @@ mod host_tests {
             "vector {naive_qemu} has no handler; routing there drops the IRQ"
         );
     }
+
+    // ── the page-fault decision (BUG-042) ─────────────────────────────────
+
+    use crate::interrupts::faults::{fault_verdict, FaultVerdict, LAZY_MAP_BASE, LAZY_MAP_END};
+
+    /// Error-code bits as the handler reads them.
+    const P: u64 = 0x1; // present
+    const W: u64 = 0x2; // write
+    const U: u64 = 0x4; // user
+    const IF: u64 = 0x10; // instruction fetch
+
+    const KERNEL_RIP: u64 = 0xFFFF_8000_0100_0000;
+    const USER_RIP: u64 = 0x0040_0000;
+
+    /// The fix in one test: a user task dereferencing a bad pointer is killed,
+    /// not the kernel. Every "user, not lazily-mappable" fault is `KillUser`.
+    #[test]
+    fn a_user_fault_is_killed_not_panicked() {
+        assert_eq!(
+            fault_verdict(U, 0x0, USER_RIP),
+            FaultVerdict::KillUser,
+            "NULL"
+        );
+        assert_eq!(
+            fault_verdict(U, 0xdead_beef, USER_RIP),
+            FaultVerdict::KillUser,
+            "wild pointer"
+        );
+        assert_eq!(
+            fault_verdict(U | IF, 0x4000_0000, USER_RIP),
+            FaultVerdict::KillUser,
+            "instruction fetch outside the mapped image"
+        );
+    }
+
+    /// A user *write* to a present read-only page is a protection violation
+    /// (bit 0 set), and it must not be answered by mapping a fresh writable
+    /// page: that is how `mprotect(PROT_READ)` used to be silently discarded.
+    #[test]
+    fn a_user_protection_violation_is_not_demand_paged() {
+        assert_eq!(
+            fault_verdict(U | W | P, LAZY_MAP_BASE + 0x1000, USER_RIP),
+            FaultVerdict::KillUser,
+            "present + write + user = protection violation, not demand paging"
+        );
+        // The same access on a *not-present* page is genuine demand paging.
+        assert_eq!(
+            fault_verdict(U | W, LAZY_MAP_BASE + 0x1000, USER_RIP),
+            FaultVerdict::Recover
+        );
+    }
+
+    /// Only a not-present fault inside the lazily-mapped window is recovered.
+    #[test]
+    fn only_the_lazy_window_is_demand_paged() {
+        assert_eq!(
+            fault_verdict(U, LAZY_MAP_BASE, USER_RIP),
+            FaultVerdict::Recover,
+            "the first byte of the window"
+        );
+        assert_eq!(
+            fault_verdict(U, LAZY_MAP_END - 0x1000, USER_RIP),
+            FaultVerdict::Recover,
+            "the last page of the window"
+        );
+        assert_eq!(
+            fault_verdict(U, LAZY_MAP_END, USER_RIP),
+            FaultVerdict::KillUser,
+            "one past the window is not mapped on demand"
+        );
+        assert_eq!(
+            fault_verdict(U, LAZY_MAP_BASE - 1, USER_RIP),
+            FaultVerdict::KillUser,
+            "one below the window is not either"
+        );
+        // Below 0x1000 is the null page, never demand-paged.
+        assert_eq!(fault_verdict(U, 0x800, USER_RIP), FaultVerdict::KillUser);
+    }
+
+    /// A supervisor fault is always fatal: the kernel touching memory it may not
+    /// is a kernel bug, and "recovering" it would hide it.
+    #[test]
+    fn a_supervisor_fault_is_always_fatal() {
+        assert_eq!(
+            fault_verdict(0, 0xdead_beef, KERNEL_RIP),
+            FaultVerdict::Panic
+        );
+        assert_eq!(
+            fault_verdict(P, LAZY_MAP_BASE, KERNEL_RIP),
+            FaultVerdict::Panic,
+            "a supervisor protection violation is what SMAP raises"
+        );
+        // Even inside the window, the U/S bit decides.
+        assert_eq!(
+            fault_verdict(0, LAZY_MAP_BASE + 0x1000, KERNEL_RIP),
+            FaultVerdict::Panic
+        );
+    }
+
+    /// A fault with a kernel `RIP` is fatal even if the error code claims it came
+    /// from user mode — that combination is a contradiction, not a recovery.
+    #[test]
+    fn a_user_fault_with_a_kernel_rip_is_fatal() {
+        assert_eq!(fault_verdict(U, 0x1000, KERNEL_RIP), FaultVerdict::Panic);
+        assert_eq!(
+            fault_verdict(U, LAZY_MAP_BASE + 0x1000, KERNEL_RIP),
+            FaultVerdict::Panic,
+            "the window does not make a kernel-mode fault recoverable"
+        );
+    }
 }

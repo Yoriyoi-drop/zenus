@@ -3,15 +3,15 @@
 
 // The host test harness needs std; the bare-metal build must not pull it in.
 #[cfg(test)]
-extern crate std;
-#[cfg(test)]
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 pub mod allocator;
 pub mod frame_allocator;
-pub mod paging;
 #[cfg(test)]
 mod free_count_tests;
+pub mod paging;
 #[cfg(test)]
 mod plan_tests;
 #[cfg(test)]
@@ -71,7 +71,11 @@ mod host_tests {
     fn a_freed_frame_is_handed_out_again() {
         use crate::frame_allocator::{FrameAllocator, MemoryRegion};
 
-        let map = [MemoryRegion { base: 0x1000, length: 0x10_000, kind: 0 }];
+        let map = [MemoryRegion {
+            base: 0x1000,
+            length: 0x10_000,
+            kind: 0,
+        }];
         let mut fa = FrameAllocator::new(&map);
 
         let first = fa.alloc_frame().expect("first frame");
@@ -81,7 +85,11 @@ mod host_tests {
         fa.free_frame(first);
         // The recycled frame has to come back before the bump pointer moves on.
         let third = fa.alloc_frame().expect("recycled frame");
-        assert_eq!(third.as_u64(), first.as_u64(), "a freed frame must be reused");
+        assert_eq!(
+            third.as_u64(),
+            first.as_u64(),
+            "a freed frame must be reused"
+        );
     }
 
     /// A frame that is freed, re-allocated and freed again is legitimately
@@ -92,7 +100,11 @@ mod host_tests {
     fn a_double_free_does_not_double_count() {
         use crate::frame_allocator::{FrameAllocator, MemoryRegion};
 
-        let map = [MemoryRegion { base: 0x1000, length: 0x10_000, kind: 0 }];
+        let map = [MemoryRegion {
+            base: 0x1000,
+            length: 0x10_000,
+            kind: 0,
+        }];
         let mut fa = FrameAllocator::new(&map);
         // `recycled_frames_count` is the stack depth, so it is the right thing
         // to watch here: one free must put exactly one entry on it. The
@@ -123,7 +135,11 @@ mod host_tests {
     fn used_memory_tracks_allocations_in_both_directions() {
         use crate::frame_allocator::{FrameAllocator, MemoryRegion};
 
-        let map = [MemoryRegion { base: 0x1000, length: 0x10_000, kind: 0 }];
+        let map = [MemoryRegion {
+            base: 0x1000,
+            length: 0x10_000,
+            kind: 0,
+        }];
         let mut fa = FrameAllocator::new(&map);
         assert_eq!(fa.used_memory(), 0);
 
@@ -140,7 +156,11 @@ mod host_tests {
         let c = fa.alloc_frame().expect("frame");
         fa.free_frame(c);
         fa.free_frame(c);
-        assert_eq!(fa.used_memory(), 0, "a double free must not decrement twice");
+        assert_eq!(
+            fa.used_memory(),
+            0,
+            "a double free must not decrement twice"
+        );
     }
 
     /// The regression the second pass's cursors exist for.
@@ -172,7 +192,11 @@ mod host_tests {
         const BELOW: usize = (0x100_0000 - 0x20_0000) / 0x1000;
         const TOTAL: usize = 0x0200_0000 / 0x1000;
         const ABOVE: usize = TOTAL - BELOW;
-        let map = [MemoryRegion { base: 0x20_0000, length: 0x0200_0000, kind: 0 }];
+        let map = [MemoryRegion {
+            base: 0x20_0000,
+            length: 0x0200_0000,
+            kind: 0,
+        }];
         let mut fa = FrameAllocator::new(&map);
 
         let mut seen = [0u64; TOTAL];
@@ -196,8 +220,14 @@ mod host_tests {
         // Nothing left over. A cursor that failed to advance would loop on one
         // page and be caught by the duplicate check; one that ran past the
         // region's end would serve a page outside it and be caught here.
-        assert!(fa.alloc_frame().is_none(), "the allocator invented a {n}th page");
-        assert_eq!(below, BELOW, "the pages below the floor come from the second pass");
+        assert!(
+            fa.alloc_frame().is_none(),
+            "the allocator invented a {n}th page"
+        );
+        assert_eq!(
+            below, BELOW,
+            "the pages below the floor come from the second pass"
+        );
         assert_eq!(above, ABOVE, "and the pages above it from the first");
     }
 
@@ -211,7 +241,11 @@ mod host_tests {
     fn a_misaligned_frame_address_is_not_recycled() {
         use crate::frame_allocator::{FrameAllocator, MemoryRegion};
 
-        let map = [MemoryRegion { base: 0x1000, length: 0x10_000, kind: 0 }];
+        let map = [MemoryRegion {
+            base: 0x1000,
+            length: 0x10_000,
+            kind: 0,
+        }];
         let mut fa = FrameAllocator::new(&map);
 
         let mut frames = [0u64; 16];
@@ -263,15 +297,24 @@ mod host_tests {
         use core::mem::align_of;
 
         let align = align_of::<crate::allocator::BlockHeader>();
-        assert_eq!(HEADER_SIZE % align, 0, "header size must be a multiple of its alignment");
+        assert_eq!(
+            HEADER_SIZE % align,
+            0,
+            "header size must be a multiple of its alignment"
+        );
 
         // Round a payload length the way `alloc_mut` does, and check the block
         // that follows is still aligned for every length that matters.
-        for size in [1usize, 2, 3, 4, 5, 7, 8, 15, 16, 17, 63, 64, 0x1000, 8616, 65536] {
+        for size in [
+            1usize, 2, 3, 4, 5, 7, 8, 15, 16, 17, 63, 64, 0x1000, 8616, 65536,
+        ] {
             let extent = (size + align - 1) & !(align - 1);
             assert_eq!(extent % align, 0, "size {size} rounded to {extent:#x}");
             assert!(extent >= size, "rounding must not shrink the payload");
-            assert!(extent - size < align, "rounding must waste less than `align`");
+            assert!(
+                extent - size < align,
+                "rounding must waste less than `align`"
+            );
 
             // The successor header sits at block + HEADER + extent.
             let successor = HEADER_SIZE + extent;
@@ -317,13 +360,19 @@ mod host_tests {
         assert_eq!(split_indices(0x1000)[3], 1);
         assert_eq!(split_indices(0x2000)[3], 2);
         assert_eq!(split_indices(0x1000)[2], 0);
-        assert_eq!(split_indices(0x20_0000)[2], 1, "2 MiB boundary is the PD index");
+        assert_eq!(
+            split_indices(0x20_0000)[2],
+            1,
+            "2 MiB boundary is the PD index"
+        );
     }
 
     #[test]
     fn vma_insert_find_contains() {
         let mut table = VmaTable::new();
-        let idx = table.insert(0x1000, 0x3000, PROT_READ, MAP_PRIVATE).expect("insert");
+        let idx = table
+            .insert(0x1000, 0x3000, PROT_READ, MAP_PRIVATE)
+            .expect("insert");
         assert_eq!(idx, 0);
         assert_eq!(table.find(0x1000), Some(0));
         assert_eq!(table.find(0x2FFF), Some(0));
@@ -336,8 +385,12 @@ mod host_tests {
     #[test]
     fn vma_remove_compacts() {
         let mut table = VmaTable::new();
-        table.insert(0x1000, 0x2000, PROT_READ, MAP_PRIVATE).unwrap();
-        table.insert(0x3000, 0x4000, PROT_READ, MAP_PRIVATE).unwrap();
+        table
+            .insert(0x1000, 0x2000, PROT_READ, MAP_PRIVATE)
+            .unwrap();
+        table
+            .insert(0x3000, 0x4000, PROT_READ, MAP_PRIVATE)
+            .unwrap();
         assert!(table.remove(0));
         assert_eq!(table.count, 1);
         assert_eq!(table.find(0x1000), None);
@@ -350,21 +403,30 @@ mod host_tests {
         let mut table = VmaTable::new();
         for i in 0..MAX_VMAS {
             let start = 0x1000 + i as u64 * 0x2000;
-            assert!(table.insert(start, start + 0x1000, PROT_READ, MAP_PRIVATE).is_some());
+            assert!(table
+                .insert(start, start + 0x1000, PROT_READ, MAP_PRIVATE)
+                .is_some());
         }
-        assert_eq!(table.insert(0xFFFF_0000, 0xFFFF_1000, PROT_READ, MAP_PRIVATE), None);
+        assert_eq!(
+            table.insert(0xFFFF_0000, 0xFFFF_1000, PROT_READ, MAP_PRIVATE),
+            None
+        );
     }
 
     #[test]
     fn vma_prot_maps_to_page_flags() {
         let mut table = VmaTable::new();
-        let rw = table.insert(0x1000, 0x2000, PROT_READ | PROT_WRITE, MAP_PRIVATE).unwrap();
+        let rw = table
+            .insert(0x1000, 0x2000, PROT_READ | PROT_WRITE, MAP_PRIVATE)
+            .unwrap();
         let flags = table.regions[rw].to_page_flags();
         assert_ne!(flags & PAGE_USER, 0, "user mappings always set U/S");
         assert_ne!(flags & PAGE_WRITABLE, 0);
         assert_ne!(flags & PAGE_NO_EXECUTE, 0, "no PROT_EXEC -> NX");
 
-        let rx = table.insert(0x3000, 0x4000, PROT_READ | PROT_EXEC, MAP_PRIVATE).unwrap();
+        let rx = table
+            .insert(0x3000, 0x4000, PROT_READ | PROT_EXEC, MAP_PRIVATE)
+            .unwrap();
         let flags = table.regions[rx].to_page_flags();
         assert_eq!(flags & PAGE_WRITABLE, 0, "no PROT_WRITE -> read-only");
         assert_eq!(flags & PAGE_NO_EXECUTE, 0, "PROT_EXEC clears NX");
@@ -373,7 +435,9 @@ mod host_tests {
     #[test]
     fn vma_find_free_skips_occupied_ranges() {
         let mut table = VmaTable::new();
-        table.insert(0x5000, 0x7000, PROT_READ, MAP_ANONYMOUS).unwrap();
+        table
+            .insert(0x5000, 0x7000, PROT_READ, MAP_ANONYMOUS)
+            .unwrap();
 
         // Free hint passes through untouched.
         assert_eq!(table.find_free(0x1000, 0x1000), Some(0x1000));
@@ -388,7 +452,9 @@ mod host_tests {
     #[test]
     fn vma_region_alignment_helpers() {
         let mut table = VmaTable::new();
-        let idx = table.insert(0x1001, 0x2FFF, PROT_READ, MAP_PRIVATE).unwrap();
+        let idx = table
+            .insert(0x1001, 0x2FFF, PROT_READ, MAP_PRIVATE)
+            .unwrap();
         assert_eq!(table.regions[idx].page_aligned_start(), 0x1000);
         assert_eq!(table.regions[idx].page_aligned_end(), 0x3000);
         assert!(table.regions[idx].contains(0x1001));
@@ -405,10 +471,20 @@ mod host_tests {
     #[test]
     fn zero_and_oversized_requests_do_not_recurse() {
         let mut table = VmaTable::new();
-        table.insert(0x5000, 0x7000, PROT_READ, MAP_ANONYMOUS).unwrap();
+        table
+            .insert(0x5000, 0x7000, PROT_READ, MAP_ANONYMOUS)
+            .unwrap();
 
-        assert_eq!(table.find_free(0, 0x6000), None, "size 0 is not an allocation");
-        assert_eq!(table.find_free(1, 0x6000), Some(0x7000), "one byte still works");
+        assert_eq!(
+            table.find_free(0, 0x6000),
+            None,
+            "size 0 is not an allocation"
+        );
+        assert_eq!(
+            table.find_free(1, 0x6000),
+            Some(0x7000),
+            "one byte still works"
+        );
         assert_eq!(
             table.find_free(MAX_MAPPING_SIZE, 0x1000),
             None,
@@ -423,7 +499,12 @@ mod host_tests {
     fn arithmetic_does_not_overflow() {
         let mut table = VmaTable::new();
         let idx = table
-            .insert(MAX_MAPPING_SIZE - 0x1000, MAX_MAPPING_SIZE, PROT_READ, MAP_PRIVATE)
+            .insert(
+                MAX_MAPPING_SIZE - 0x1000,
+                MAX_MAPPING_SIZE,
+                PROT_READ,
+                MAP_PRIVATE,
+            )
             .unwrap();
         assert_eq!(table.regions[idx].page_aligned_end(), MAX_MAPPING_SIZE);
 
@@ -438,17 +519,23 @@ mod host_tests {
     #[test]
     fn find_free_never_straddles_an_existing_region() {
         let mut table = VmaTable::new();
-        table.insert(0x5000, 0x7000, PROT_READ, MAP_ANONYMOUS).unwrap();
+        table
+            .insert(0x5000, 0x7000, PROT_READ, MAP_ANONYMOUS)
+            .unwrap();
 
         // 0x1000..0x9000 spans the region at 0x5000..0x7000.
-        let got = table.find_free(0x8000, 0x1000).expect("a free range exists");
+        let got = table
+            .find_free(0x8000, 0x1000)
+            .expect("a free range exists");
         assert!(
             got >= 0x7000,
             "find_free returned {got:#x}, which overlaps 0x5000..0x7000"
         );
 
         // Same for a hint that starts below and whose end lands inside.
-        let got = table.find_free(0x6000, 0x1000).expect("a free range exists");
+        let got = table
+            .find_free(0x6000, 0x1000)
+            .expect("a free range exists");
         assert!(got >= 0x7000, "{got:#x} overlaps the region");
 
         // A hint inside the region moves past its end.
@@ -460,8 +547,12 @@ mod host_tests {
     #[test]
     fn insert_rejects_empty_and_out_of_range_regions() {
         let mut table = VmaTable::new();
-        assert!(table.insert(0x2000, 0x2000, PROT_READ, MAP_PRIVATE).is_none());
-        assert!(table.insert(0x3000, 0x2000, PROT_READ, MAP_PRIVATE).is_none());
+        assert!(table
+            .insert(0x2000, 0x2000, PROT_READ, MAP_PRIVATE)
+            .is_none());
+        assert!(table
+            .insert(0x3000, 0x2000, PROT_READ, MAP_PRIVATE)
+            .is_none());
         assert!(table.insert(0, 0, PROT_READ, MAP_PRIVATE).is_none());
         assert!(table
             .insert(0x2000, MAX_MAPPING_SIZE + 0x1000, PROT_READ, MAP_PRIVATE)
@@ -476,9 +567,13 @@ mod host_tests {
         let mut table = VmaTable::new();
         for i in 0..MAX_VMAS {
             let start = 0x10_0000 + i as u64 * 0x2000;
-            assert!(table.insert(start, start + 0x2000, PROT_READ, MAP_PRIVATE).is_some());
+            assert!(table
+                .insert(start, start + 0x2000, PROT_READ, MAP_PRIVATE)
+                .is_some());
         }
-        let got = table.find_free(0x1000, 0x10_0000).expect("space above the stack");
+        let got = table
+            .find_free(0x1000, 0x10_0000)
+            .expect("space above the stack");
         assert!(got >= 0x10_0000 + (MAX_VMAS as u64) * 0x2000);
 
         // A request that cannot fit above the regions is refused, not wrapped.

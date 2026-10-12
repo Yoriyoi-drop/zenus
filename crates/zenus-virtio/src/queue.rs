@@ -43,6 +43,12 @@ pub struct VirtioQueueMem {
     pub used: VirtioUsed,
 }
 
+impl Default for VirtioQueueMem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VirtioQueueMem {
     pub const fn new() -> Self {
         VirtioQueueMem {
@@ -107,10 +113,10 @@ impl VirtioQueue {
     }
 
     pub unsafe fn submit(&mut self, head_idx: u16) {
-        let avail_idx = (*self.mem).avail.idx;
-        (*self.mem).avail.ring[(avail_idx as usize) % self.size as usize] = head_idx;
+        let avail_idx = self.mem.avail.idx;
+        self.mem.avail.ring[(avail_idx as usize) % self.size as usize] = head_idx;
         core::sync::atomic::compiler_fence(Ordering::Release);
-        (*self.mem).avail.idx = avail_idx.wrapping_add(1);
+        self.mem.avail.idx = avail_idx.wrapping_add(1);
     }
 
     pub unsafe fn kick(&self) {
@@ -120,13 +126,13 @@ impl VirtioQueue {
     }
 
     pub unsafe fn collect_used(&mut self) -> Option<(u32, u32)> {
-        let used_idx = (*self.mem).used.idx;
+        let used_idx = self.mem.used.idx;
         if self.last_seen_used == used_idx {
             return None;
         }
         let slot = self.last_seen_used as usize % self.size as usize;
-        let id = (*self.mem).used.ring[slot].id;
-        let len = (*self.mem).used.ring[slot].len;
+        let id = self.mem.used.ring[slot].id;
+        let len = self.mem.used.ring[slot].len;
         self.last_seen_used = self.last_seen_used.wrapping_add(1);
         Some((id, len))
     }

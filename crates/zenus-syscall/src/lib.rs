@@ -3,7 +3,6 @@
 #[cfg(test)]
 extern crate std;
 
-
 extern crate alloc;
 
 pub mod elf;
@@ -22,7 +21,10 @@ mod host_tests {
     fn table_is_fully_addressable() {
         // Every slot must be inside the table, or the dispatcher's bounds
         // check rejects a valid syscall.
-        assert!(SYSCALL_TABLE_SIZE >= 256, "table must cover the 0..255 range");
+        assert!(
+            SYSCALL_TABLE_SIZE >= 256,
+            "table must cover the 0..255 range"
+        );
     }
 
     #[test]
@@ -94,8 +96,14 @@ mod host_tests {
         }
 
         // The options that are actually implemented.
-        assert_eq!(prctl_support(crate::syscall::PR_SET_NAME), PrctlSupport::Name);
-        assert_eq!(prctl_support(crate::syscall::PR_GET_NAME), PrctlSupport::Name);
+        assert_eq!(
+            prctl_support(crate::syscall::PR_SET_NAME),
+            PrctlSupport::Name
+        );
+        assert_eq!(
+            prctl_support(crate::syscall::PR_GET_NAME),
+            PrctlSupport::Name
+        );
 
         // Options with nothing to honour, kept as no-ops.
         assert_eq!(

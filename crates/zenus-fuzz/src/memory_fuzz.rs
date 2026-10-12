@@ -33,19 +33,20 @@ pub fn execute(input: &[u8]) -> FuzzResult {
     };
 
     let addr = u64::from_le_bytes([
-        input[1], input[2], input[3], input[4],
-        input[5], input[6], input[7], input[8],
+        input[1], input[2], input[3], input[4], input[5], input[6], input[7], input[8],
     ]);
     let size = u64::from_le_bytes([
-        input[9], input[10], input[11], input[12],
-        input[13], input[14], input[15], input[16],
+        input[9], input[10], input[11], input[12], input[13], input[14], input[15], input[16],
     ]);
     let flags = u64::from_le_bytes([
-        input[17], input[18], input[19], input[20],
-        input[21], input[22], input[23], input[24],
+        input[17], input[18], input[19], input[20], input[21], input[22], input[23], input[24],
     ]);
 
-    coverage::record_edge((op as u8 as u64).wrapping_mul(1000).wrapping_add(addr % 100));
+    coverage::record_edge(
+        (op as u8 as u64)
+            .wrapping_mul(1000)
+            .wrapping_add(addr % 100),
+    );
 
     match op {
         MemOp::Alloc => fuzz_alloc(size),

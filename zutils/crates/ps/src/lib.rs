@@ -3,7 +3,6 @@
 #[cfg(test)]
 extern crate std;
 
-
 use zenus_sched::scheduler;
 use zutils_common::{Args, Writer};
 
@@ -83,7 +82,11 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
         w.write_byte(b'\t');
         field(w, info.state.to_str(), STATE_W);
         w.write_byte(b'\t');
-        let name_len = info.name.iter().position(|&b| b == 0).unwrap_or(info.name.len());
+        let name_len = info
+            .name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(info.name.len());
         let name = core::str::from_utf8(&info.name[..name_len]).unwrap_or("?");
         let name = if name.is_empty() { "-" } else { name };
         field(w, name, NAME_W);

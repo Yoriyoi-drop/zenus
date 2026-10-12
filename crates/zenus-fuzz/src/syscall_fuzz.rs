@@ -57,13 +57,7 @@ pub fn execute(input: &[u8]) -> FuzzResult {
     // (`zenus_fuzz::execute_input`), and a contained fault resumes *around*
     // this call — so simply return without touching the dispatcher.
     let result = zenus_syscall::syscall::syscall_dispatch6(
-        syscall_id,
-        args[0],
-        args[1],
-        args[2],
-        args[3],
-        args[4],
-        args[5],
+        syscall_id, args[0], args[1], args[2], args[3], args[4], args[5],
     );
 
     // Sanity-marker returns: some syscall paths return these as sentinels.
@@ -104,13 +98,7 @@ fn is_task_terminating(id: u64) -> bool {
 /// with full fault containment.
 pub fn execute_direct(syscall_id: u64, args: [u64; 6]) -> u64 {
     zenus_syscall::syscall::syscall_dispatch6(
-        syscall_id,
-        args[0],
-        args[1],
-        args[2],
-        args[3],
-        args[4],
-        args[5],
+        syscall_id, args[0], args[1], args[2], args[3], args[4], args[5],
     )
 }
 

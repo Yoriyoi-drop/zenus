@@ -3,7 +3,6 @@
 #[cfg(test)]
 extern crate std;
 
-
 extern crate alloc;
 
 use zenus_fs::vfs::{self, FileType};
@@ -23,11 +22,11 @@ fn find_recursive<W: Writer + ?Sized>(path: &str, name: &str, w: &mut W) {
             for entry in entries {
                 let mut full = alloc::string::String::new();
                 if path == "/" {
-                    full.push_str("/");
+                    full.push('/');
                     full.push_str(&entry.name);
                 } else {
                     full.push_str(path);
-                    full.push_str("/");
+                    full.push('/');
                     full.push_str(&entry.name);
                 }
                 find_recursive(&full, name, w);

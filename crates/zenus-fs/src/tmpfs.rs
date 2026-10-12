@@ -275,7 +275,7 @@ impl FileSystem for TmpFs {
             size: node.size as u64,
             file_type: node.file_type,
             inode: idx as u64,
-            blocks: (node.size as u64 + 511) / 512,
+            blocks: (node.size as u64).div_ceil(512),
             uid: node.uid,
             gid: node.gid,
             mode: node.mode,
@@ -321,9 +321,7 @@ impl FileSystem for TmpFs {
                 // is not empty and cannot be removed. Unlinking it anyway made
                 // `rm -r /dir/b` leave `/dir` reporting success while `/dir/b`
                 // became unreachable — an orphaned subtree, not a deletion.
-                if nodes[child].file_type == FileType::Directory
-                    && nodes[child].first_child != 0
-                {
+                if nodes[child].file_type == FileType::Directory && nodes[child].first_child != 0 {
                     return false;
                 }
                 if prev == 0 {

@@ -238,7 +238,7 @@ pub extern "C" fn map_user_page_raw(
     match result {
         Ok(flush) => {
             flush.flush();
-            return true;
+            true
         }
         Err(_) => false,
     }
@@ -516,10 +516,7 @@ pub fn clone_user_address_space(source_cr3_raw: u64) -> Option<u64> {
 
                     if writable {
                         let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
-                        let new_frame = match allocator.alloc_frame() {
-                            Some(f) => f,
-                            None => return None,
-                        };
+                        let new_frame = allocator.alloc_frame()?;
                         drop(allocator);
 
                         unsafe {

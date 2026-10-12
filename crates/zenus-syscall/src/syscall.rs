@@ -794,14 +794,9 @@ pub fn nanosleep_deadline(now: u64, sec: u64, nsec: u64) -> Option<u64> {
     if nsec >= NSEC_PER_SEC {
         return None;
     }
-    let ms = sec
-        .saturating_mul(1000)
-        .saturating_add(nsec / 1_000_000);
+    let ms = sec.saturating_mul(1000).saturating_add(nsec / 1_000_000);
     // Ticks are 10 ms, so round *up*: a request must never return early.
-    let ticks = ms
-        .saturating_mul(TICKS_PER_SEC)
-        .saturating_add(999)
-        / 1000;
+    let ticks = ms.saturating_mul(TICKS_PER_SEC).saturating_add(999) / 1000;
     // Saturating, so the deadline stays in the future but never wraps.
     now.checked_add(ticks)
 }
@@ -2563,7 +2558,11 @@ fn sys_mount(
     }
 
     if flags & MS_REMOUNT != 0 {
-        return if vfs::umount(&target) { 0 } else { -1i64 as u64 };
+        return if vfs::umount(&target) {
+            0
+        } else {
+            -1i64 as u64
+        };
     }
 
     // Resolve the filesystem *before* touching the target path, so a failed
@@ -2692,7 +2691,10 @@ fn intern_static(s: &str) -> &'static str {
             // SAFETY: `e.ptr` was allocated with `e.len` bytes and is only ever
             // written before the entry is published under the pool lock.
             let existing = unsafe {
-                core::str::from_utf8_unchecked(core::slice::from_raw_parts(e.ptr as *const u8, e.len))
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                    e.ptr as *const u8,
+                    e.len,
+                ))
             };
             if existing == s {
                 return existing;
@@ -3596,15 +3598,13 @@ fn sys_prctl(option: u64, arg2: u64, arg3: u64, _a4: u64, _a5: u64, _a6: u64) ->
         PrctlSupport::Name => {
             let task_id = scheduler::current_task_id();
             match option {
-                PR_SET_NAME => {
-                    match read_user_cstr(arg2, 32) {
-                        Some(name) => {
-                            scheduler::set_task_name(task_id, &name);
-                            0
-                        }
-                        None => -1i64 as u64,
+                PR_SET_NAME => match read_user_cstr(arg2, 32) {
+                    Some(name) => {
+                        scheduler::set_task_name(task_id, &name);
+                        0
                     }
-                }
+                    None => -1i64 as u64,
+                },
                 _ => {
                     // PR_GET_NAME writes the name into arg2.
                     if arg2 == 0 || !validate_user_range(arg2, 32) {
@@ -4006,12 +4006,12 @@ pub extern "C" fn syscall_signal_hook(kernel_rsp: u64) {
 
 #[cfg(test)]
 mod host_tests {
+    use super::MS_RDONLY as SYSCALL_MS_RDONLY;
     use super::{
         brk_action, checked_array_len, mmap_extent, mount_flags_from_syscall, mprotect_range,
-        nanosleep_deadline, validate_user_range, BrkAction, MAX_XFER, MS_NODEV, MS_NOSUID,
-        MS_NOEXEC, USER_SPACE_LIMIT,
+        nanosleep_deadline, validate_user_range, BrkAction, MAX_XFER, MS_NODEV, MS_NOEXEC,
+        MS_NOSUID, USER_SPACE_LIMIT,
     };
-    use super::MS_RDONLY as SYSCALL_MS_RDONLY;
 
     #[repr(C)]
     struct Pollfd {
@@ -4066,7 +4066,10 @@ mod host_tests {
         // What `recv` used to accept: 128 TiB is 2^47, and `USER_SPACE_LIMIT` is
         // exactly that, so a terabyte-sized request passed validation.
         assert_eq!(USER_SPACE_LIMIT, 1u64 << 47, "128 TiB");
-        assert!(1u64 << 40 < USER_SPACE_LIMIT, "1 TiB fit under the old bound");
+        assert!(
+            1u64 << 40 < USER_SPACE_LIMIT,
+            "1 TiB fit under the old bound"
+        );
         // What it accepts now.
         assert!(MAX_XFER < (1u64 << 40));
         assert_eq!(MAX_XFER.checked_add(1), Some(MAX_XFER + 1));
@@ -4252,7 +4255,10 @@ mod host_tests {
 
         // Reaching the user-space limit is refused: the last usable page is
         // below it.
-        assert_eq!(mprotect_range(0x1000, USER_SPACE_LIMIT, USER_SPACE_LIMIT), None);
+        assert_eq!(
+            mprotect_range(0x1000, USER_SPACE_LIMIT, USER_SPACE_LIMIT),
+            None
+        );
 
         // A zero length is EINVAL, as before.
         assert_eq!(mprotect_range(0x1000, 0, USER_SPACE_LIMIT), None);
@@ -4311,7 +4317,11 @@ mod host_tests {
         // 10 ms is one tick, not ten.
         assert_eq!(nanosleep_deadline(0, 1, 0), Some(100));
         assert_eq!(nanosleep_deadline(0, 0, 10_000_000), Some(1));
-        assert_eq!(nanosleep_deadline(0, 0, 0), Some(0), "a zero sleep is not an error");
+        assert_eq!(
+            nanosleep_deadline(0, 0, 0),
+            Some(0),
+            "a zero sleep is not an error"
+        );
 
         // Rounds up, so a request never returns early. 1 ms still costs a whole
         // tick, and 11 ms must not round down to one.
@@ -4419,7 +4429,10 @@ mod host_tests {
             BrkAction::Refuse,
             "brk(0x1000) must not unmap everything between there and the heap"
         );
-        assert_eq!(brk_action(0, current, floor, USER_SPACE_LIMIT), BrkAction::Query);
+        assert_eq!(
+            brk_action(0, current, floor, USER_SPACE_LIMIT),
+            BrkAction::Query
+        );
         assert_eq!(
             brk_action(floor - 1, current, floor, USER_SPACE_LIMIT),
             BrkAction::Refuse,
@@ -4427,7 +4440,10 @@ mod host_tests {
         );
 
         // Exactly the floor is a legal (empty) shrink.
-        assert_eq!(brk_action(floor, current, floor, USER_SPACE_LIMIT), BrkAction::Shrink);
+        assert_eq!(
+            brk_action(floor, current, floor, USER_SPACE_LIMIT),
+            BrkAction::Shrink
+        );
 
         // Ordinary operations.
         assert_eq!(

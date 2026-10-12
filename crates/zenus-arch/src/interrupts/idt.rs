@@ -2,8 +2,9 @@ use core::mem::MaybeUninit;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use zenus_console::serial::SerialPort;
 
-use crate::gdt;
 use crate::fuzz_guard;
+use crate::gdt;
+use crate::interrupts::faults;
 
 /// Fuzzing containment hook. Every CPU exception handler must call this
 /// *before* doing anything else: while a fuzz checkpoint is armed the fault is
@@ -211,12 +212,12 @@ pub fn load_ap() {
 }
 
 extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) {
-    if fuzz_contain(0, &frame, 0, 0) {}
+    fuzz_contain(0, &frame, 0, 0);
     kpanic("Divide Error", frame);
 }
 
 extern "x86-interrupt" fn debug_handler(frame: InterruptStackFrame) {
-    if fuzz_contain(1, &frame, 0, 0) {}
+    fuzz_contain(1, &frame, 0, 0);
     kpanic("Debug", frame);
 }
 
@@ -235,17 +236,17 @@ extern "x86-interrupt" fn breakpoint_handler(_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn overflow_handler(frame: InterruptStackFrame) {
-    if fuzz_contain(4, &frame, 0, 0) {}
+    fuzz_contain(4, &frame, 0, 0);
     kpanic("Overflow", frame);
 }
 
 extern "x86-interrupt" fn bound_range_handler(frame: InterruptStackFrame) {
-    if fuzz_contain(5, &frame, 0, 0) {}
+    fuzz_contain(5, &frame, 0, 0);
     kpanic("Bound Range", frame);
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
-    if fuzz_contain(6, &frame, 0, 0) {}
+    fuzz_contain(6, &frame, 0, 0);
     kpanic("Invalid Opcode", frame);
 }
 
@@ -274,22 +275,22 @@ extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code
 }
 
 extern "x86-interrupt" fn invalid_tss_handler(frame: InterruptStackFrame, _code: u64) {
-    if fuzz_contain(10, &frame, 0, 0) {}
+    fuzz_contain(10, &frame, 0, 0);
     kpanic("Invalid TSS", frame);
 }
 
 extern "x86-interrupt" fn segment_not_present_handler(frame: InterruptStackFrame, _code: u64) {
-    if fuzz_contain(11, &frame, 0, 0) {}
+    fuzz_contain(11, &frame, 0, 0);
     kpanic("Segment Not Present", frame);
 }
 
 extern "x86-interrupt" fn stack_segment_handler(frame: InterruptStackFrame, _code: u64) {
-    if fuzz_contain(12, &frame, 0, 0) {}
+    fuzz_contain(12, &frame, 0, 0);
     kpanic("Stack Segment Fault", frame);
 }
 
 extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
-    if fuzz_contain(13, &frame, 0, _code) {}
+    fuzz_contain(13, &frame, 0, _code);
     let s = SerialPort::new(0x3F8);
     let stk = frame.stack_pointer.as_u64();
     s.write_str("\n[GPF] RIP: ");
@@ -389,45 +390,37 @@ extern "x86-interrupt" fn gpf_handler(frame: InterruptStackFrame, _code: u64) {
     }
 }
 
-fn try_handle_user_page_fault(addr: u64, code: PageFaultErrorCode) -> bool {
-    if (code.bits() & 0x4) == 0 {
+/// Map a page for a fault the pure [`faults::fault_verdict`] already judged
+/// recoverable (user, not-present, inside the lazily-mapped window).
+///
+/// The decision lives in `faults::fault_verdict` so it is host-testable; this
+/// function only carries out the "Recover" half of it. It can still fail — no
+/// free frame, or no HHDM — and the caller then treats the fault as fatal to the
+/// task rather than retrying forever.
+fn demand_map_page(addr: u64, code: PageFaultErrorCode) -> bool {
+    let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
+    let frame = match allocator.alloc_frame() {
+        Some(f) => f,
+        None => return false,
+    };
+    drop(allocator);
+
+    let hhdm = zenus_mem::paging::hhdm_offset();
+    if hhdm == 0 {
         return false;
     }
-    if addr < 0x1000 {
-        return false;
+    unsafe {
+        core::ptr::write_bytes((hhdm + frame.as_u64()) as *mut u8, 0, 4096);
     }
-    if addr >= 0x6000_0000_0000 && addr < 0x8000_0000_0000 {
-        let mut allocator = zenus_mem::frame_allocator::FRAME_ALLOCATOR.lock();
-        let frame = match allocator.alloc_frame() {
-            Some(f) => f,
-            None => return false,
-        };
-        drop(allocator);
 
-        let hhdm = zenus_mem::paging::hhdm_offset();
-        if hhdm == 0 {
-            return false;
-        }
-        unsafe {
-            core::ptr::write_bytes((hhdm + frame.as_u64()) as *mut u8, 0, 4096);
-        }
-
-        let writable = (code.bits() & 0x2) != 0;
-        let executable = (code.bits() & 0x10) != 0;
-        let page_virt = addr & !0xFFF;
-        let cr3: u64;
-        unsafe {
-            core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
-        }
-        return zenus_mem::paging::map_user_page_raw(
-            cr3,
-            page_virt,
-            frame.as_u64(),
-            writable,
-            executable,
-        );
+    let writable = (code.bits() & 0x2) != 0;
+    let executable = (code.bits() & 0x10) != 0;
+    let page_virt = addr & !0xFFF;
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
     }
-    false
+    zenus_mem::paging::map_user_page_raw(cr3, page_virt, frame.as_u64(), writable, executable)
 }
 
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: PageFaultErrorCode) {
@@ -467,10 +460,26 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
     // is the fuzzer's test-case outcome. It must NOT be routed into the
     // user-fault recovery path below — that path may map a page and retry the
     // faulting instruction forever.
-    if fuzz_contain(14, &frame, addr, code.bits() as u64) {}
+    fuzz_contain(14, &frame, addr, code.bits());
 
-    if try_handle_user_page_fault(addr, code) {
+    // Pure decision, host-tested in `crate::host_tests`. Recover means demand
+    // paging; KillUser means a ring-3 task faulted and must be killed; Panic
+    // means the kernel itself faulted.
+    let verdict =
+        faults::fault_verdict(code.bits(), addr, frame.instruction_pointer.as_u64());
+
+    if verdict == faults::FaultVerdict::Recover && demand_map_page(addr, code) {
         return;
+    }
+
+    // A user fault we could not (or must not) recover: kill the task instead of
+    // halting the machine. Without a registered handler — very early boot, or a
+    // build that never wired one — this falls through to the dump below, which
+    // is what the kernel did for every fault before this existed.
+    if verdict != faults::FaultVerdict::Panic {
+        if let Some(kill) = faults::user_fault_handler() {
+            kill(addr, frame.instruction_pointer.as_u64()); // never returns
+        }
     }
 
     let s = SerialPort::new(0x3F8);
@@ -498,8 +507,7 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
     // supervisor/write permission bug that is not there. A caller that forgot
     // `stac` around a user access lands here, and nothing else does.
     let smap_suspect = matches!(code.bits() & 0x7, 0x1 | 0x3)
-        && addr < 0x0000_8000_0000_0000
-        && addr >= 0x1000
+        && (0x1000..0x0000_8000_0000_0000).contains(&addr)
         && crate::cpu::smap_enabled();
     let cause = if (code.bits() & 0x10) != 0 {
         "instruction-fetch"
@@ -532,7 +540,7 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
     s.write_str(" CAUSE=");
     s.write_str(cause);
     s.write_str(" CODE=");
-    s.write_hex(code.bits() as u64);
+    s.write_hex(code.bits());
     // Dump code bytes near faulting instruction to help find the culprit.
     if is_kernel_addr(frame.instruction_pointer.as_u64()) {
         let rip = frame.instruction_pointer.as_u64();
@@ -620,7 +628,7 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
 
     let stack = frame.stack_pointer.as_u64();
     s.write_str("\n[STACK ABOVE]\n");
-    let stack_valid = is_kernel_addr(stack) || (stack >= 0x1000 && stack < 0x800000000000);
+    let stack_valid = is_kernel_addr(stack) || (0x1000..0x800000000000).contains(&stack);
     if stack_valid {
         for i in 0..16u64 {
             let p = stack.wrapping_add(i * 8);
@@ -645,7 +653,7 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
         }
     }
     s.write_str("[STACK BELOW]\n");
-    let stack_valid = is_kernel_addr(stack) || (stack >= 0x1000 && stack < 0x800000000000);
+    let stack_valid = is_kernel_addr(stack) || (0x1000..0x800000000000).contains(&stack);
     if stack_valid {
         for i in 0..16u64 {
             let p = stack.wrapping_sub(i * 8);
@@ -816,7 +824,7 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     s.write_str("\n");
 
     s.write_str("[STACK]\n");
-    let stack_valid = is_kernel_addr(rsp) || (rsp >= 0x1000 && rsp < 0x800000000000);
+    let stack_valid = is_kernel_addr(rsp) || (0x1000..0x800000000000).contains(&rsp);
     if stack_valid {
         for i in 0..20u64 {
             let p = rsp.wrapping_add(i * 8);

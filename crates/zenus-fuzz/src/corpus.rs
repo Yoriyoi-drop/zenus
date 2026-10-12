@@ -119,14 +119,14 @@ pub fn clear() {
 
 fn get_default_seeds() -> &'static [&'static [u8]] {
     &[
-        &[0, 0, 0, 0, 0, 0, 0, 0],                    // syscall: read(0, 0, 0)
-        &[0, 1, 0, 0, 0, 0, 0, 0],                    // syscall: write(1, 0, 0)
-        &[0, 2, 0x10, 0, 0, 0, 0, 0],                 // syscall: open
-        &[1, 0, 0, 0, 0, 0, 0, 0],                    // memory: alloc(0)
-        &[1, 1, 0, 0, 0, 0, 0, 0],                    // memory: free(0)
-        &[2, 0, 0, 0, 0, 0, 0, 0],                    // device: keyboard
-        &[3, 0, 0, 0, 0, 0, 0, 0],                    // filesystem
-        &[4, 0, 0, 0, 0, 0, 0, 0],                    // shell
-        &[5, 0, 0, 0, 0, 0, 0, 0],                    // scheduler
+        &[0, 0, 0, 0, 0, 0, 0, 0],    // syscall: read(0, 0, 0)
+        &[0, 1, 0, 0, 0, 0, 0, 0],    // syscall: write(1, 0, 0)
+        &[0, 2, 0x10, 0, 0, 0, 0, 0], // syscall: open
+        &[1, 0, 0, 0, 0, 0, 0, 0],    // memory: alloc(0)
+        &[1, 1, 0, 0, 0, 0, 0, 0],    // memory: free(0)
+        &[2, 0, 0, 0, 0, 0, 0, 0],    // device: keyboard
+        &[3, 0, 0, 0, 0, 0, 0, 0],    // filesystem
+        &[4, 0, 0, 0, 0, 0, 0, 0],    // shell
+        &[5, 0, 0, 0, 0, 0, 0, 0],    // scheduler
     ]
 }

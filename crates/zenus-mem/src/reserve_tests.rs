@@ -168,7 +168,11 @@ fn a_reservation_that_covers_a_region_shrinks_the_list() {
         1,
         "the covered region must leave the list"
     );
-    assert_eq!(fa.regions()[0].base, 0x8000, "and the survivor must shift down");
+    assert_eq!(
+        fa.regions()[0].base,
+        0x8000,
+        "and the survivor must shift down"
+    );
 
     fa.reserve_region(0x8000, 0x4000);
     assert_eq!(fa.region_count(), 0, "and the last one goes too");
@@ -231,7 +235,11 @@ fn a_reservation_removes_exactly_its_own_pages() {
         let mut fa = allocator(regions);
         fa.reserve_region(rb, rl);
 
-        let mut after: Vec<u64> = fa.regions().iter().flat_map(|r| pages_between(r.base, r.base + r.length)).collect();
+        let mut after: Vec<u64> = fa
+            .regions()
+            .iter()
+            .flat_map(|r| pages_between(r.base, r.base + r.length))
+            .collect();
         after.sort_unstable();
         after.dedup();
 

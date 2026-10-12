@@ -184,10 +184,12 @@ mod host_tests {
 
     #[test]
     fn ipv4_parse_rejects_bad_checksum() {
-        let mut packet =
-            ipv4_packet(PROTO_TCP, [192, 168, 0, 2], [192, 168, 0, 1], [1, 2, 3, 4]);
+        let mut packet = ipv4_packet(PROTO_TCP, [192, 168, 0, 2], [192, 168, 0, 1], [1, 2, 3, 4]);
         packet[12] = 10; // corrupt the source address under the checksum
-        assert!(ipv4::parse(&packet).is_none(), "corrupt header must be dropped");
+        assert!(
+            ipv4::parse(&packet).is_none(),
+            "corrupt header must be dropped"
+        );
     }
 
     #[test]
@@ -260,7 +262,10 @@ mod host_tests {
         // Corrupting an option byte must now be detected.
         let mut tampered = packet;
         tampered[21] ^= 0xFF;
-        assert!(ipv4::parse(&tampered).is_none(), "option bytes must be covered");
+        assert!(
+            ipv4::parse(&tampered).is_none(),
+            "option bytes must be covered"
+        );
     }
 
     // ── dns name limits ───────────────────────────────────────────────────
@@ -274,7 +279,12 @@ mod host_tests {
 
         assert!(route::add_direct([10, 0, 0, 0], [255, 0, 0, 0], 0)); // /8
         assert!(route::add_direct([10, 1, 0, 0], [255, 255, 0, 0], 1)); // /16
-        assert!(route::add([192, 168, 5, 0], [255, 255, 255, 0], [10, 0, 0, 1], 2)); // /24
+        assert!(route::add(
+            [192, 168, 5, 0],
+            [255, 255, 255, 0],
+            [10, 0, 0, 1],
+            2
+        )); // /24
 
         // 10.1.2.3 hits both the /8 and the /16 — the /16 must win.
         assert_eq!(
@@ -291,7 +301,11 @@ mod host_tests {
             route::lookup([192, 168, 5, 7]),
             Some((GatewayAction::Via([10, 0, 0, 1]), 2))
         );
-        assert_eq!(route::lookup([8, 8, 8, 8]), None, "unroutable without default");
+        assert_eq!(
+            route::lookup([8, 8, 8, 8]),
+            None,
+            "unroutable without default"
+        );
 
         route::clear();
     }
@@ -324,9 +338,15 @@ mod host_tests {
         route::clear();
 
         for i in 0..8 {
-            assert!(route::add_direct([10, 0, 0, i], [255, 255, 255, 0], 0), "route {i}");
+            assert!(
+                route::add_direct([10, 0, 0, i], [255, 255, 255, 0], 0),
+                "route {i}"
+            );
         }
-        assert!(!route::add_direct([10, 0, 1, 0], [255, 255, 255, 0], 0), "table is full");
+        assert!(
+            !route::add_direct([10, 0, 1, 0], [255, 255, 255, 0], 0),
+            "table is full"
+        );
 
         route::clear();
     }

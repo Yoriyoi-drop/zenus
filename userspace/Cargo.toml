@@ -9,6 +9,7 @@ members = [
     "pipe_test",
     "minimal",
     "writetest",
+    "fault",
 ]
 resolver = "2"
 

@@ -495,7 +495,7 @@ impl FrameAllocator {
 unsafe impl FrameAllocatorTrait<Size4KiB> for FrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         self.alloc_frame()
-            .map(|addr| PhysFrame::containing_address(addr))
+            .map(PhysFrame::containing_address)
     }
 }
 
@@ -644,10 +644,8 @@ pub fn plan_regions(fa: &mut FrameAllocator, input: &AllocPlanInput<'_>) {
     // synthetic allocator. Reserving `[0, 512 KiB)` there would silently eat the
     // low test regions, so it is skipped rather than guessed at.
     if input.boot_stack_phys != 0 {
-        let stack_base = (input
-            .boot_stack_phys
-            .saturating_sub(BOOT_STACK_RESERVE))
-            & !PAGE_SIZE_U64;
+        let stack_base =
+            (input.boot_stack_phys.saturating_sub(BOOT_STACK_RESERVE)) & !PAGE_SIZE_U64;
         fa.reserve_region(stack_base, BOOT_STACK_RESERVE + PAGE_SIZE_U64);
     }
     // Only what is left is usable, so that is what `total_memory` counts.
@@ -700,8 +698,7 @@ pub fn global_init(memory_map: &[MemoryRegion], hhdm_offset: u64) {
     }
     let input = AllocPlanInput {
         memory_map,
-        kernel_image_base: unsafe { core::ptr::addr_of!(__kernel_start) as u64 }
-            & !PAGE_SIZE_U64,
+        kernel_image_base: unsafe { core::ptr::addr_of!(__kernel_start) as u64 } & !PAGE_SIZE_U64,
         kernel_image_end: unsafe { core::ptr::addr_of!(__kernel_end) as u64 },
         boot_stack_phys: rsp_phys.wrapping_sub(hhdm_offset),
     };

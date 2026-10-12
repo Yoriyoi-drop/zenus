@@ -181,11 +181,10 @@ impl FileSystem for DevFs {
                             let sector = offset / 512;
                             let off_in_sector = (offset % 512) as usize;
                             let mut sector_buf = [0u8; 512];
-                            if off_in_sector != 0 || buf.len() < 512 {
-                                if !(ops.read)(sector, &mut sector_buf) {
+                            if (off_in_sector != 0 || buf.len() < 512)
+                                && !(ops.read)(sector, &mut sector_buf) {
                                     sector_buf = [0; 512];
                                 }
-                            }
                             let copy_len = core::cmp::min(buf.len(), 512 - off_in_sector);
                             sector_buf[off_in_sector..off_in_sector + copy_len]
                                 .copy_from_slice(&buf[..copy_len]);

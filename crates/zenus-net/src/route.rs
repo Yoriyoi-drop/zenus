@@ -15,8 +15,7 @@ const MAX_ROUTES: usize = 8;
 /// Was a bare `static mut` with no lock: `add`/`lookup`/`clear` from two CPUs
 /// raced on the same slots, so a route could appear half-written. Everything in
 /// this crate already uses `SpinLock` for its globals, so this does too.
-static ROUTE_TABLE: SpinLock<[Option<Route>; MAX_ROUTES]> =
-    SpinLock::new([None; MAX_ROUTES]);
+static ROUTE_TABLE: SpinLock<[Option<Route>; MAX_ROUTES]> = SpinLock::new([None; MAX_ROUTES]);
 
 pub fn add(dest: [u8; 4], mask: [u8; 4], gateway: [u8; 4], iface: usize) -> bool {
     let mut table = ROUTE_TABLE.lock();

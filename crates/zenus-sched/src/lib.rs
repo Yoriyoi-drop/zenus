@@ -111,7 +111,10 @@ mod host_tests {
     fn too_small_task_stacks_are_rejected() {
         assert!(!stack_size_is_valid(0));
         assert!(!stack_size_is_valid(1024));
-        assert!(!stack_size_is_valid(STACK_GUARD), "exactly the guard is too small");
+        assert!(
+            !stack_size_is_valid(STACK_GUARD),
+            "exactly the guard is too small"
+        );
         assert!(!stack_size_is_valid(STACK_GUARD + 1));
         assert!(stack_size_is_valid(MIN_TASK_STACK));
         assert!(stack_size_is_valid(65536), "the shell's stack size");

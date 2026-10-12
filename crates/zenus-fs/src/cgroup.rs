@@ -97,7 +97,7 @@ fn decode_inode(inode: u64) -> Option<(u64, u64)> {
         return None;
     }
     let idx = inode % DIR_STRIDE;
-    if idx < F_PROCS || idx > PER_CGROUP_FILES {
+    if !(F_PROCS..=PER_CGROUP_FILES).contains(&idx) {
         return None;
     }
     Some(((inode - DIR_BASE) / DIR_STRIDE, idx))
@@ -108,7 +108,7 @@ fn decode_inode(inode: u64) -> Option<(u64, u64)> {
 /// A directory inode is `dir_inode(id)`, whose offset within the stride is `0`,
 /// which `decode_inode` rejects — the two must not share a decoder.
 fn decode_dir_inode(inode: u64) -> Option<u64> {
-    if inode < DIR_BASE || inode % DIR_STRIDE != 0 {
+    if inode < DIR_BASE || !inode.is_multiple_of(DIR_STRIDE) {
         return None;
     }
     Some((inode - DIR_BASE) / DIR_STRIDE)
@@ -146,7 +146,11 @@ const CGROUP_FILES: &[(&str, u64, FileType)] = &[
 const ROOT_FILES: &[(&str, u64, FileType)] = &[
     ("cgroup.procs", CGROUP_PROCS_INODE, FileType::File),
     ("cgroup.tasks", CGROUP_TASKS_INODE, FileType::File),
-    ("cgroup.controllers", CGROUP_CONTROLLERS_INODE, FileType::File),
+    (
+        "cgroup.controllers",
+        CGROUP_CONTROLLERS_INODE,
+        FileType::File,
+    ),
     ("cgroup.defaults", CGROUP_DEFAULTS_INODE, FileType::File),
     (
         "cgroup.subtree_control",
@@ -163,7 +167,11 @@ const ROOT_FILES: &[(&str, u64, FileType)] = &[
     ("pids.max", CGROUP_PIDS_MAX_INODE, FileType::File),
     ("pids.current", CGROUP_PIDS_CURRENT_INODE, FileType::File),
     ("memory.max", CGROUP_MEMORY_MAX_INODE, FileType::File),
-    ("memory.current", CGROUP_MEMORY_CURRENT_INODE, FileType::File),
+    (
+        "memory.current",
+        CGROUP_MEMORY_CURRENT_INODE,
+        FileType::File,
+    ),
 ];
 
 // ── the controller table ─────────────────────────────────────────────────

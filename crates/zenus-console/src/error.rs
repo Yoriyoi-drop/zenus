@@ -454,7 +454,8 @@ const UNKNOWN_SLOT: usize = 7 * COUNTER_SLOTS;
 /// reporting errors at once used to do a non-atomic read-modify-write on the
 /// same slot, and `get_error_count` raced with it. Atomics cost nothing here
 /// and make the counter honest under SMP.
-static ERROR_COUNTS: [AtomicU64; ERROR_COUNTS_LEN] = [const { AtomicU64::new(0) }; ERROR_COUNTS_LEN];
+static ERROR_COUNTS: [AtomicU64; ERROR_COUNTS_LEN] =
+    [const { AtomicU64::new(0) }; ERROR_COUNTS_LEN];
 
 /// Map the `XXX` of `ZN-XXX-NNNN` to a 0..=6 group index.
 fn module_group(prefix: &str) -> usize {

@@ -145,7 +145,11 @@ mod host_tests {
     fn encode_name_rejects_oversized_labels() {
         let mut buf = [0u8; 512];
         let long_label = "x".repeat(64);
-        assert_eq!(encode_name(&long_label, &mut buf), None, "label > 63 octets");
+        assert_eq!(
+            encode_name(&long_label, &mut buf),
+            None,
+            "label > 63 octets"
+        );
 
         // 63 is the limit and must still fit.
         let ok_label = "y".repeat(63);
@@ -199,8 +203,17 @@ mod host_tests {
     fn encode_name_respects_the_255_octet_limit() {
         let mut buf = [0u8; 512];
         // 4 labels of 63 octets = 4 * (1 + 63) + 1 = 257 > 255.
-        let long = format!("{}.{}.{}.{}", "a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(63));
-        assert!(encode_name(&long, &mut buf).is_none(), "257 octets must be refused");
+        let long = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(63)
+        );
+        assert!(
+            encode_name(&long, &mut buf).is_none(),
+            "257 octets must be refused"
+        );
 
         // Three labels of 63 = 3 * 64 + 1 = 193, which fits.
         let ok = format!("{}.{}.{}", "a".repeat(63), "b".repeat(63), "c".repeat(63));
@@ -229,7 +242,10 @@ mod host_tests {
 
     #[test]
     fn parse_response_extracts_the_a_record() {
-        assert_eq!(super::parse_response(&a_record_response()), Some([10, 0, 0, 7]));
+        assert_eq!(
+            super::parse_response(&a_record_response()),
+            Some([10, 0, 0, 7])
+        );
     }
 
     /// Regression: `buf[off + 1]` for a compression pointer was read after only

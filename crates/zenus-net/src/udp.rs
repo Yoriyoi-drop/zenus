@@ -162,7 +162,11 @@ mod host_tests {
         // 5 bytes and the junk must not be visible.
         pkt.extend_from_slice(&[0xAA; 8]);
         let (hdr, got) = parse(&pkt).expect("the datagram itself is well formed");
-        assert_eq!(hdr.length as usize, pkt.len() - 8, "the field is not ignored");
+        assert_eq!(
+            hdr.length as usize,
+            pkt.len() - 8,
+            "the field is not ignored"
+        );
         assert_eq!(got, b"hello", "payload must stop at the length field");
     }
 
@@ -207,10 +211,7 @@ mod host_tests {
         assert!(parse(&[0u8; 7]).is_none());
         let full = datagram(1, 2, b"abcd");
         for len in 0..full.len() {
-            assert!(
-                parse(&full[..len]).is_none(),
-                "{len} bytes must not parse"
-            );
+            assert!(parse(&full[..len]).is_none(), "{len} bytes must not parse");
         }
     }
 }

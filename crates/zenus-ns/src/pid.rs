@@ -80,14 +80,8 @@ fn find_idx(table: &PidTable, id: NsId) -> Option<usize> {
 /// Register a task (global task ID) in a PID namespace, returning the local PID.
 pub fn register_task(ns_id: NsId, global_tid: u64) -> Option<u64> {
     let mut table = PID_TABLE.lock();
-    let idx = match find_idx(&table, ns_id) {
-        Some(i) => i,
-        None => return None,
-    };
-    let ns = match table.namespaces[idx].as_mut() {
-        Some(n) => n,
-        None => return None,
-    };
+    let idx = find_idx(&table, ns_id)?;
+    let ns = table.namespaces[idx].as_mut()?;
     if ns.entry_count >= 64 {
         return None;
     }
@@ -104,14 +98,8 @@ pub fn register_task(ns_id: NsId, global_tid: u64) -> Option<u64> {
 /// Look up the global task ID for a local PID in a namespace.
 pub fn global_tid(ns_id: NsId, local_pid: u64) -> Option<u64> {
     let table = PID_TABLE.lock();
-    let idx = match find_idx(&table, ns_id) {
-        Some(i) => i,
-        None => return None,
-    };
-    let ns = match table.namespaces[idx] {
-        Some(ref n) => n,
-        None => return None,
-    };
+    let idx = find_idx(&table, ns_id)?;
+    let ns = table.namespaces[idx]?;
     for i in 0..ns.entry_count {
         if let Some(ref entry) = ns.entries[i] {
             if entry.local_pid == local_pid {
@@ -125,14 +113,8 @@ pub fn global_tid(ns_id: NsId, local_pid: u64) -> Option<u64> {
 /// Look up the local PID for a global task ID in a namespace.
 pub fn local_pid(ns_id: NsId, global_tid: u64) -> Option<u64> {
     let table = PID_TABLE.lock();
-    let idx = match find_idx(&table, ns_id) {
-        Some(i) => i,
-        None => return None,
-    };
-    let ns = match table.namespaces[idx] {
-        Some(ref n) => n,
-        None => return None,
-    };
+    let idx = find_idx(&table, ns_id)?;
+    let ns = table.namespaces[idx]?;
     for i in 0..ns.entry_count {
         if let Some(ref entry) = ns.entries[i] {
             if entry.global_tid == global_tid {

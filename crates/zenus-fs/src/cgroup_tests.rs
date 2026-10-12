@@ -13,10 +13,8 @@
 //! The global `CGROUP_TABLE` is shared, so every test takes `serial()` and calls
 //! `reset_for_tests()` first.
 
-use crate::cgroup::{
-    reset_for_tests, AttachError, CgroupFs, CgroupTable, CGROUP_UNLIMITED,
-};
-use crate::vfs::{FileType, FileSystem};
+use crate::cgroup::{reset_for_tests, AttachError, CgroupFs, CgroupTable, CGROUP_UNLIMITED};
+use crate::vfs::{FileSystem, FileType};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -120,7 +118,11 @@ fn memory_max_refuses_the_charge_that_would_exceed_it() {
 
     assert!(t.charge(3, 4096), "first page fits");
     assert!(!t.charge(3, 8192), "second page would exceed 8192");
-    assert_eq!(t.memory_current(g), 4096, "the refused charge is not counted");
+    assert_eq!(
+        t.memory_current(g),
+        4096,
+        "the refused charge is not counted"
+    );
 
     assert!(t.charge(3, 4096), "exactly at the limit still fits");
     assert!(!t.charge(3, 1), "one byte over does not");
@@ -212,7 +214,9 @@ fn unlimited_limits_read_and_write_as_max() {
     reset_for_tests();
     let fs = CgroupFs;
 
-    let dir = fs.create(fs.root_inode(), "cg", FileType::Directory).expect("mkdir");
+    let dir = fs
+        .create(fs.root_inode(), "cg", FileType::Directory)
+        .expect("mkdir");
     let mem_max = fs.lookup(dir, "memory.max").expect("listed");
     assert_eq!(read_str(&fs, mem_max), "max\n", "unlimited by default");
 
@@ -234,7 +238,9 @@ fn memory_current_reports_what_the_table_charged() {
     reset_for_tests();
     let fs = CgroupFs;
 
-    let dir = fs.create(fs.root_inode(), "cg", FileType::Directory).expect("mkdir");
+    let dir = fs
+        .create(fs.root_inode(), "cg", FileType::Directory)
+        .expect("mkdir");
     let procs = fs.lookup(dir, "cgroup.procs").expect("listed");
     let mem_current = fs.lookup(dir, "memory.current").expect("listed");
     assert!(fs.write(procs, 0, b"1").is_some());
@@ -279,12 +285,20 @@ fn a_directory_inode_is_not_mistaken_for_a_file() {
     reset_for_tests();
     let fs = CgroupFs;
 
-    let dir = fs.create(fs.root_inode(), "cg", FileType::Directory).expect("mkdir");
+    let dir = fs
+        .create(fs.root_inode(), "cg", FileType::Directory)
+        .expect("mkdir");
     let mut buf = [0u8; 16];
-    assert_eq!(fs.read(dir, 0, &mut buf), Some(0), "a directory has no bytes");
+    assert_eq!(
+        fs.read(dir, 0, &mut buf),
+        Some(0),
+        "a directory has no bytes"
+    );
 
     // Two groups get distinct inodes and distinct files.
-    let dir2 = fs.create(fs.root_inode(), "cg2", FileType::Directory).expect("mkdir");
+    let dir2 = fs
+        .create(fs.root_inode(), "cg2", FileType::Directory)
+        .expect("mkdir");
     assert_ne!(dir, dir2);
     assert_ne!(
         fs.lookup(dir, "pids.max"),

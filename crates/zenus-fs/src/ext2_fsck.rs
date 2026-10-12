@@ -206,7 +206,8 @@ pub fn fsck(dev_id: u8) -> FsckReport {
             return report;
         }
     };
-    let blocks_groups = match crate::ext2::group_count(blocks_count as u64, blocks_per_group as u64) {
+    let blocks_groups = match crate::ext2::group_count(blocks_count as u64, blocks_per_group as u64)
+    {
         Some(n) => n,
         None => {
             add_msg(
@@ -264,8 +265,16 @@ pub fn fsck(dev_id: u8) -> FsckReport {
     // `num_groups` is the larger of the two derived counts, so this subtraction can
     // underflow on a filesystem whose group counts disagree; see
     // `last_group_size`.
-    let last_group_blocks = last_group_size(blocks_count as u64, blocks_per_group as u64, num_groups as u64);
-    let last_group_inodes = last_group_size(inodes_count as u64, inodes_per_group as u64, num_groups as u64);
+    let last_group_blocks = last_group_size(
+        blocks_count as u64,
+        blocks_per_group as u64,
+        num_groups as u64,
+    );
+    let last_group_inodes = last_group_size(
+        inodes_count as u64,
+        inodes_per_group as u64,
+        num_groups as u64,
+    );
 
     add_msg(
         &mut report,
@@ -388,7 +397,7 @@ pub fn fsck(dev_id: u8) -> FsckReport {
         }
 
         let inode_table_blocks =
-            (this_group_inodes as u64 * inode_size as u64 + block_size - 1) / block_size;
+            (this_group_inodes as u64 * inode_size as u64).div_ceil(block_size);
         if bgd.inode_table as u64 + inode_table_blocks > blocks_count as u64 {
             add_msg(
                 &mut report,
@@ -399,7 +408,7 @@ pub fn fsck(dev_id: u8) -> FsckReport {
         }
 
         let mut buf = [0u8; 4096];
-        let sectors = (block_size as usize + 511) / 512;
+        let sectors = (block_size as usize).div_ceil(512);
         let bitmap_sector = bgd.block_bitmap as u64 * block_size / 512;
         let mut ok = true;
         if block_size as usize <= buf.len() {
@@ -515,7 +524,11 @@ fn read_bgd(
 ///
 /// `None` means "does not fit", and the caller reports a root-inode read
 /// failure rather than overrunning its own frame.
-pub fn inode_read_sectors(offset_in_sector: usize, inode_size: usize, buf_len: usize) -> Option<usize> {
+pub fn inode_read_sectors(
+    offset_in_sector: usize,
+    inode_size: usize,
+    buf_len: usize,
+) -> Option<usize> {
     let needed = offset_in_sector.checked_add(inode_size)?;
     if needed > buf_len {
         return None;

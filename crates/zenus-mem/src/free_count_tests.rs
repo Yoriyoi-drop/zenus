@@ -39,7 +39,11 @@
 use crate::frame_allocator::{FrameAllocator, MemoryRegion};
 
 fn region(base: u64, length: u64) -> MemoryRegion {
-    MemoryRegion { base, length, kind: 0 }
+    MemoryRegion {
+        base,
+        length,
+        kind: 0,
+    }
 }
 
 /// How many frames a fresh allocator built from `map` hands out before it is
@@ -79,7 +83,11 @@ fn assert_count_tracks_drain(map: &[MemoryRegion]) {
         );
     }
     assert_eq!(served, want, "the allocator served everything it counted");
-    assert_eq!(fa.free_frames_count(), 0, "a drained allocator has nothing left");
+    assert_eq!(
+        fa.free_frames_count(),
+        0,
+        "a drained allocator has nothing left"
+    );
 }
 
 /// A fresh allocator reports the whole region, not the empty recycled stack.
@@ -177,7 +185,11 @@ fn a_recycled_frame_is_not_counted_twice() {
     );
 
     let b = fa.alloc_frame().expect("a frame");
-    assert_eq!(b.as_u64(), a.as_u64(), "the recycled frame comes back first");
+    assert_eq!(
+        b.as_u64(),
+        a.as_u64(),
+        "the recycled frame comes back first"
+    );
     assert_eq!(
         fa.free_frames_count(),
         start - 1,

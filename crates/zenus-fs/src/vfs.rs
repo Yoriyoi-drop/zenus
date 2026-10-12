@@ -192,9 +192,9 @@ pub fn mount_covers(path: &str, mount: &str) -> bool {
         return false;
     }
     match path.as_bytes().get(mount.len()) {
-        None => true,                       // exactly the mount point
-        Some(b'/') => true,                 // a component below it
-        Some(_) => false,                   // `/tmp` must not cover `/tmpx`
+        None => true,       // exactly the mount point
+        Some(b'/') => true, // a component below it
+        Some(_) => false,   // `/tmp` must not cover `/tmpx`
     }
 }
 
@@ -442,7 +442,7 @@ fn mount_in_ns_inner(
 
 pub fn root() -> Option<VfsNode> {
     let root_lock = VFS_ROOT.lock();
-    root_lock.clone()
+    *root_lock
 }
 
 pub fn create_file(path: &str) -> bool {
@@ -455,7 +455,7 @@ pub fn create_file_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
         None => return false,
     };
     let name = file_name(path);
-    match open_in_ns(ns_id, &parent) {
+    match open_in_ns(ns_id, parent) {
         Some(node) => node.fs.create(node.inode, name, FileType::File).is_some(),
         None => false,
     }
@@ -471,7 +471,7 @@ pub fn create_dir_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
         None => return false,
     };
     let name = file_name(path);
-    match open_in_ns(ns_id, &parent) {
+    match open_in_ns(ns_id, parent) {
         Some(node) => node
             .fs
             .create(node.inode, name, FileType::Directory)
@@ -490,13 +490,13 @@ pub fn remove_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
         None => return false,
     };
     let name = file_name(path);
-    match open_in_ns(ns_id, &parent) {
+    match open_in_ns(ns_id, parent) {
         Some(node) => node.fs.unlink(node.inode, name),
         None => false,
     }
 }
 
-pub(crate) fn parent_dir<'a>(path: &'a str) -> Option<&'a str> {
+pub(crate) fn parent_dir(path: &str) -> Option<&str> {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
         return None;
@@ -508,7 +508,7 @@ pub(crate) fn parent_dir<'a>(path: &'a str) -> Option<&'a str> {
     }
 }
 
-pub(crate) fn file_name<'a>(path: &'a str) -> &'a str {
+pub(crate) fn file_name(path: &str) -> &str {
     let trimmed = path.trim_end_matches('/');
     match trimmed.rfind('/') {
         Some(pos) => &trimmed[pos + 1..],
@@ -601,8 +601,7 @@ pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
 
     let rel_path = if mount_prefix.is_empty() || mount_prefix == "/" {
         path
-    } else if path.starts_with(mount_prefix) {
-        let rest = &path[mount_prefix.len()..];
+    } else if let Some(rest) = path.strip_prefix(mount_prefix) {
         if rest.is_empty() {
             "/"
         } else {
@@ -713,9 +712,9 @@ pub fn access_check(
             if (mode & S_IXUSR) == 0 && stat.file_type == FileType::Directory {
                 return false;
             }
-            return true;
+            true
         } else {
-            return (mode & S_IRUSR) != 0;
+            (mode & S_IRUSR) != 0
         }
     } else if egid == stat.gid {
         if want_write {
@@ -725,9 +724,9 @@ pub fn access_check(
             if (mode & S_IXGRP) == 0 && stat.file_type == FileType::Directory {
                 return false;
             }
-            return true;
+            true
         } else {
-            return (mode & S_IRGRP) != 0;
+            (mode & S_IRGRP) != 0
         }
     } else {
         // "Other" needs the same directory rule as owner and group: a directory
@@ -795,11 +794,23 @@ pub fn access_check_bits(
     // The class to test: owner bits when the caller is the owner, group bits
     // when the effective group matches, otherwise the world bits.
     let (r, w, x) = if euid == stat.uid {
-        (mode & S_IRUSR != 0, mode & S_IWUSR != 0, mode & S_IXUSR != 0)
+        (
+            mode & S_IRUSR != 0,
+            mode & S_IWUSR != 0,
+            mode & S_IXUSR != 0,
+        )
     } else if egid == stat.gid {
-        (mode & S_IRGRP != 0, mode & S_IWGRP != 0, mode & S_IXGRP != 0)
+        (
+            mode & S_IRGRP != 0,
+            mode & S_IWGRP != 0,
+            mode & S_IXGRP != 0,
+        )
     } else {
-        (mode & S_IROTH != 0, mode & S_IWOTH != 0, mode & S_IXOTH != 0)
+        (
+            mode & S_IROTH != 0,
+            mode & S_IWOTH != 0,
+            mode & S_IXOTH != 0,
+        )
     };
     let _ = (uid, gid);
     if want_read && !r {
@@ -836,14 +847,7 @@ impl Credentials {
 
     fn may(&self, stat: &FileStat, want_read: bool, want_write: bool, want_exec: bool) -> bool {
         access_check_bits(
-            self.uid,
-            self.gid,
-            self.euid,
-            self.egid,
-            stat,
-            want_read,
-            want_write,
-            want_exec,
+            self.uid, self.gid, self.euid, self.egid, stat, want_read, want_write, want_exec,
         )
     }
 }
@@ -873,7 +877,7 @@ pub fn create_dir_permitted(ns_id: zenus_ns::NsId, path: &str, cred: &Credential
         Some(p) => p,
         None => return false,
     };
-    match stat_in_ns(ns_id, &parent) {
+    match stat_in_ns(ns_id, parent) {
         Some(stat) if may_modify_parent(&stat, cred) => create_dir_in_ns(ns_id, path),
         _ => false,
     }
@@ -890,7 +894,7 @@ pub fn remove_permitted(ns_id: zenus_ns::NsId, path: &str, cred: &Credentials) -
     if stat_in_ns(ns_id, path).is_none() {
         return false;
     }
-    let parent_stat = match stat_in_ns(ns_id, &parent) {
+    let parent_stat = match stat_in_ns(ns_id, parent) {
         Some(s) => s,
         None => return false,
     };

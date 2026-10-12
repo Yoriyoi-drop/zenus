@@ -67,7 +67,7 @@ pub fn watchdog_tick() {
     WDT_TICK_COUNT.store(count.wrapping_add(1), Ordering::Release);
 
     let tick_count = count.wrapping_add(1);
-    if tick_count % TICKS_PER_SEC == 0 {
+    if tick_count.is_multiple_of(TICKS_PER_SEC) {
         let last = WDT_LAST_PET.load(Ordering::Acquire);
         let elapsed_ticks = tick_count.wrapping_sub(last);
         let elapsed_secs = (elapsed_ticks / TICKS_PER_SEC) as u32;
