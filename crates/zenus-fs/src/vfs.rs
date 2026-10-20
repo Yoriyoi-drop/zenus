@@ -51,6 +51,17 @@ pub trait FileSystem: Send + Sync {
     fn chown(&self, _inode: u64, _uid: u32, _gid: u32) -> bool {
         false
     }
+
+    /// Create a symbolic link. Filesystems that do not support them keep the
+    /// default, so `symlinkat` fails rather than creating something inert.
+    fn symlink(&self, _parent_inode: u64, _name: &str, _target: &str) -> Option<u64> {
+        None
+    }
+
+    /// Copy a symbolic link's target into `buf`, returning the bytes written.
+    fn readlink(&self, _inode: u64, _buf: &mut [u8]) -> Option<usize> {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -478,6 +489,33 @@ pub fn create_dir_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
             .is_some(),
         None => false,
     }
+}
+
+/// Create a symbolic link at `path` pointing at `target`.
+///
+/// This does not follow `target` (and the generic resolver does not follow
+/// symlinks yet): the link is created as an ordinary node whose type is
+/// `Symlink`, which `readlink` can read back.
+pub fn symlink(path: &str, target: &str) -> bool {
+    symlink_in_ns(zenus_ns::NS_ROOT, path, target)
+}
+
+pub fn symlink_in_ns(ns_id: zenus_ns::NsId, path: &str, target: &str) -> bool {
+    let parent = match parent_dir(path) {
+        Some(p) => p,
+        None => return false,
+    };
+    let name = file_name(path);
+    match open_in_ns(ns_id, parent) {
+        Some(node) => node.fs.symlink(node.inode, name, target).is_some(),
+        None => false,
+    }
+}
+
+/// Read a symbolic link without following it.
+pub fn readlink(path: &str, buf: &mut [u8]) -> Option<usize> {
+    let node = open(path)?;
+    node.fs.readlink(node.inode, buf)
 }
 
 pub fn remove(path: &str) -> bool {

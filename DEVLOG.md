@@ -3364,3 +3364,20 @@ Yang dikerjakan:
 - Tidak ada pemanggil ioctl in-tree (userspace/zutils/apps), jadi tidak ada yang rusak.
 
 Verifikasi: cargo test -p zenus-syscall (24 hijau) dan cargo build --target x86_64-unknown-none lolos.
+
+## BUG-052 / fitur - dukungan symbolic link di tmpfs (symlinkat/readlinkat)
+
+Status: sudah di-implementasi + host-tested + smoke-tested. Mengisi item #41 di audit.md ("Symbolic link support in VFS") untuk tmpfs.
+
+Apa yang kurang: `sys_symlinkat` mengembalikan -1 dan `sys_readlinkat` selalu gagal; `FileType::Symlink` ada tapi tidak ada filesystem yang bisa membuat/membacanya.
+
+Yang dikerjakan:
+- Trait `FileSystem` dapat method default `symlink(parent, name, target) -> Option<u64>` dan `readlink(inode, buf) -> Option<usize>`; filesystem yang tidak mendukung tetap gagal (bukan membuat node mati).
+- `tmpfs` menyimpan target di buffer `data` node dengan `file_type = Symlink` dan `size = panjang target`; `readlink` menolak node non-symlink.
+- Helper VFS `symlink`/`readlink` (dan varian `_in_ns`) memakai `parent_dir`/`file_name` yang sudah ada.
+- `sys_symlinkat`/`sys_readlinkat` diimplementasikan; target ditulis ke user lewat `copy_bytes_to_user`.
+- Host test `a_symlink_round_trips_through_tmpfs`: create, stat sebagai Symlink, readlink mengembalikan target, file biasa ditolak, nama duplikat ditolak.
+
+Batasan yang disengaja: resolver path generik **belum** mengikuti symlink (open pada path symlink mengembalikan node symlink itu sendiri). Ini tahap pertama; following symlink adalah pekerjaan berikutnya.
+
+Verifikasi: cargo test -p zenus-fs (78 hijau), cargo build --target x86_64-unknown-none, dan make smoke (prompt shell tercapai).

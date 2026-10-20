@@ -307,6 +307,49 @@ impl FileSystem for TmpFs {
         Some(child_idx as u64)
     }
 
+    fn symlink(&self, parent_inode: u64, name: &str, target: &str) -> Option<u64> {
+        let mut nodes = nodes();
+        let pidx = parent_inode as usize;
+        if pidx >= node_count() {
+            return None;
+        }
+        if nodes[pidx].file_type != FileType::Directory {
+            return None;
+        }
+        if Self::find_child(&nodes[..], pidx, name).is_some() {
+            return None;
+        }
+        let target_bytes = target.as_bytes();
+        if target_bytes.len() > MAX_FILE_SIZE {
+            return None;
+        }
+        let child_idx = Self::alloc_node()?;
+        Self::set_name(&mut nodes[child_idx], name);
+        nodes[child_idx].file_type = FileType::Symlink;
+        nodes[child_idx].uid = 0;
+        nodes[child_idx].gid = 0;
+        nodes[child_idx].mode = vfs::DEFAULT_FILE_MODE;
+        nodes[child_idx].size = target_bytes.len() as u32;
+        nodes[child_idx].data[..target_bytes.len()].copy_from_slice(target_bytes);
+        Self::add_child(&mut nodes[..], pidx, child_idx);
+        Some(child_idx as u64)
+    }
+
+    fn readlink(&self, inode: u64, buf: &mut [u8]) -> Option<usize> {
+        let nodes = nodes();
+        let idx = inode as usize;
+        if idx >= node_count() || nodes[idx].file_type != FileType::Symlink {
+            return None;
+        }
+        let len = nodes[idx].size as usize;
+        if len > nodes[idx].data.len() {
+            return None;
+        }
+        let n = len.min(buf.len());
+        buf[..n].copy_from_slice(&nodes[idx].data[..n]);
+        Some(n)
+    }
+
     fn unlink(&self, parent_inode: u64, name: &str) -> bool {
         let mut nodes = nodes();
         let pidx = parent_inode as usize;
@@ -439,5 +482,33 @@ mod host_tests {
         // An in-range write still works, so the guard is not over-broad.
         assert_eq!(fs.write(inode, 0, b"ok"), Some(2));
         assert_eq!(fs.stat(inode).size, 2);
+    }
+
+    #[test]
+    fn a_symlink_round_trips_through_tmpfs() {
+        let _serial = crate::host_tests::serial();
+        let fs = TmpFs;
+        TmpFs::reset();
+        let root = fs.root_inode();
+
+        let inode = fs
+            .symlink(root, "link", "/target/path")
+            .expect("create a symlink");
+
+        assert_eq!(fs.stat(inode).file_type, crate::vfs::FileType::Symlink);
+        assert_eq!(fs.stat(inode).size, "/target/path".len() as u64);
+
+        let mut buf = [0u8; 64];
+        let n = fs.readlink(inode, &mut buf).expect("read the link");
+        assert_eq!(&buf[..n], b"/target/path");
+
+        // A regular file is not a link, so reading it as one is refused.
+        let file = fs
+            .create(root, "plain", crate::vfs::FileType::File)
+            .expect("create a file");
+        assert!(fs.readlink(file, &mut buf).is_none());
+
+        // The name is taken.
+        assert!(fs.symlink(root, "link", "/other").is_none());
     }
 }

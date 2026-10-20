@@ -15,6 +15,12 @@
   enforcement points are its only callers. `cpu`/`io` remain advertised but
   unenforced and the hierarchy is flat.
 
+### Added
+- **Symbolic links in tmpfs (BUG-052).** `symlinkat` and `readlinkat` work for
+  tmpfs nodes: the target is stored in the node and read back without
+  following it. The generic path resolver still does not follow symlinks, which
+  is the next step.
+
 ### Fixed
 - **Dead task-teardown machinery removed (BUG-042).** `task_exit()`,
   `TERMINATED_STACKS` and `reap_terminated_stacks()` were unreachable: `sys_exit`

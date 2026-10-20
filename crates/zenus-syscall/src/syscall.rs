@@ -3408,28 +3408,53 @@ fn sys_pselect6(
 fn sys_readlinkat(
     _dirfd: u64,
     path_ptr: u64,
-    _buf_ptr: u64,
-    _bufsiz: u64,
+    buf_ptr: u64,
+    bufsiz: u64,
     _a5: u64,
     _a6: u64,
 ) -> u64 {
-    let _path = match read_user_cstr(path_ptr, 256) {
+    let path = match read_user_cstr(path_ptr, 256) {
         Some(p) => p,
         None => return -1i64 as u64,
     };
-    // Symlinks not supported yet
-    -1i64 as u64
+    if buf_ptr == 0 || bufsiz == 0 {
+        return -1i64 as u64;
+    }
+    let mut buf = [0u8; 256];
+    let cap = core::cmp::min(bufsiz as usize, buf.len());
+    match zenus_fs::vfs::readlink(path.as_ref(), &mut buf[..cap]) {
+        Some(n) => {
+            if copy_bytes_to_user(&buf[..n], buf_ptr) {
+                n as u64
+            } else {
+                -1i64 as u64
+            }
+        }
+        None => -1i64 as u64,
+    }
 }
 
 fn sys_symlinkat(
-    _target_ptr: u64,
+    target_ptr: u64,
     _linkdirfd: u64,
-    _linkpath_ptr: u64,
+    linkpath_ptr: u64,
     _a4: u64,
     _a5: u64,
     _a6: u64,
 ) -> u64 {
-    -1i64 as u64
+    let target = match read_user_cstr(target_ptr, 256) {
+        Some(s) => s,
+        None => return -1i64 as u64,
+    };
+    let linkpath = match read_user_cstr(linkpath_ptr, 256) {
+        Some(s) => s,
+        None => return -1i64 as u64,
+    };
+    if zenus_fs::vfs::symlink(linkpath.as_ref(), target.as_ref()) {
+        0
+    } else {
+        -1i64 as u64
+    }
 }
 
 fn sys_linkat(
