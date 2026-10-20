@@ -144,6 +144,10 @@ pub struct Task {
     pub gid: u32,
     pub euid: u32,
     pub egid: u32,
+    /// `PR_SET_NO_NEW_PRIVS`: once set, the task (and its children) cannot
+    /// gain privileges via `execve`. Zenus has no privilege-gaining execve
+    /// yet, so the flag is recorded truthfully rather than silently dropped.
+    pub no_new_privs: bool,
     pub parent_pid: u64,
     pub exit_code: u64,
     /// Which cgroup this task belongs to (`0` is the root).
@@ -190,6 +194,7 @@ impl Task {
             gid: 0,
             euid: 0,
             egid: 0,
+            no_new_privs: false,
             parent_pid: 0,
             exit_code: 0,
             cgroup: 0,

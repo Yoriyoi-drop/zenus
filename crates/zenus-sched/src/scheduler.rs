@@ -743,6 +743,7 @@ pub fn clone_task(
         task.gid = parent.gid;
         task.euid = parent.euid;
         task.egid = parent.egid;
+        task.no_new_privs = parent.no_new_privs;
         task.parent_pid = parent.id;
         task.uts_ns = new_uts_ns;
         task.pid_ns = new_pid_ns;
@@ -1466,6 +1467,33 @@ pub fn current_egid() -> u32 {
         .as_ref()
         .map(|t| t.egid)
         .unwrap_or(0)
+}
+
+/// Record `PR_SET_NO_NEW_PRIVS` for a task. The flag is inherited by
+/// children (see `clone_task`) and is consulted by any future privilege-gaining
+/// `execve`. Zenus has no such execve today, so this only stores the promise
+/// the kernel makes to the caller.
+pub fn set_no_new_privs(task_id: u64, value: bool) {
+    let mut tasks = TASKS.lock();
+    if let Some(slot) = tasks
+        .tasks
+        .iter_mut()
+        .find(|s| s.as_ref().map_or(false, |t| t.id == task_id))
+    {
+        if let Some(t) = slot.as_mut() {
+            t.no_new_privs = value;
+        }
+    }
+}
+
+/// Read the `PR_SET_NO_NEW_PRIVS` flag for a task (`false` if unknown).
+pub fn get_no_new_privs(task_id: u64) -> bool {
+    let tasks = TASKS.lock();
+    tasks
+        .tasks
+        .iter()
+        .find_map(|s| s.as_ref().filter(|t| t.id == task_id).map(|t| t.no_new_privs))
+        .unwrap_or(false)
 }
 
 pub fn set_current_uid(uid: u32) -> bool {

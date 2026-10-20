@@ -137,9 +137,11 @@ them; a host test pins those numbers against the kernel's list. It does not
 read `userspace/`, so it catches kernel-side renumbering, not drift in the
 userspace workspace.
 
-`prctl` accepts most options and returns success without doing anything —
-including `PR_SET_SECCOMP` and `PR_SET_NO_NEW_PRIVS`. That is a security gap,
-not a bug to be papered over.
+`prctl` classifies every option. `PR_SET_NAME`/`PR_GET_NAME` work;
+`PR_SET_NO_NEW_PRIVS`/`PR_GET_NO_NEW_PRIVS` are honoured for real (the flag is
+stored on the task and inherited by children); `PR_SET_SECCOMP` is *not*
+implemented and returns `-EINVAL` rather than claiming success. Capabilities
+themselves still do not exist, so `PR_SET/GET_KEEPCAPS` remain accepted no-ops.
 
 ## Layer 7 — Console and diagnostics (`zenus-console`)
 

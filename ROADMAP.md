@@ -98,7 +98,7 @@ Do not build on these without reading the code:
 | Thing | Reality |
 |---|---|
 | SSH | `ZENUS_SSH/1.0`, a homegrown line protocol with a weak keystream and a default password |
-| Capabilities / seccomp | `prctl` returns success and does nothing |
+| Capabilities / seccomp | `PR_SET_NO_NEW_PRIVS` is tracked and inherited; `PR_SET_SECCOMP` fails with `-EINVAL`; no capability set yet |
 | Container runtime / OCI | Does not exist |
 | Cryptography | No library at all |
 | Userspace | Ring-3 programs are built from this workspace by hand; no libc |

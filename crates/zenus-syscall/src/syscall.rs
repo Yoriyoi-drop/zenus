@@ -3560,6 +3560,9 @@ fn sys_fchdir(_fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
 pub enum PrctlSupport {
     /// Implemented: the call does what it says.
     Name,
+    /// Honoured for real: `PR_SET_NO_NEW_PRIVS` records a promise the kernel
+    /// keeps (and passes to children).
+    Implemented,
     /// Accepted and honoured as a no-op because there is nothing to honour:
     /// `PR_SET_PDEATHSIG` on a kernel with no `execve`-time reaping, and
     /// `PR_SET/GET_KEEPCAPS` on a kernel with no capabilities.
@@ -3588,7 +3591,8 @@ pub fn prctl_support(option: u64) -> PrctlSupport {
         PR_SET_PDEATHSIG | PR_GET_PDEATHSIG | PR_SET_KEEPCAPS | PR_GET_KEEPCAPS => {
             PrctlSupport::NoOp
         }
-        PR_SET_SECCOMP | PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => PrctlSupport::Unsupported,
+        PR_SET_SECCOMP => PrctlSupport::Unsupported,
+        PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => PrctlSupport::Implemented,
         _ => PrctlSupport::Unsupported,
     }
 }
@@ -3624,6 +3628,24 @@ fn sys_prctl(option: u64, arg2: u64, arg3: u64, _a4: u64, _a5: u64, _a6: u64) ->
             }
         }
         PrctlSupport::NoOp => 0,
+        PrctlSupport::Implemented => match option {
+            PR_SET_NO_NEW_PRIVS => {
+                // Record the promise truthfully. `arg2 != 0` sets it; any
+                // other value clears it. Zenus has no privilege-gaining
+                // `execve` yet, so this is the honest, complete behaviour.
+                scheduler::set_no_new_privs(scheduler::current_task_id(), arg2 != 0);
+                0
+            }
+            PR_GET_NO_NEW_PRIVS => {
+                if scheduler::get_no_new_privs(scheduler::current_task_id()) {
+                    1
+                } else {
+                    0
+                }
+            }
+            // Nothing else is classified `Implemented`; fall through to EINVAL.
+            _ => -22i64 as u64, // -EINVAL
+        },
         PrctlSupport::Unsupported | PrctlSupport::Unknown => -22i64 as u64, // -EINVAL
     }
 }

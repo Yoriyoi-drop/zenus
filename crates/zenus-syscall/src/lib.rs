@@ -83,17 +83,25 @@ mod host_tests {
     fn prctl_does_not_claim_to_enforce_security() {
         use crate::syscall::{prctl_support, PrctlSupport};
 
-        for option in [
-            crate::syscall::PR_SET_SECCOMP,
-            crate::syscall::PR_SET_NO_NEW_PRIVS,
-            crate::syscall::PR_GET_NO_NEW_PRIVS,
-        ] {
-            assert_eq!(
-                prctl_support(option),
-                PrctlSupport::Unsupported,
-                "option {option} must be reported as unsupported"
-            );
-        }
+        // `PR_SET_SECCOMP` is genuinely unimplemented — the kernel must not
+        // claim to enforce it, so it stays `Unsupported` and fails with EINVAL.
+        assert_eq!(
+            prctl_support(crate::syscall::PR_SET_SECCOMP),
+            PrctlSupport::Unsupported,
+            "seccomp must be reported as unsupported"
+        );
+
+        // `PR_SET_NO_NEW_PRIVS` / `PR_GET_NO_NEW_PRIVS` are now honoured for
+        // real (the flag is stored and inherited), so they are `Implemented`
+        // rather than a silent no-op.
+        assert_eq!(
+            prctl_support(crate::syscall::PR_SET_NO_NEW_PRIVS),
+            PrctlSupport::Implemented
+        );
+        assert_eq!(
+            prctl_support(crate::syscall::PR_GET_NO_NEW_PRIVS),
+            PrctlSupport::Implemented
+        );
 
         // The options that are actually implemented.
         assert_eq!(

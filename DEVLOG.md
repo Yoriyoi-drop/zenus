@@ -3235,3 +3235,20 @@ Yang dikerjakan:
 - Hapus dead code di scheduler.rs: TerminatedStack, TerminatedStackList, TERMINATED_STACKS, reap_terminated_stacks, task_exit. Komentar di reap_task dan paging.rs diperbarui ke exit_current_task. Sekarang hanya dua jalur teardown: exit_current_task -> reap_task, dan kill_task.
 
 Verifikasi: cargo test -p zenus-mem (45 hijau) dan cargo build --target x86_64-unknown-none (hanya warning pra-eksisting) lolos.
+
+## BUG-043 - PR_SET_NO_NEW_PRIVS sekarang benar-benar dicatat dan diwariskan
+
+Status: sudah di-fix + host-tested + kernel build hijau. Bagian dari item ROADMAP.md "Next #4: Capabilities and a real prctl".
+
+Apa yang salah: `prctl` dulu mengembalikan 0 untuk semua opsi. Sudah ada klasifikasi `prctl_support` yang membuat `PR_SET_SECCOMP` dan `PR_SET_NO_NEW_PRIVS` gagal dengan -EINVAL, tapi `NO_NEW_PRIVS` sendiri belum pernah disimpan, jadi kernel tetap tidak bisa menjawab `PR_GET_NO_NEW_PRIVS` secara jujur.
+
+Yang dikerjakan:
+- Field baru `Task::no_new_privs: bool` (default false).
+- `clone_task` mewariskan flag dari parent, sesuai semantik Linux.
+- `scheduler::set_no_new_privs` / `get_no_new_privs`.
+- `prctl_support`: `PR_SET_NO_NEW_PRIVS` dan `PR_GET_NO_NEW_PRIVS` kini `Implemented`; `PR_SET_SECCOMP` tetap `Unsupported` dan tetap gagal -EINVAL (seccomp memang belum ada, jadi kernel tidak boleh mengaku menegakkannya).
+- `sys_prctl` menangani set/get flag.
+- Test `prctl_does_not_claim_to_enforce_security` diperbarui: SECCOMP Unsupported, NO_NEW_PRIVS Implemented.
+- ARCHITECTURE.md dan ROADMAP.md diperbarui agar tidak lagi menyebut prctl sebagai no-op total.
+
+Verifikasi: cargo test -p zenus-sched -p zenus-syscall (23 hijau) dan cargo build --target x86_64-unknown-none lolos.
