@@ -3381,3 +3381,18 @@ Yang dikerjakan:
 Batasan yang disengaja: resolver path generik **belum** mengikuti symlink (open pada path symlink mengembalikan node symlink itu sendiri). Ini tahap pertama; following symlink adalah pekerjaan berikutnya.
 
 Verifikasi: cargo test -p zenus-fs (78 hijau), cargo build --target x86_64-unknown-none, dan make smoke (prompt shell tercapai).
+
+## BUG-053 - sys_fchdir diimplementasikan (path dilacak per fd)
+
+Status: sudah di-implementasi + build + smoke-tested.
+
+Apa yang kurang: `sys_fchdir` mengembalikan ENOSYS (sebelumnya bahkan mengaku sukses). Inode descriptor saja tidak bisa menamai direktori, dan `FdEntry` tidak menyimpan path.
+
+Yang dikerjakan:
+- `FdEntry` dapat `path: [u8; 256]`, diisi saat `open` (truncate 255 byte). Pipe/socket memakai nol.
+- `FdTable::alloc` menerima `path`; `dup`, `dup2`, dan `clone_all_for_task` menyalin path sumber, jadi `fchdir` pada fd hasil dup tetap menunjuk direktori yang sama.
+- `fd::fd_path(fd)` mengembalikan `(path, file_type)`.
+- `sys_fchdir`: `-EBADF` untuk fd tidak valid, `-ENOTDIR` untuk non-direktori, selain itu memanggil `set_task_cwd` dan mengembalikan 0.
+- `sys_fchdir` dikeluarkan dari daftar uji ENOSYS.
+
+Verifikasi: cargo test -p zenus-syscall (24 hijau), cargo build --target x86_64-unknown-none, dan make smoke (prompt shell tercapai).

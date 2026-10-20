@@ -3568,8 +3568,21 @@ fn sys_chdir(path_ptr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) ->
     0
 }
 
-fn sys_fchdir(_fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    -38i64 as u64 // -ENOSYS: not implemented
+fn sys_fchdir(fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let (path, file_type) = match fd::fd_path(fd) {
+        Some(v) => v,
+        None => return -9i64 as u64, // -EBADF
+    };
+    if file_type != zenus_fs::vfs::FileType::Directory {
+        return -20i64 as u64; // -ENOTDIR
+    }
+    let n = path.iter().position(|&b| b == 0).unwrap_or(256);
+    let s = match core::str::from_utf8(&path[..n]) {
+        Ok(s) => s,
+        Err(_) => return -1i64 as u64,
+    };
+    scheduler::set_task_cwd(scheduler::current_task_id(), s);
+    0
 }
 
 // ── Process control ──
@@ -4550,7 +4563,6 @@ mod host_tests {
         assert_eq!(super::sys_truncate(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_waitid(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_setrlimit(0, 0, 0, 0, 0, 0), ENOSYS);
-        assert_eq!(super::sys_fchdir(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_utimensat(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_fchownat(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_nice(0, 0, 0, 0, 0, 0), ENOSYS);

@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Added
+- **`fchdir` works (BUG-053).** `FdEntry` now records the path a descriptor
+  was opened through (inherited by `dup`/`dup2`/`clone`), and `fchdir` switches
+  the task's cwd to it, rejecting non-directories with `-ENOTDIR`.
+
 - **cgroup v2 `pids` and `memory` limits are enforced (BUG-041).** The
   `/sys/fs/cgroup` tree was a read-only view — `mkdir`, `unlink` and every
   `write` returned failure — and this replaces it with a real controller:

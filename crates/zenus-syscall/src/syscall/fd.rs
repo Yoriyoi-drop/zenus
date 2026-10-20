@@ -86,6 +86,9 @@ pub struct FdEntry {
     /// check. `sys_mount` used to accept `MS_RDONLY` and drop it, which meant a
     /// filesystem mounted read-only still produced writable descriptors.
     pub read_only: bool,
+    /// The path this descriptor was opened through, zeroed for pipes and
+    /// sockets. `fchdir` needs it: an inode alone cannot name a directory.
+    pub path: [u8; 256],
 }
 
 unsafe impl Send for FdEntry {}
@@ -98,6 +101,19 @@ pub struct FdTable {
 unsafe impl Send for FdTable {}
 unsafe impl Sync for FdTable {}
 
+/// Copy a path into the fixed buffer, truncating at 255 bytes.
+fn path_buf(path: &str) -> [u8; 256] {
+    let mut buf = [0u8; 256];
+    let n = path.len().min(255);
+    buf[..n].copy_from_slice(&path.as_bytes()[..n]);
+    buf
+}
+
+fn path_as_str(path: &[u8; 256]) -> &str {
+    let n = path.iter().position(|&b| b == 0).unwrap_or(256);
+    core::str::from_utf8(&path[..n]).unwrap_or("")
+}
+
 impl FdTable {
     const fn new() -> Self {
         FdTable {
@@ -105,7 +121,13 @@ impl FdTable {
         }
     }
 
-    fn alloc(&mut self, task_id: u64, node: vfs::VfsNode, file_type: FileType) -> Option<u64> {
+    fn alloc(
+        &mut self,
+        task_id: u64,
+        node: vfs::VfsNode,
+        file_type: FileType,
+        path: &str,
+    ) -> Option<u64> {
         for i in 0..MAX_FDS {
             if self.entries[i].is_none() {
                 self.entries[i] = Some(FdEntry {
@@ -117,6 +139,7 @@ impl FdTable {
                     pipe_id: u64::MAX,
                     socket_id: u64::MAX,
                     read_only: node.read_only,
+                    path: path_buf(path),
                 });
                 return Some(i as u64);
             }
@@ -141,6 +164,7 @@ impl FdTable {
                     pipe_id,
                     socket_id: u64::MAX,
                     read_only: false,
+                    path: [0u8; 256],
                 });
                 return Some(i as u64);
             }
@@ -160,6 +184,7 @@ impl FdTable {
                     pipe_id: u64::MAX,
                     socket_id,
                     read_only: false,
+                    path: [0u8; 256],
                 });
                 return Some(i as u64);
             }
@@ -222,21 +247,35 @@ impl FdTable {
     }
 
     fn dup(&mut self, task_id: u64, fd: u64) -> Option<u64> {
-        let entry = self.get(fd)?;
-        if entry.pipe_id != u64::MAX {
-            self.alloc_pipe(task_id, entry.pipe_id, fd % 2 == 0)
-        } else if entry.socket_id != u64::MAX {
-            self.alloc_socket(task_id, entry.socket_id)
+        // Copy the fields out before `alloc` takes `&mut self`: the borrow of
+        // the source entry would otherwise overlap the mutable borrow.
+        let (pipe_id, socket_id, fs, inode, read_only, file_type, path) = {
+            let entry = self.get(fd)?;
+            (
+                entry.pipe_id,
+                entry.socket_id,
+                entry.fs,
+                entry.inode,
+                entry.read_only,
+                entry.file_type,
+                entry.path,
+            )
+        };
+        if pipe_id != u64::MAX {
+            self.alloc_pipe(task_id, pipe_id, fd % 2 == 0)
+        } else if socket_id != u64::MAX {
+            self.alloc_socket(task_id, socket_id)
         } else {
             self.alloc(
                 task_id,
                 vfs::VfsNode {
-                    fs: entry.fs?,
-                    inode: entry.inode,
+                    fs: fs?,
+                    inode,
                     // A dup of a read-only descriptor stays read-only.
-                    read_only: entry.read_only,
+                    read_only,
                 },
-                entry.file_type,
+                file_type,
+                path_as_str(&path),
             )
         }
     }
@@ -266,6 +305,7 @@ impl FdTable {
                         read_only: entry.read_only,
                     },
                     entry.file_type,
+                    path_as_str(&entry.path),
                 );
             }
         }
@@ -328,7 +368,18 @@ pub fn fd_open(task_id: u64, path: &str) -> Option<u64> {
         return None;
     }
     let mut table = FD_TABLE.lock();
-    table.alloc(task_id, node, stat.file_type)
+    table.alloc(task_id, node, stat.file_type, path)
+}
+
+/// The path and type recorded for a descriptor, if it is open.
+///
+/// `fchdir` uses this: the descriptor's inode alone does not name the
+/// directory, and re-resolving it would pick a different path if the tree has
+/// changed since the open.
+pub fn fd_path(fd: u64) -> Option<([u8; 256], FileType)> {
+    let table = FD_TABLE.lock();
+    let entry = table.get(fd)?;
+    Some((entry.path, entry.file_type))
 }
 
 pub fn fd_close(fd: u64) -> bool {
@@ -519,6 +570,7 @@ pub fn fd_dup2(task_id: u64, oldfd: u64, newfd: u64) -> Option<u64> {
             socket_id: entry_copy.socket_id,
             // dup2 must not launder a read-only descriptor into a writable one.
             read_only: entry_copy.read_only,
+            path: entry_copy.path,
         });
         Some(newfd)
     } else {
