@@ -3264,7 +3264,7 @@ fn sys_getpgid(_pid: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u
 }
 
 fn sys_setpgid(_pid: u64, _pgid: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 fn sys_getsid(_pid: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
@@ -3281,7 +3281,7 @@ fn sys_setsockopt(
     _optlen: u64,
     _a6: u64,
 ) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 fn sys_getsockopt(
@@ -3449,7 +3449,7 @@ fn sys_truncate(path_ptr: u64, _length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: 
 }
 
 fn sys_ftruncate(_fd: u64, _length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 // ── Resource limit syscalls ──
@@ -3484,7 +3484,7 @@ fn sys_getrlimit(resource: u64, rlim_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6
 }
 
 fn sys_setrlimit(_resource: u64, _rlim_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 // ── CWD syscalls ──
@@ -3543,7 +3543,7 @@ fn sys_chdir(path_ptr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) ->
 }
 
 fn sys_fchdir(_fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 // ── Process control ──
@@ -3672,7 +3672,7 @@ fn sys_utimensat(
     _a5: u64,
     _a6: u64,
 ) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 fn sys_fstatat(_dirfd: u64, path_ptr: u64, stat_ptr: u64, _flags: u64, _a5: u64, _a6: u64) -> u64 {
@@ -3710,7 +3710,7 @@ fn sys_fchownat(
     _flags: u64,
     _a6: u64,
 ) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 // ── Process syscalls ──
@@ -3847,7 +3847,7 @@ fn sys_statfs(_path_ptr: u64, buf_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u
 // ── Scheduling syscalls ──
 
 fn sys_nice(_increment: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 fn sys_sched_getscheduler(_pid: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
@@ -3862,15 +3862,15 @@ fn sys_sched_setscheduler(
     _a5: u64,
     _a6: u64,
 ) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 fn sys_sched_getparam(_pid: u64, _param_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 fn sys_sched_setparam(_pid: u64, _param_ptr: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    0
+    -38i64 as u64 // -ENOSYS: not implemented
 }
 
 fn sys_sched_yield(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
@@ -4504,5 +4504,25 @@ mod host_tests {
             brk_action(0x1000, current, 0x6000_0000_0000, USER_SPACE_LIMIT),
             BrkAction::Refuse
         );
+    }
+
+    /// The syscalls that used to return 0 without doing anything now report
+    /// `-ENOSYS`. Returning 0 told callers the operation succeeded when it had
+    /// not: `ftruncate` did not truncate, `fchownat` did not chown,
+    /// `setrlimit` did not limit. Silence there is the same bug `prctl` had.
+    #[test]
+    fn unimplemented_syscalls_report_enosys_not_silent_success() {
+        const ENOSYS: u64 = -38i64 as u64;
+        assert_eq!(super::sys_setpgid(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_setsockopt(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_ftruncate(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_setrlimit(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_fchdir(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_utimensat(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_fchownat(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_nice(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_sched_setscheduler(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_sched_getparam(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_sched_setparam(0, 0, 0, 0, 0, 0), ENOSYS);
     }
 }

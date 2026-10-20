@@ -3296,3 +3296,18 @@ Yang dikerjakan:
 - ROADMAP.md diperbarui.
 
 Verifikasi: cargo test -p zenus-sched (9 hijau), cargo build --target x86_64-unknown-none, dan make smoke (prompt shell tercapai, 74 baris serial).
+
+## BUG-047 - 11 syscall stub tidak lagi mengaku sukses (kini -ENOSYS)
+
+Status: sudah di-fix + host-tested + smoke-tested.
+
+Apa yang salah: 11 syscall punya body `0` - mereka mengembalikan sukses tanpa melakukan apa pun. Ini pola yang sama dengan bug `prctl`: `ftruncate` tidak memotong file, `fchownat` tidak mengganti owner, `setrlimit` tidak memasang limit, `fchdir` tidak mengganti cwd, `utimensat` tidak menyetel timestamp, `sched_*`/`nice`/`setpgid`/`setsockopt` tidak melakukan apa pun. Caller yang memeriksa return value diberi tahu "berhasil" padahal tidak.
+
+Yang dikerjakan:
+- 11 fungsi (`sys_setpgid`, `sys_setsockopt`, `sys_ftruncate`, `sys_setrlimit`, `sys_fchdir`, `sys_utimensat`, `sys_fchownat`, `sys_nice`, `sys_sched_setscheduler`, `sys_sched_getparam`, `sys_sched_setparam`) kini mengembalikan `-38` (ENOSYS).
+- Host test `unimplemented_syscalls_report_enosys_not_silent_success` mem-pin kesebelasnya.
+- Tidak ada pemanggil in-tree (userspace/zutils/apps) untuk syscall ini, jadi tidak ada yang rusak.
+
+Catatan: ini bukan implementasi fitur; ini membuat kernel berhenti berbohong. Implementasi sebenarnya (mis. truncate di VFS) adalah pekerjaan terpisah.
+
+Verifikasi: cargo test -p zenus-syscall (24 hijau), cargo build --target x86_64-unknown-none, dan make smoke (prompt shell tercapai).
