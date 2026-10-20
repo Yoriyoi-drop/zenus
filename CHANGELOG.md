@@ -42,6 +42,11 @@
   without doing anything.
 
 ### Testing
+- **Fuzz campaigns now run headlessly (BUG-048).** `make fuzz-smoke` ran QEMU
+  with `-serial stdio`, which writes nothing in a non-TTY (CI) run, so the
+  target reported "campaign did not finish" even when the campaign had
+  completed. It now writes serial straight to the log and reports
+  `[FUZZ] EXIT code=0` (verified: 2000 cases, 0 crashes).
 - **A boot smoke test, and a `test-quiet` that can actually fail.** `make smoke`
   builds the ordinary kernel's ISO, boots it headless under `-cpu max`, and fails
   unless the shell prompt (`zenus$ `) appears on the serial line. Nothing before

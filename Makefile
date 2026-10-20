@@ -345,9 +345,10 @@ define fuzz_run
 	@echo "=== running fuzzing campaign ($(3)) ==="
 	@rm -f $(call FUZZ_LOG,$(2))
 	@timeout $(FUZZ_TIMEOUT) qemu-system-x86_64 \
-		-display none -serial stdio -no-reboot \
+		-display none -serial file:$(call FUZZ_LOG,$(2)) -no-reboot \
 		-m $(FUZZ_MEM) -smp $(FUZZ_SMP) -cdrom $(call FUZZ_ISO,$(2)) \
-		-cpu max 2>&1 | tee $(call FUZZ_LOG,$(2)) | grep -a '\[FUZZ\]' || true
+		-cpu max >/dev/null 2>&1 || true
+	@grep -a '\[FUZZ\]' $(call FUZZ_LOG,$(2)) || true
 	@echo "--- crash list ---"
 	@grep -a '\[FUZZ\] CRASH' $(call FUZZ_LOG,$(2)) || echo "(no crash reported)"
 	@echo "--- summary ---"

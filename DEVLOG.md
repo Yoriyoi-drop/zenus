@@ -3311,3 +3311,15 @@ Yang dikerjakan:
 Catatan: ini bukan implementasi fitur; ini membuat kernel berhenti berbohong. Implementasi sebenarnya (mis. truncate di VFS) adalah pekerjaan terpisah.
 
 Verifikasi: cargo test -p zenus-syscall (24 hijau), cargo build --target x86_64-unknown-none, dan make smoke (prompt shell tercapai).
+
+## BUG-048 - make fuzz-smoke berfungsi headless (bukan hanya di TTY)
+
+Status: sudah di-fix + diverifikasi (make fuzz-smoke selesai dengan EXIT code=0).
+
+Apa yang salah: `fuzz_run` menjalankan QEMU dengan `-serial stdio` lalu `tee` ke log. Di lingkungan non-TTY (CI, sandbox, pipe) QEMU tidak menulis apa pun ke stdio, sehingga log 0 byte dan target melaporkan "campaign did not finish: timeout or reset" padahal kampanye sebenarnya selesai. Terbukti dengan menjalankan ISO yang sama memakai `-serial file:`: 2000 kasus, 0 crash, `[FUZZ] EXIT code=0`.
+
+Yang dikerjakan:
+- `fuzz_run` sekarang memakai `-serial file:$(FUZZ_LOG)` (QEMU menulis serial langsung ke log) dan mencetak baris `[FUZZ]` dari file itu. Tidak ada lagi ketergantungan pada TTY.
+- Setelah perubahan: `make fuzz-smoke` melaporkan ringkasan (2000 kasus, 0 crash, 144 new paths, 172 edges) dan `[FUZZ] EXIT code=0`.
+
+Catatan: perubahan ini juga membuat `make fuzz-coverage`/`fuzz-regression` andal di CI.
