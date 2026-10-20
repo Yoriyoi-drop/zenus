@@ -211,10 +211,11 @@ Default-nya ada di `zenus_fuzz::Mode::default_cases()`.
 
 Jujur soal apa yang benar-benar bekerja:
 
-- **Minimisasi belum reproduktif.** `minimizer::minimize` memakai predikat
-  yang tidak bisa menjalankan input (hanya menolak hasil kosong), jadi hasilnya
-  tidak berguna untuk debugging. Yang bisa dipakai: `minimize_with`, dengan
-  oracle yang sebenarnya. Ada test yang mengunci perilaku ini.
+- **Minimisasi sekarang reproduktif.** Varian tanpa-oracle (`minimize`,
+  `minimize_all`) dihapus karena predikatnya hanya menolak hasil kosong dan
+  tidak pernah menjalankan ulang input. Kampanye kini memakai `minimize_with`
+  dengan oracle sungguhan (`execute_input(candidate) == Crash`), jadi kandidat
+  yang disimpan benar-benar masih memicu crash.
 - **Konten minimalisasi tidak persisten.** Corpus dan crash disimpan di memori
   kernel saja; `build/fuzz/fuzz.log` adalah satu-satunya jejak setelah VM mati.
 - **Fault containment hanya di BSP.** `fuzz_guard` menyimpan satu pasangan

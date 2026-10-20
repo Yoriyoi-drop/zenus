@@ -1,19 +1,13 @@
 use alloc::vec::Vec;
 
-/// Minimize a crashing input while preserving the crash
-pub fn minimize(input: &[u8]) -> Vec<u8> {
-    // The default predicate cannot actually run the input (that needs the
-    // fault-containment machinery), so it only refuses to shrink to nothing.
-    minimize_with(input, |candidate| !candidate.is_empty())
-}
-
 /// Minimize with an injected "does this still crash?" predicate.
 ///
-/// `minimize` used to hard-code its predicate, which made the whole delta
-/// debugging loop untestable — and hid the fact that the built-in predicate
-/// does not reproduce anything. With the predicate injected, the search itself
-/// (chunk removal, byte zeroing, fixed point) is testable against a real
-/// oracle.
+/// There is deliberately no predicate-free variant. The old `minimize` used
+/// `|candidate| !candidate.is_empty()`, which cannot reproduce a crash: it
+/// shrank every input to one byte whether or not that byte still triggered the
+/// fault, so the "reproducer" carried no information about the bug. A real
+/// oracle (the campaign passes `execute_input`) is the whole point; the search
+/// itself (chunk removal, byte zeroing, fixed point) is testable against one.
 pub fn minimize_with(input: &[u8], mut preserves_crash: impl FnMut(&[u8]) -> bool) -> Vec<u8> {
     let mut current = input.to_vec();
     let mut changed = true;
@@ -61,9 +55,4 @@ pub fn minimize_with(input: &[u8], mut preserves_crash: impl FnMut(&[u8]) -> boo
     }
 
     current
-}
-
-/// Minimize multiple inputs
-pub fn minimize_all(inputs: &[Vec<u8>]) -> Vec<Vec<u8>> {
-    inputs.iter().map(|input| minimize(input)).collect()
 }

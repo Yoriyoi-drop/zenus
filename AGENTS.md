@@ -106,9 +106,6 @@ Do not assume these work; read the code first.
   create/unlink/write all fail, no controller is enforced.
 - `zenus-net/src/ssh.rs` speaks a homegrown `ZENUS_SSH/1.0` line protocol with a
   hand-rolled keystream and a default password of `zenus`. It is not SSH.
-- `zenus-fuzz`'s `minimizer::minimize` uses a predicate that cannot reproduce a
-  crash (it only refuses to shrink to nothing); use `minimize_with` with a real
-  oracle.
 - The ZENUS_SSH keystream has ~2 bits of entropy per byte (pinned by a test).
 
 ## Docs

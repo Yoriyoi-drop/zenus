@@ -3266,3 +3266,17 @@ Yang dikerjakan:
 - Bullet shallow spot di AGENTS.md dihapus.
 
 Verifikasi: cargo test -p zenus-fs (77 hijau) dan cargo build --target x86_64-unknown-none lolos.
+
+## BUG-045 - minimisasi fuzz memakai oracle crash yang sebenarnya
+
+Status: sudah di-fix + host-tested + kernel build hijau. Menghapus shallow spot di AGENTS.md dan doc/fuzzing.md.
+
+Apa yang salah: `minimizer::minimize` memakai predikat `|candidate| !candidate.is_empty()`, yang tidak pernah menjalankan ulang input. Akibatnya setiap crash "diminimalkan" menjadi satu byte nol tanpa mempedulikan apakah byte itu masih memicu crash - reproducer-nya tidak berguna. `process_result` memakai fungsi itu untuk semua crash <= 256 byte.
+
+Yang dikerjakan:
+- `process_result` sekarang memakai `minimize_with` dengan oracle nyata: `execute_input(candidate) == FuzzResult::Crash`. Minimisasi dilakukan sebelum mengambil lock `FUZZ_STATS` agar tidak menyatukan dua lock yang tidak berhubungan.
+- Hapus `minimize` dan `minimize_all` (varian tanpa oracle yang menyesatkan). `minimize_with` tetap, dengan dokumentasi yang menjelaskan kenapa varian tanpa oracle tidak boleh ada.
+- Test `default_minimise_keeps_at_least_one_byte` dihapus (ia mengunci perilaku palsu); test `minimize_with` yang ada tetap menjadi pengunci.
+- AGENTS.md dan doc/fuzzing.md diperbarui.
+
+Verifikasi: cargo test -p zenus-fuzz (16 hijau) dan cargo build --target x86_64-unknown-none lolos.

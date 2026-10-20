@@ -232,6 +232,20 @@ fn execute_input(input: &[u8]) -> FuzzResult {
 }
 
 fn process_result(input: Vec<u8>, result: FuzzResult) -> FuzzResult {
+    // Minimise a crash *before* taking the stats lock: the oracle re-runs the
+    // input through `execute_input`, and holding `FUZZ_STATS` across that would
+    // couple two unrelated locks. The predicate is the real one — a candidate
+    // is kept only if it still crashes — which is what the old `minimize`
+    // lacked (it accepted any non-empty candidate and so shrank every input to
+    // one byte without reproducing anything).
+    let minimized = if result == FuzzResult::Crash && input.len() <= 256 {
+        Some(minimizer::minimize_with(&input, |candidate| {
+            execute_input(candidate) == FuzzResult::Crash
+        }))
+    } else {
+        None
+    };
+
     let mut stats = FUZZ_STATS.lock();
     stats.total_cases += 1;
 
@@ -242,14 +256,9 @@ fn process_result(input: Vec<u8>, result: FuzzResult) -> FuzzResult {
         }
         FuzzResult::Crash => {
             stats.crashes += 1;
-            // Minimisation is quadratic in the worst case; keep it for the
-            // small reproducers and store the raw input for the large ones.
-            let minimized = if input.len() <= 256 {
-                minimizer::minimize(&input)
-            } else {
-                input.clone()
-            };
-            crash::record_crash(&minimized);
+            // Small reproducers were minimised above; large ones are stored raw
+            // because minimisation is quadratic in the worst case.
+            crash::record_crash(&minimized.unwrap_or_else(|| input.clone()));
         }
         FuzzResult::Hang => {
             stats.hangs += 1;
@@ -489,7 +498,7 @@ pub fn reset() {
 mod host_tests {
     use crate::corpus;
     use crate::coverage;
-    use crate::minimizer::{minimize, minimize_all, minimize_with};
+    use crate::minimizer::minimize_with;
     use crate::mutator::{generate_mutations, mutate, MutationStrategy, STRATEGIES};
     use alloc::vec;
     use alloc::vec::Vec;
@@ -586,17 +595,6 @@ mod host_tests {
         assert_eq!(minimize_with(&minimal, oracle), minimal);
     }
 
-    #[test]
-    fn default_minimise_keeps_at_least_one_byte() {
-        // The built-in predicate cannot run anything, so this documents its
-        // actual (weak) behaviour instead of pretending it debugs.
-        // Any non-empty candidate "crashes", so the search shrinks to one byte
-        // and then zeroes it. This is exactly why the built-in predicate cannot
-        // debug anything: the result carries no information about the crash.
-        assert_eq!(minimize(b"abcdef"), vec![0u8]);
-        assert_eq!(minimize(b""), Vec::<u8>::new());
-        assert_eq!(minimize_all(&[b"abc".to_vec()]), vec![vec![0u8]]);
-    }
 
     // ── coverage ──────────────────────────────────────────────────────────
 
