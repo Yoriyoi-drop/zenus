@@ -3280,3 +3280,19 @@ Yang dikerjakan:
 - AGENTS.md dan doc/fuzzing.md diperbarui.
 
 Verifikasi: cargo test -p zenus-fuzz (16 hijau) dan cargo build --target x86_64-unknown-none lolos.
+
+## BUG-046 / fitur - init system menghormati urutan dependensi service
+
+Status: sudah di-implementasi + host-tested + smoke-tested. Menutup item "no dependency ordering" di ROADMAP.md (Partially done - Service management).
+
+Apa yang kurang: `init_system_start` menyalakan semua service yang `Running && pid == 0` dalam satu pass, tanpa cara menyatakan bahwa service B butuh A lebih dulu. Service yang bergantung pada database/jaringan bisa dijalankan sebelum prasyaratnya siap.
+
+Yang dikerjakan:
+- `Service` dapat `depends_on: [Option<&'static str>; MAX_DEPS]` (MAX_DEPS = 4). Tetap `Copy` karena array `Option<&str>` juga `Copy`.
+- `service_register_with_deps(...)` mendaftarkan service beserta dependensinya; `service_register` tetap ada sebagai wrapper tanpa dependensi sehingga call site lama tidak berubah.
+- `deps_satisfied` murni: true bila semua nama dependensi ada di daftar service yang sudah running.
+- `init_system_start` membangun daftar service running tiap pass dan hanya memilih service yang dependensinya terpenuhi; yang belum siap menunggu pass berikutnya. Siklus dependensi berarti tidak ada yang start, dan loop berhenti saat tidak ada yang bisa start.
+- 3 host test untuk `deps_satisfied` (tanpa dependensi, dependensi hilang, semua terpenuhi).
+- ROADMAP.md diperbarui.
+
+Verifikasi: cargo test -p zenus-sched (9 hijau), cargo build --target x86_64-unknown-none, dan make smoke (prompt shell tercapai, 74 baris serial).

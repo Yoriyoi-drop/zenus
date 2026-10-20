@@ -11,6 +11,9 @@ pub enum ServiceState {
     Disabled,
 }
 
+/// Maximum number of services a single service may depend on.
+pub const MAX_DEPS: usize = 4;
+
 #[derive(Clone, Copy)]
 pub struct Service {
     pub name: &'static str,
@@ -23,6 +26,19 @@ pub struct Service {
     pub restart_count: u32,
     pub max_restarts: u32,
     pub auto_restart: bool,
+    /// Names that must be `Running` before this service is started at boot.
+    /// Unused slots are `None`.
+    pub depends_on: [Option<&'static str>; MAX_DEPS],
+}
+
+/// True when every dependency named in `deps` is present in `running`.
+///
+/// Pure so the boot ordering can be tested on the host. `None` slots are
+/// ignored, which is why `MAX_DEPS` can exceed the number a service declares.
+fn deps_satisfied(deps: &[Option<&'static str>], running: &[&str]) -> bool {
+    deps.iter()
+        .flatten()
+        .all(|dep| running.iter().any(|name| name == dep))
 }
 
 const MAX_SERVICES: usize = 32;
@@ -61,10 +77,24 @@ pub fn init_system_start() -> bool {
             if services.count == 0 {
                 break;
             }
+            // Services already running this pass are the ones a dependent may
+            // start against. A dependent whose prerequisite has not started yet
+            // waits for the next pass of the outer loop.
+            let mut running: alloc::vec::Vec<&'static str> = alloc::vec::Vec::new();
+            for i in 0..services.count {
+                if let Some(ref svc) = services.services[i] {
+                    if svc.state == ServiceState::Running && svc.pid != 0 {
+                        running.push(svc.name);
+                    }
+                }
+            }
             let mut pending = alloc::vec::Vec::new();
             for i in 0..services.count {
                 if let Some(ref svc) = services.services[i] {
-                    if svc.state == ServiceState::Running && svc.pid == 0 {
+                    if svc.state == ServiceState::Running
+                        && svc.pid == 0
+                        && deps_satisfied(&svc.depends_on, &running)
+                    {
                         pending.push((i, svc.entry, svc.stack_size, svc.name));
                     }
                 }
@@ -117,8 +147,29 @@ pub fn service_register(
     gid: u32,
     auto_restart: bool,
 ) -> bool {
+    service_register_with_deps(name, entry, stack_size, uid, gid, auto_restart, &[])
+}
+
+/// Register a service together with the services it depends on.
+///
+/// Dependencies are consulted by [`init_system_start`]: a service starts only
+/// once every name it lists is already running. This is not a general graph —
+/// a cycle simply means neither member ever starts, and the boot loop stops
+/// when nothing else can start.
+pub fn service_register_with_deps(
+    name: &'static str,
+    entry: fn(),
+    stack_size: usize,
+    uid: u32,
+    gid: u32,
+    auto_restart: bool,
+    deps: &[&'static str],
+) -> bool {
     let mut services = SERVICES.lock();
     if services.count >= MAX_SERVICES {
+        return false;
+    }
+    if deps.len() > MAX_DEPS {
         return false;
     }
     for i in 0..services.count {
@@ -127,6 +178,10 @@ pub fn service_register(
                 return false;
             }
         }
+    }
+    let mut depends_on = [None; MAX_DEPS];
+    for (slot, dep) in depends_on.iter_mut().zip(deps.iter()) {
+        *slot = Some(*dep);
     }
     let idx = services.count;
     services.services[idx] = Some(Service {
@@ -140,6 +195,7 @@ pub fn service_register(
         restart_count: 0,
         max_restarts: 5,
         auto_restart,
+        depends_on,
     });
     services.count += 1;
     true
@@ -563,5 +619,31 @@ fn execute_command(cmdline: &str) {
             s.write_str(parts[0]);
             s.write_str("\n");
         }
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::{deps_satisfied, MAX_DEPS};
+
+    #[test]
+    fn a_service_without_dependencies_starts_immediately() {
+        let deps = [None; MAX_DEPS];
+        assert!(deps_satisfied(&deps, &[]));
+    }
+
+    #[test]
+    fn a_missing_dependency_blocks_the_start() {
+        let deps = [Some("db"), None, None, None];
+        assert!(!deps_satisfied(&deps, &[]));
+        assert!(!deps_satisfied(&deps, &["net"]));
+    }
+
+    #[test]
+    fn all_dependencies_present_is_satisfied() {
+        let deps = [Some("db"), Some("net"), None, None];
+        assert!(deps_satisfied(&deps, &["db", "net"]));
+        assert!(deps_satisfied(&deps, &["net", "db", "other"]));
+        assert!(!deps_satisfied(&deps, &["db"]));
     }
 }

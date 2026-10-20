@@ -57,9 +57,9 @@ smoke test that requires the *ordinary* kernel to reach the shell prompt
 - **Container story** — the six namespace types exist and work, and cgroup
   `pids` and `memory` limits are now enforced; there is still no OCI runtime, no
   `cpu`/`io` enforcement, and no overlayfs.
-- **Service management** — the init system supervises and restarts services, but
-  there is no dependency ordering, no health checking beyond "still running",
-  and no declarative manifests.
+- **Service management** — the init system supervises and restarts services and
+  now starts them in dependency order (`service_register_with_deps`); there is
+  still no health checking beyond "still running" and no declarative manifests.
 - **Shell** — ~90 builtins, no job control, no pipelines, no redirection.
 
 ## Known broken
