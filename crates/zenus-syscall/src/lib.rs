@@ -113,14 +113,18 @@ mod host_tests {
             PrctlSupport::Name
         );
 
-        // Options with nothing to honour, kept as no-ops.
-        assert_eq!(
-            prctl_support(crate::syscall::PR_SET_PDEATHSIG),
-            PrctlSupport::NoOp
-        );
+        // No capability set exists, so KEEPCAPS has nothing to honour and is a
+        // truthful no-op.
         assert_eq!(
             prctl_support(crate::syscall::PR_SET_KEEPCAPS),
             PrctlSupport::NoOp
+        );
+
+        // PDEATHSIG promises a signal on parent death that Zenus never sends;
+        // it must fail rather than be accepted as a no-op.
+        assert_eq!(
+            prctl_support(crate::syscall::PR_SET_PDEATHSIG),
+            PrctlSupport::Unsupported
         );
 
         // Anything else is unsupported, not silently accepted.

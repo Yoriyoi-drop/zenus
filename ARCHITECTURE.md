@@ -140,8 +140,10 @@ userspace workspace.
 `prctl` classifies every option. `PR_SET_NAME`/`PR_GET_NAME` work;
 `PR_SET_NO_NEW_PRIVS`/`PR_GET_NO_NEW_PRIVS` are honoured for real (the flag is
 stored on the task and inherited by children); `PR_SET_SECCOMP` is *not*
-implemented and returns `-EINVAL` rather than claiming success. Capabilities
-themselves still do not exist, so `PR_SET/GET_KEEPCAPS` remain accepted no-ops.
+implemented and returns `-EINVAL` rather than claiming success, and
+`PR_SET_PDEATHSIG` also returns `-EINVAL` because the parent-death signal is
+never delivered. Capabilities themselves still do not exist, so
+`PR_SET/GET_KEEPCAPS` remain accepted no-ops.
 
 ## Layer 7 — Console and diagnostics (`zenus-console`)
 
@@ -185,8 +187,6 @@ invariant documented next to the code that enforces it:
 
 1. **Stack/frame layout** — `scheduler::frame_base`, `STACK_GUARD`.
 2. **Interrupt vectors** — `zenus_arch::interrupts::{TIMER,SERIAL,NIC,SPURIOUS}_VECTOR`
-   and `RESERVED_VECTORS`, used by the IDT and by the drivers — though
-   `apps::entry` still passes the timer vector to `enable_tick_source` as a
-   literal `32`, which is worth fixing.
+   and `RESERVED_VECTORS`, used by the IDT and by the drivers.
 3. **Bounds on parsed input** — every packet/structure decoder returns `None`
    rather than indexing past the buffer.

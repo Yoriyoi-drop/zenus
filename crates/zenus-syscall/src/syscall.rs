@@ -3588,9 +3588,13 @@ pub const PR_GET_NO_NEW_PRIVS: u64 = 39;
 pub fn prctl_support(option: u64) -> PrctlSupport {
     match option {
         PR_SET_NAME | PR_GET_NAME => PrctlSupport::Name,
-        PR_SET_PDEATHSIG | PR_GET_PDEATHSIG | PR_SET_KEEPCAPS | PR_GET_KEEPCAPS => {
-            PrctlSupport::NoOp
-        }
+        // There is no capability set, so there is nothing to keep or read:
+        // accepting these as no-ops is truthful.
+        PR_SET_KEEPCAPS | PR_GET_KEEPCAPS => PrctlSupport::NoOp,
+        // `PR_SET_PDEATHSIG` promises to signal this task when its parent dies,
+        // and Zenus does not do that. Accepting it would be the same silent
+        // lie as the old blanket success, so it is unsupported.
+        PR_SET_PDEATHSIG | PR_GET_PDEATHSIG => PrctlSupport::Unsupported,
         PR_SET_SECCOMP => PrctlSupport::Unsupported,
         PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => PrctlSupport::Implemented,
         _ => PrctlSupport::Unsupported,

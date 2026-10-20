@@ -50,11 +50,13 @@ than by the hardware:
 
 ### 2. No privilege separation beyond uid/gid
 
-- No capabilities. `prctl` answers `-EINVAL` for `PR_SET_SECCOMP`,
-  `PR_SET_NO_NEW_PRIVS`, `PR_SET_MEMBARRIER` and friends — it used to return
-  success and do nothing, which let a program believe it was sandboxed.
-  `PR_SET_NAME`/`PR_GET_NAME` are implemented; `PR_SET_PDEATHSIG` and
-  `PR_SET_KEEPCAPS` are accepted as documented no-ops.
+- No capabilities. `prctl` classifies every option: `PR_SET_SECCOMP` answers
+  `-EINVAL` (seccomp does not exist), `PR_SET_PDEATHSIG`/`PR_GET_PDEATHSIG`
+  answer `-EINVAL` (no parent-death signal is delivered), and unknown options
+  fail too. `PR_SET_NO_NEW_PRIVS`/`PR_GET_NO_NEW_PRIVS` are honoured for real
+  (the flag is stored and inherited by children). `PR_SET_NAME`/`PR_GET_NAME`
+  work; `PR_SET_KEEPCAPS`/`PR_GET_KEEPCAPS` are accepted as no-ops because
+  there is no capability set to keep.
 - `root` (euid 0) bypasses every permission check.
 - No LSM, no audit log of security decisions. `syslog` and the error-code
   counters record *events*, not *decisions*.

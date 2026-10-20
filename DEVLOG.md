@@ -3323,3 +3323,16 @@ Yang dikerjakan:
 - Setelah perubahan: `make fuzz-smoke` melaporkan ringkasan (2000 kasus, 0 crash, 144 new paths, 172 edges) dan `[FUZZ] EXIT code=0`.
 
 Catatan: perubahan ini juga membuat `make fuzz-coverage`/`fuzz-regression` andal di CI.
+
+## BUG-049 - PR_SET_PDEATHSIG tidak lagi diterima sebagai no-op; dokumentasi prctl disinkronkan
+
+Status: sudah di-fix + host-tested + kernel build hijau.
+
+Apa yang salah: `prctl_support` mengklasifikasikan `PR_SET_PDEATHSIG`/`PR_GET_PDEATHSIG` sebagai `NoOp`, padahal opsi itu menjanjikan sinyal saat parent meninggal - dan Zenus tidak pernah mengirim sinyal itu. Menerimanya sebagai no-op adalah lie yang sama dengan blanket-success lama. Selain itu SECURITY.md/ARCHITECTURE.md masih menyebut `PR_SET_NO_NEW_PRIVS` sebagai EINVAL/no-op (sudah diimplementasikan di BUG-043), dan ARCHITECTURE.md masih menyebut literal timer `32` yang sudah diganti `TIMER_VECTOR`.
+
+Yang dikerjakan:
+- `PR_SET_PDEATHSIG`/`PR_GET_PDEATHSIG` kini `Unsupported` (gagal `-EINVAL`); `PR_SET/GET_KEEPCAPS` tetap `NoOp` karena memang tidak ada capability set untuk dijaga.
+- Test `prctl_does_not_claim_to_enforce_security` diperbarui.
+- SECURITY.md dan ARCHITECTURE.md disinkronkan: NO_NEW_PRIVS dihormati, SECCOMP dan PDEATHSIG gagal jujur, KEEPCAPS no-op, catatan literal timer dihapus.
+
+Verifikasi: cargo test -p zenus-syscall (24 hijau) dan cargo build --target x86_64-unknown-none lolos.
