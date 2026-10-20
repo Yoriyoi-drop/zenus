@@ -15,6 +15,32 @@
   enforcement points are its only callers. `cpu`/`io` remain advertised but
   unenforced and the hierarchy is flat.
 
+### Fixed
+- **Dead task-teardown machinery removed (BUG-042).** `task_exit()`,
+  `TERMINATED_STACKS` and `reap_terminated_stacks()` were unreachable: `sys_exit`
+  uses `exit_current_task()` and `reap_task()` frees the kernel stack directly.
+  The deferred-free path and the unreachable `task_exit` are gone, so teardown
+  has exactly two consistent paths. The `meminfo` `Used` line also gained host
+  tests (`zenus-mem/src/used_memory_tests.rs`).
+- **`prctl(PR_SET_NO_NEW_PRIVS)` is honoured (BUG-043).** The flag is stored on
+  the task, inherited by `clone_task`, and returned by `PR_GET_NO_NEW_PRIVS`.
+  `PR_SET_SECCOMP` still fails with `-EINVAL` because seccomp does not exist —
+  the kernel no longer claims otherwise.
+- **`io_stats()` reports the real read/write split (BUG-044).** It returned
+  `(total, 0, 0)`; reads and writes are now counted separately and
+  `total == reads + writes`.
+- **Fuzz minimisation uses a real crash oracle (BUG-045).** `minimize()`
+  accepted any non-empty candidate and shrank every crash to one byte without
+  reproducing it; the campaign now calls `minimize_with` with
+  `execute_input(candidate) == Crash`, and the predicate-free helpers are gone.
+- **Init starts services in dependency order (BUG-046).**
+  `service_register_with_deps` records prerequisites and `init_system_start`
+  starts a service only once every dependency is running.
+- **Eleven silent-success syscall stubs return `-ENOSYS` (BUG-047).**
+  `ftruncate`, `fchownat`, `setrlimit`, `fchdir`, `utimensat`, `setpgid`,
+  `setsockopt`, `nice` and the three `sched_*` calls no longer report success
+  without doing anything.
+
 ### Testing
 - **A boot smoke test, and a `test-quiet` that can actually fail.** `make smoke`
   builds the ordinary kernel's ISO, boots it headless under `-cpu max`, and fails
