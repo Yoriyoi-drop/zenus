@@ -493,9 +493,8 @@ pub fn create_dir_in_ns(ns_id: zenus_ns::NsId, path: &str) -> bool {
 
 /// Create a symbolic link at `path` pointing at `target`.
 ///
-/// This does not follow `target` (and the generic resolver does not follow
-/// symlinks yet): the link is created as an ordinary node whose type is
-/// `Symlink`, which `readlink` can read back.
+/// `target` is stored verbatim and not validated: a link may dangle, and it
+/// is resolved (or refused) at lookup time by `open_in_ns`.
 pub fn symlink(path: &str, target: &str) -> bool {
     symlink_in_ns(zenus_ns::NS_ROOT, path, target)
 }
@@ -514,7 +513,7 @@ pub fn symlink_in_ns(ns_id: zenus_ns::NsId, path: &str, target: &str) -> bool {
 
 /// Read a symbolic link without following it.
 pub fn readlink(path: &str, buf: &mut [u8]) -> Option<usize> {
-    let node = open(path)?;
+    let node = open_in_ns_nofollow(zenus_ns::NS_ROOT, path)?;
     node.fs.readlink(node.inode, buf)
 }
 
@@ -625,6 +624,25 @@ pub fn open(path: &str) -> Option<VfsNode> {
 }
 
 pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
+    open_in_ns_depth(ns_id, path, MAX_SYMLINK_DEPTH, true)
+}
+
+/// Resolve `path` but do not follow a symbolic link in its *final* component.
+///
+/// `readlink` needs this. With plain `open_in_ns` it would be handed the
+/// link's target and then fail, because a regular file is not a link —
+/// so `readlinkat` on a symlink would report `EINVAL` for every link that
+/// actually resolved.
+pub fn open_in_ns_nofollow(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
+    open_in_ns_depth(ns_id, path, MAX_SYMLINK_DEPTH, false)
+}
+
+fn open_in_ns_depth(
+    ns_id: zenus_ns::NsId,
+    path: &str,
+    depth: u8,
+    follow_final: bool,
+) -> Option<VfsNode> {
     if path == "/" || path.is_empty() {
         return root().map(|r| VfsNode {
             fs: r.fs,
@@ -693,20 +711,85 @@ pub fn open_in_ns(ns_id: zenus_ns::NsId, path: &str) -> Option<VfsNode> {
 
     for i in 0..seg_count {
         let part = path_segments[i];
-        match current.fs.lookup(current.inode, part) {
-            Some(inode) => {
-                current = VfsNode {
-                    fs: current.fs,
-                    inode,
-                    read_only,
-                };
-            }
-            None => {
+        let inode = match current.fs.lookup(current.inode, part) {
+            Some(inode) => inode,
+            None => return None,
+        };
+
+        // A symlink in the middle of a path is always followed; the final one
+        // only when the caller wants it (`open`, not `readlink`).
+        let is_final = i + 1 == seg_count;
+        if current.fs.stat(inode).file_type == FileType::Symlink && (follow_final || !is_final) {
+            if depth == 0 {
+                // Either a loop or a chain longer than MAX_SYMLINK_DEPTH.
                 return None;
             }
+            let mut target_buf = [0u8; MAX_RESOLVED_PATH];
+            let n = current.fs.readlink(inode, &mut target_buf)?;
+            let target = core::str::from_utf8(&target_buf[..n]).ok()?;
+            let mut joined_buf = [0u8; MAX_RESOLVED_PATH];
+            let joined = join_link_target(&mut joined_buf, mount_prefix, &path_segments[..i], target)?;
+            // Restart from the top: the target may cross into another mount,
+            // and re-resolving keeps one code path for absolute and relative
+            // links instead of two half-correct ones.
+            return open_in_ns_depth(ns_id, joined, depth - 1, follow_final);
         }
+
+        current = VfsNode {
+            fs: current.fs,
+            inode,
+            read_only,
+        };
     }
     Some(current)
+}
+
+/// Build the absolute path a relative symlink target names.
+///
+/// `prefix` holds the components already resolved in the mount `mount_prefix`
+/// was found for, so a relative target is relative to `mount_prefix/prefix`.
+/// Returns `None` when the result would not fit: truncating would silently
+/// resolve a different file, which is the bug MAX_PATH_SEGMENTS exists to
+/// avoid.
+fn join_link_target<'a>(
+    buf: &'a mut [u8],
+    mount_prefix: &str,
+    prefix: &[&str],
+    target: &str,
+) -> Option<&'a str> {
+    if target.is_empty() {
+        // POSIX: an empty symlink target is ENOENT, not "the current dir".
+        return None;
+    }
+
+    let mut len = 0usize;
+    if !target.starts_with('/') {
+        push_byte(buf, &mut len, b'/')?;
+        for part in mount_prefix.split('/').chain(prefix.iter().copied()) {
+            if part.is_empty() {
+                continue;
+            }
+            for b in part.as_bytes() {
+                push_byte(buf, &mut len, *b)?;
+            }
+            push_byte(buf, &mut len, b'/')?;
+        }
+    }
+
+    for b in target.as_bytes() {
+        push_byte(buf, &mut len, *b)?;
+    }
+
+    core::str::from_utf8(&buf[..len]).ok()
+}
+
+fn push_byte(buf: &mut [u8], len: &mut usize, byte: u8) -> Option<()> {
+    if *len >= buf.len() {
+        return None;
+    }
+    buf[*len] = byte;
+    *len += 1;
+    Some(())
 }
 
 pub const S_IRUSR: u16 = 0o400;
@@ -726,6 +809,20 @@ pub const S_IFDIR: u16 = 0x4000;
 /// turns "the file I asked for" into "some other file", which is a path
 /// confinement bypass rather than a limit.
 pub const MAX_PATH_SEGMENTS: usize = 32;
+
+/// How many symbolic links a single lookup will follow.
+///
+/// A loop (a -> b -> a) is not detectable cheaply, so it is bounded instead:
+/// the eighth expansion still resolves, the ninth is refused with `None`
+/// rather than recursing until the kernel stack runs out.
+pub const MAX_SYMLINK_DEPTH: u8 = 8;
+
+/// Longest path produced while expanding a symlink.
+///
+/// Syscall paths are capped at 256 bytes, so a link that expands past that
+/// could not be opened by name anyway; refusing beats truncating, for the
+/// same reason MAX_PATH_SEGMENTS refuses instead of dropping components.
+pub const MAX_RESOLVED_PATH: usize = 256;
 
 pub const DEFAULT_FILE_MODE: u16 = 0x81A4;
 pub const DEFAULT_DIR_MODE: u16 = 0x41ED;

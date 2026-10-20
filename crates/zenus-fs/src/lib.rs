@@ -1905,6 +1905,100 @@ mod host_tests {
         );
     }
 
+    // ── symlink resolution ────────────────────────────────────────────────
+
+    /// `open` must follow a symlink, while `readlink` must not: the two share
+    /// a resolver, so getting one right used to break the other.
+    #[test]
+    fn the_resolver_follows_a_symlink_but_readlink_does_not() {
+        let _serial = serial();
+        fresh_fs();
+
+        assert!(vfs::create_file("/target"));
+        let target = vfs::open("/target").expect("/target exists");
+        assert!(vfs::symlink("/link", "/target"));
+
+        let followed = vfs::open("/link").expect("a link to an existing file resolves");
+        assert_eq!(followed.inode, target.inode, "open follows the link");
+        assert_eq!(
+            followed.fs.stat(followed.inode).file_type,
+            vfs::FileType::File
+        );
+
+        // readlink sees the link itself, not the target it names.
+        let mut buf = [0u8; 64];
+        let n = vfs::readlink("/link", &mut buf).expect("readlink reads the link");
+        assert_eq!(&buf[..n], b"/target");
+
+        // ...and the no-follow resolver hands back the symlink node.
+        let raw = vfs::open_in_ns_nofollow(zenus_ns::NS_ROOT, "/link").expect("the link node");
+        assert_eq!(
+            raw.fs.stat(raw.inode).file_type,
+            vfs::FileType::Symlink
+        );
+    }
+
+    /// A relative target is relative to the directory holding the link, not to
+    /// the namespace root — the distinction a naive "just restart on target"
+    /// implementation gets wrong.
+    #[test]
+    fn a_relative_symlink_resolves_against_its_own_directory() {
+        let _serial = serial();
+        fresh_fs();
+
+        assert!(vfs::create_dir("/dir"));
+        assert!(vfs::create_file("/dir/real"));
+        let real = vfs::open("/dir/real").expect("/dir/real exists");
+        assert!(vfs::symlink("/dir/link", "real"));
+
+        let followed = vfs::open("/dir/link").expect("relative link resolves");
+        assert_eq!(followed.inode, real.inode);
+
+        // A same-named file at the root must not be what the link reaches.
+        assert!(vfs::create_file("/real"));
+        let still = vfs::open("/dir/link").expect("still resolves");
+        assert_eq!(still.inode, real.inode, "relative, not rooted at /");
+    }
+
+    /// An intermediate component that is a link is followed as well.
+    #[test]
+    fn a_symlinked_directory_component_is_traversed() {
+        let _serial = serial();
+        fresh_fs();
+
+        assert!(vfs::create_dir("/dir"));
+        assert!(vfs::create_file("/dir/real"));
+        let real = vfs::open("/dir/real").expect("/dir/real exists");
+        assert!(vfs::symlink("/dirlink", "/dir"));
+
+        let through = vfs::open("/dirlink/real").expect("the link is traversed");
+        assert_eq!(through.inode, real.inode);
+    }
+
+    /// Dangling links and loops must fail, not recurse forever.
+    #[test]
+    fn dangling_and_looping_symlinks_are_refused() {
+        let _serial = serial();
+        fresh_fs();
+
+        assert!(vfs::symlink("/dangling", "/nowhere"));
+        assert!(
+            vfs::open("/dangling").is_none(),
+            "a link to a missing file does not resolve"
+        );
+
+        assert!(vfs::symlink("/loop_a", "/loop_b"));
+        assert!(vfs::symlink("/loop_b", "/loop_a"));
+        assert!(
+            vfs::open("/loop_a").is_none(),
+            "a two-link cycle must be refused, not expanded until the stack dies"
+        );
+
+        // A chain longer than the budget is refused too.
+        assert!(vfs::symlink("/self", "/self"));
+        assert!(vfs::open("/self").is_none());
+    }
+
     // ── .zpk on-disk ABI ──────────────────────────────────────────────────
 
     /// The `.zpk` reader used to cast byte offsets to `*const ZpkHeader` /
