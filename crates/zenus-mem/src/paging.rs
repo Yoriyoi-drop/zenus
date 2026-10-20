@@ -658,7 +658,7 @@ fn mark_freed(cr3_phys: u64) {
 /// - Must not be called on the currently active address space on THIS CPU (unless
 ///   it is the kernel's). Automatically switches to kernel CR3 if the target matches.
 /// - SMP: caller must ensure no other CPU has this CR3 loaded. Since tasks are pinned
-///   to CPUs and destroy_address_space is called from task_exit() on the task's own CPU,
+///   to CPUs and destroy_address_space is called from exit_current_task() on the task's own CPU,
 ///   this is safe. No cross-CPU TLB shootdown is performed.
 pub fn destroy_address_space(cr3_raw: u64) {
     let current_cr3 = get_level4_addr_raw() & !0xFFF;

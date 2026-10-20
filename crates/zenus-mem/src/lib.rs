@@ -16,6 +16,8 @@ pub mod paging;
 mod plan_tests;
 #[cfg(test)]
 mod reserve_tests;
+#[cfg(test)]
+mod used_memory_tests;
 pub mod vma;
 pub use vma::VmaTable;
 

@@ -69,8 +69,9 @@ smoke test that requires the *ordinary* kernel to reach the shell prompt
   up: `Total` is what survived the reservations and `Free` is every frame
   `alloc_frame` can still serve. `Used` stays 0, which is correct at the two
   points it is sampled — before anything is mapped, and after everything is
-  freed — but nothing samples it while frames are actually outstanding, so that
-  one line still has no test behind it.
+  freed. A host test in `zenus-mem/src/used_memory_tests.rs` now exercises the
+  `used_memory` accounting across alloc/free, so the line has a test behind it
+  (the number itself was always correct when sampled live).
 - **The frame allocator's second pass is fixed.** It used to advance
   `regions[i].base` without shrinking `length`, so a region's claimed end grew by
   a page every time it served one and the first pass eventually handed out memory
@@ -83,6 +84,12 @@ smoke test that requires the *ordinary* kernel to reach the shell prompt
   filled by `task_exit()`, which no syscall reaches. `kill_task` and `reap_task`
   each free task stacks on their own path, with nothing keeping those paths
   consistent.
+
+  **Fixed (BUG-042):** `task_exit()`, `TERMINATED_STACKS`, and
+  `reap_terminated_stacks()` were dead code — `sys_exit` uses
+  `exit_current_task()` and `reap_task()` frees the kernel stack directly. The
+  unreachable path and its deferred-free machinery were removed; the teardown
+  paths are now `exit_current_task` → `reap_task` and `kill_task` only.
 
 ## Not real yet
 

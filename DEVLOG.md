@@ -3221,3 +3221,17 @@ dan `SECURITY.md` supaya tidak jadi "view" generasi berikutnya.
 
 
 
+
+## BUG-042 - hapus dead code task_exit / TERMINATED_STACKS / reap_terminated_stacks dan test used_memory
+
+Status: sudah di-fix + host-tested (4 test baru) + kernel build hijau. Menyelesaikan dua item di ROADMAP.md "Known broken".
+
+Apa yang salah:
+1. meminfo Used tidak punya test. Used dibaca dari FrameAllocator::used_memory(), tapi tidak ada test yang mengunci invariant: naik PAGE_SIZE per alokasi, nol setelah semua frame dibebaskan.
+2. reap_terminated_stacks() tidak terjangkau. TERMINATED_STACKS hanya diisi task_exit() yang tidak dipanggil syscall mana pun (sys_exit pakai exit_current_task). task_exit, TERMINATED_STACKS, reap_terminated_stacks adalah dead code; teardown task punya dua jalur yang tidak konsisten.
+
+Yang dikerjakan:
+- Test host baru crates/zenus-mem/src/used_memory_tests.rs (4 test) men-test used_memory dan free_frames_count terhadap PAGE_SIZE*n.
+- Hapus dead code di scheduler.rs: TerminatedStack, TerminatedStackList, TERMINATED_STACKS, reap_terminated_stacks, task_exit. Komentar di reap_task dan paging.rs diperbarui ke exit_current_task. Sekarang hanya dua jalur teardown: exit_current_task -> reap_task, dan kill_task.
+
+Verifikasi: cargo test -p zenus-mem (45 hijau) dan cargo build --target x86_64-unknown-none (hanya warning pra-eksisting) lolos.

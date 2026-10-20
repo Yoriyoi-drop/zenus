@@ -2135,41 +2135,6 @@ pub fn ap_idle() -> ! {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct TerminatedStack {
-    pub base: u64,
-    pub size: usize,
-}
-
-struct TerminatedStackList {
-    stacks: [Option<TerminatedStack>; 64],
-    count: usize,
-}
-
-const EMPTY_TERM_STACK: Option<TerminatedStack> = None;
-const fn empty_term_array() -> [Option<TerminatedStack>; 64] {
-    [EMPTY_TERM_STACK; 64]
-}
-
-static TERMINATED_STACKS: zenus_sync::spinlock::SpinLock<TerminatedStackList> =
-    zenus_sync::spinlock::SpinLock::new(TerminatedStackList {
-        stacks: empty_term_array(),
-        count: 0,
-    });
-
-pub fn reap_terminated_stacks() {
-    let mut list = TERMINATED_STACKS.lock();
-    for i in 0..list.count {
-        if let Some(ts) = list.stacks[i].take() {
-            if let Ok(layout) = core::alloc::Layout::from_size_align(ts.size, 16) {
-                unsafe {
-                    alloc::alloc::dealloc(ts.base as *mut u8, layout);
-                }
-            }
-        }
-    }
-    list.count = 0;
-}
 
 /// Terminate the current task because it faulted in user mode.
 ///
@@ -2322,7 +2287,7 @@ pub fn reap_task(task_id: u64) {
             if cr3 != 0 {
                 zenus_mem::paging::destroy_address_space(cr3);
             }
-            // Free the task's kernel stack directly (NOT via TERMINATED_STACKS to avoid double-free)
+            // Free the task's kernel stack directly.
             if stack_alloc != 0 && stack_size > 0 {
                 if let Ok(layout) = core::alloc::Layout::from_size_align(stack_size as usize, 16) {
                     unsafe {
@@ -2352,59 +2317,6 @@ pub fn check_child_exit_notify() -> Option<(u64, u64)> {
 pub fn reap_zombies_for_parent(parent_pid: u64) {
     let mut zombies = ZOMBIE_LIST.lock();
     zombies.reap_all_for_parent(parent_pid);
-}
-
-pub fn task_exit() {
-    let cpu = current_cpu();
-    let current = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
-    let mut tasks = TASKS.lock();
-    let (stack_alloc, stack_size, task_cpu, task_cr3, task_pid_ns, task_id) = {
-        let task = &tasks.tasks[current as usize];
-        (
-            task.as_ref().map(|t| t.stack_alloc),
-            task.as_ref().map(|t| t.stack_size),
-            task.as_ref().map(|t| t.cpu),
-            task.as_ref().map(|t| t.cr3),
-            task.as_ref().map(|t| t.pid_ns),
-            task.as_ref().map(|t| t.id),
-        )
-    };
-    tasks.mark_freed(current as usize);
-    tasks.tasks[current as usize] = None;
-    TASK_COUNT.fetch_sub(1, Ordering::Release);
-    drop(tasks);
-    if let (Some(sa), Some(ss), Some(tc)) = (stack_alloc, stack_size, task_cpu) {
-        if sa != 0 && ss > 0 {
-            let mut list = TERMINATED_STACKS.lock();
-            let idx = list.count;
-            if idx < 64 {
-                list.stacks[idx] = Some(TerminatedStack {
-                    base: sa,
-                    size: ss as usize,
-                });
-                list.count = idx + 1;
-            }
-            drop(list);
-        }
-        CPU_TASK_COUNT[tc as usize].fetch_sub(1, Ordering::SeqCst);
-    }
-    if let (Some(pid_ns), Some(tid)) = (task_pid_ns, task_id) {
-        if pid_ns != 0 {
-            zenus_ns::pid::unregister_task(pid_ns, tid);
-        }
-    }
-    if let Some(tid) = task_id {
-        zenus_fs::cgroup::detach_task(tid);
-    }
-    // Free the user address space
-    if let Some(cr3) = task_cr3 {
-        if cr3 != 0 {
-            zenus_mem::paging::destroy_address_space(cr3);
-        }
-    }
-    loop {
-        x86_64::instructions::hlt();
-    }
 }
 
 pub fn kill_task(id: u64) -> bool {
