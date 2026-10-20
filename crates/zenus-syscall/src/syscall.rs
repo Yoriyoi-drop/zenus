@@ -751,11 +751,13 @@ fn sys_lseek(fd: u64, offset: u64, whence: u64, _a4: u64, _a5: u64, _a6: u64) ->
 }
 
 fn sys_ioctl(fd: u64, request: u64, arg: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    // No ioctl request is implemented. Returning 0 for every request told the
+    // caller the operation succeeded while writing nothing (for example
+    // `TIOCGWINSZ` left the caller's window-size buffer untouched). An unknown
+    // request must fail with `-ENOTTY`, not pretend.
+    zenus_console::kdebug!("sys_ioctl fd={} req=0x{:x} arg=0x{:x}", fd, request, arg);
     match fd_stat(fd) {
-        Some(_) => {
-            zenus_console::kdebug!("sys_ioctl fd={} req=0x{:x} arg=0x{:x}", fd, request, arg);
-            0
-        }
+        Some(_) => -25i64 as u64, // -ENOTTY
         None => -1i64 as u64,
     }
 }

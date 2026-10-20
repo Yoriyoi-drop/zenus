@@ -3352,3 +3352,15 @@ Yang dikerjakan:
 Catatan: `sys_getsockopt` masih mengembalikan nilai nol (bukan klaim bahwa opsi diterapkan), dan `sys_exit`/`sys_sched_yield`/`sys_shutdown` memang melakukan pekerjaannya lalu return 0 - ketiganya bukan stub.
 
 Verifikasi: cargo test -p zenus-syscall (24 hijau) dan cargo build --target x86_64-unknown-none lolos.
+
+## BUG-051 - sys_ioctl tidak lagi mengembalikan 0 untuk request yang tidak dikenal
+
+Status: sudah di-fix + kernel build hijau (host test suite tetap 24 hijau).
+
+Apa yang salah: `sys_ioctl` mengembalikan 0 untuk setiap request pada fd yang valid, tanpa menulis apa pun. `TIOCGWINSZ` misalnya meninggalkan buffer ukuran window milik caller apa adanya, tapi caller diberi tahu "berhasil". Ini pola silent-success yang sama dengan BUG-047/BUG-050.
+
+Yang dikerjakan:
+- Request apa pun pada fd valid kini mengembalikan `-25` (ENOTTY); fd tidak valid tetap `-1`.
+- Tidak ada pemanggil ioctl in-tree (userspace/zutils/apps), jadi tidak ada yang rusak.
+
+Verifikasi: cargo test -p zenus-syscall (24 hijau) dan cargo build --target x86_64-unknown-none lolos.
