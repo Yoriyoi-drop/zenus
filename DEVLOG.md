@@ -3252,3 +3252,17 @@ Yang dikerjakan:
 - ARCHITECTURE.md dan ROADMAP.md diperbarui agar tidak lagi menyebut prctl sebagai no-op total.
 
 Verifikasi: cargo test -p zenus-sched -p zenus-syscall (23 hijau) dan cargo build --target x86_64-unknown-none lolos.
+
+## BUG-044 - io_stats() melaporkan split read/write yang sebenarnya
+
+Status: sudah di-fix + host-tested + kernel build hijau. Menghapus salah satu shallow spot di AGENTS.md.
+
+Apa yang salah: `io_scheduler::io_stats()` mengembalikan `(total, 0, 0)` - total dihitung, tapi dua angka terakhir hardcoded nol. Komentar API-nya bahkan menyuruh caller untuk tidak membacanya sebagai breakdown, jadi alat diagnosa tidak bisa membedakan beban read-heavy dari write-heavy.
+
+Yang dikerjakan:
+- `IoScheduler` sekarang punya `reads` dan `writes`, ditambah saat `io_submit_read`/`io_submit_write` berhasil.
+- `io_stats()` mengembalikan `(total, reads, writes)` yang nyata; `total == reads + writes`.
+- Test `io_scheduler_counts_only_completed_io` diperkuat: write menambah `writes` (bukan `reads`), read menambah `reads` (bukan `writes`), dan `total` sama dengan jumlah keduanya.
+- Bullet shallow spot di AGENTS.md dihapus.
+
+Verifikasi: cargo test -p zenus-fs (77 hijau) dan cargo build --target x86_64-unknown-none lolos.

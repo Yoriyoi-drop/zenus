@@ -301,16 +301,26 @@ mod host_tests {
         let dev = fake_device();
         wipe_fake_device();
 
-        let (before, reads, writes) = crate::io_scheduler::io_stats();
+        let (before, before_reads, before_writes) = crate::io_scheduler::io_stats();
 
-        // A completed write *through the scheduler* is counted. (Calling
-        // `bc_write` directly was the bug in this test: it never touches
-        // `total_ios`.)
+        // A completed write *through the scheduler* is counted as a write.
+        // (Calling `bc_write` directly was the bug in this test: it never
+        // touches `total_ios`.)
         assert!(crate::io_scheduler::io_submit_write(
             dev as u8, 5, &[0x42; 4]
         ));
-        let (after_write, _, _) = crate::io_scheduler::io_stats();
+        let (after_write, after_write_reads, after_write_writes) =
+            crate::io_scheduler::io_stats();
         assert_eq!(after_write, before + 1, "one completed IO must be counted");
+        assert_eq!(
+            after_write_writes,
+            before_writes + 1,
+            "the write must be counted as a write"
+        );
+        assert_eq!(
+            after_write_reads, before_reads,
+            "a write must not be counted as a read"
+        );
 
         // A failing read is not counted.
         let mut buf = [0u8; 4];
@@ -319,13 +329,25 @@ mod host_tests {
         ));
         assert_eq!(crate::io_scheduler::io_stats().0, after_write);
 
-        // A succeeding one is.
+        // A succeeding one is, and it is counted as a read.
         assert!(crate::io_scheduler::io_submit_read(dev as u8, 5, &mut buf));
         assert_eq!(&buf, &[0x42; 4]);
-        assert_eq!(crate::io_scheduler::io_stats().0, after_write + 1);
-
-        // The read/write split is not tracked; the API says so.
-        assert_eq!((reads, writes), (0, 0));
+        let (final_total, final_reads, final_writes) = crate::io_scheduler::io_stats();
+        assert_eq!(final_total, after_write + 1);
+        assert_eq!(
+            final_reads,
+            after_write_reads + 1,
+            "the read must be counted as a read"
+        );
+        assert_eq!(
+            final_writes, after_write_writes,
+            "a read must not be counted as a write"
+        );
+        assert_eq!(
+            final_total,
+            final_reads + final_writes,
+            "total is exactly the sum of the split"
+        );
     }
 
     // ── journal over the fake device ──────────────────────────────────────

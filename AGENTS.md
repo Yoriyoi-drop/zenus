@@ -109,7 +109,6 @@ Do not assume these work; read the code first.
 - `zenus-fuzz`'s `minimizer::minimize` uses a predicate that cannot reproduce a
   crash (it only refuses to shrink to nothing); use `minimize_with` with a real
   oracle.
-- `io_scheduler::io_stats()` returns a total and two hardcoded zeros.
 - The ZENUS_SSH keystream has ~2 bits of entropy per byte (pinned by a test).
 
 ## Docs
