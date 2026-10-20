@@ -3441,11 +3441,10 @@ fn sys_linkat(
     -1i64 as u64
 }
 
-fn sys_truncate(path_ptr: u64, _length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    if read_user_cstr(path_ptr, 256).is_none() {
-        return -1i64 as u64;
-    }
-    0
+fn sys_truncate(_path_ptr: u64, _length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    // The VFS has no truncate, so this used to validate the path and then
+    // return 0 without shrinking anything. Fail honestly instead.
+    -38i64 as u64 // -ENOSYS
 }
 
 fn sys_ftruncate(_fd: u64, _length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
@@ -3720,9 +3719,10 @@ fn sys_fchownat(
 // ── Process syscalls ──
 
 fn sys_waitid(_idtype: u64, _id: u64, _infop_ptr: u64, _options: u64, _a5: u64, _a6: u64) -> u64 {
-    // Simplified: check for zombie children
-    // Reap any zombies (simplified — just clean up)
-    0
+    // This used to return 0 ("a child changed state") without waiting for or
+    // reaping anything. `wait4`-style reaping exists; the siginfo layout does
+    // not, so fail honestly rather than report a change that did not happen.
+    -38i64 as u64 // -ENOSYS
 }
 
 // ── Socket pair syscalls ──
@@ -4520,6 +4520,8 @@ mod host_tests {
         assert_eq!(super::sys_setpgid(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_setsockopt(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_ftruncate(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_truncate(0, 0, 0, 0, 0, 0), ENOSYS);
+        assert_eq!(super::sys_waitid(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_setrlimit(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_fchdir(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_utimensat(0, 0, 0, 0, 0, 0), ENOSYS);

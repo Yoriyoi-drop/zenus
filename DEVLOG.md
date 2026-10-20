@@ -3336,3 +3336,19 @@ Yang dikerjakan:
 - SECURITY.md dan ARCHITECTURE.md disinkronkan: NO_NEW_PRIVS dihormati, SECCOMP dan PDEATHSIG gagal jujur, KEEPCAPS no-op, catatan literal timer dihapus.
 
 Verifikasi: cargo test -p zenus-syscall (24 hijau) dan cargo build --target x86_64-unknown-none lolos.
+
+## BUG-050 - sys_truncate dan sys_waitid tidak lagi mengaku sukses
+
+Status: sudah di-fix + host-tested + kernel build hijau. Melengkapi BUG-047.
+
+Apa yang salah: dua syscall terlewat dari sapuan body-literal-0 karena punya sedikit kode sebelum `0`:
+- `sys_truncate` memvalidasi path lalu mengembalikan 0 tanpa memotong file.
+- `sys_waitid` mengembalikan 0 ("ada child yang berubah status") tanpa menunggu atau mereap apa pun.
+
+Yang dikerjakan:
+- Keduanya kini mengembalikan `-38` (ENOSYS).
+- Keduanya ditambahkan ke test `unimplemented_syscalls_report_enosys_not_silent_success`.
+
+Catatan: `sys_getsockopt` masih mengembalikan nilai nol (bukan klaim bahwa opsi diterapkan), dan `sys_exit`/`sys_sched_yield`/`sys_shutdown` memang melakukan pekerjaannya lalu return 0 - ketiganya bukan stub.
+
+Verifikasi: cargo test -p zenus-syscall (24 hijau) dan cargo build --target x86_64-unknown-none lolos.
