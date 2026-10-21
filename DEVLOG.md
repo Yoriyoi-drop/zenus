@@ -3396,3 +3396,18 @@ Yang dikerjakan:
 - `sys_fchdir` dikeluarkan dari daftar uji ENOSYS.
 
 Verifikasi: cargo test -p zenus-syscall (24 hijau), cargo build --target x86_64-unknown-none, dan make smoke (prompt shell tercapai).
+
+## BUG-054 - make test / test-quiet menulis serial ke stdio yang bukan TTY
+
+Status: sudah diperbaiki + diverifikasi.
+
+Gejala: `make test-quiet` (target yang dipakai sebagai gerbang) melaporkan "in-kernel suite did not report success" dengan `build/test.log` berukuran 0 byte, dan `make test` menggantung sampai timeout 180 detik tanpa satu baris pun.
+
+Akar masalah: QEMU dengan `-serial mon:stdio` tidak menulis apa pun kalau stdout bukan terminal. Di terminal interaktif suite terlihat normal, jadi defect ini tidak pernah muncul sampai output dialihkan ke file atau CI. Ini kelas yang sama dengan BUG-048 di target fuzz.
+
+Yang dikerjakan:
+- `test` dan `test-quiet` menjalankan QEMU dengan `-display none -serial file:$(BUILD_DIR)/test.log`, lalu mencetak isi log (per-test untuk `test`, hanya baris `Results:` untuk `test-quiet`).
+- Pemeriksaan kelulusan dipindah ke target `test-check` yang dipakai keduanya, supaya tidak ada dua salinan aturan gerbang yang bisa menyimpang.
+- Log kosong tetap dianggap gagal: gerbangnya adalah baris `[OK] All tests passed`, bukan exit status `timeout` (124 memang normal karena kernel tidak mematikan mesin setelah suite).
+
+Verifikasi: `make test-quiet` -> `=== Results: 25 passed, 0 failed, 25 total ===`, `make test` mencetak 25 baris `[TEST]` lalu ringkasan yang sama.

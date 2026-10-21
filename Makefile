@@ -234,9 +234,19 @@ test-host-quiet:
 # and no SMAP, so the kernel's CR4 writes to enable them are silently ignored
 # and the suite would pass without ever testing them — which is exactly what
 # happened while SMAP was disabled in `apps/src/lib.rs`.
+# Serial goes to a file, not to `-serial mon:stdio`. QEMU writes nothing to
+# stdio when stdout is not a TTY, so under `make test > log` or CI the run
+# produced an empty log, hung for the full timeout and then reported failure —
+# the same defect the fuzz targets had (BUG-048). The log is printed afterwards,
+# so an interactive run still shows the suite.
 test: test-iso
-	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
-		-cpu max -drive file=ext2_test.img,format=raw,if=ide 2>&1
+	@rm -f $(BUILD_DIR)/test.log
+	@timeout $(TEST_TIMEOUT) qemu-system-x86_64 -display none \
+		-serial file:$(BUILD_DIR)/test.log -no-reboot \
+		-m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso \
+		-cpu max -drive file=ext2_test.img,format=raw,if=ide >/dev/null 2>&1 || true
+	@grep -a "\[TEST\]" $(BUILD_DIR)/test.log || true
+	@$(MAKE) --no-print-directory test-check
 
 # `test-quiet` used to end in `| grep -a "\[TEST\]"`, and a pipeline's exit
 # status is the *last* command's — grep — so it returned 0 whenever the suite
@@ -249,10 +259,20 @@ test: test-iso
 # looping, which is the *normal* end here, so the gate is the second line and
 # not the first line's status.
 TEST_TIMEOUT ?= 180
+
+# Same run as `test` without the per-test lines: the summary line is the gate,
+# and it fails when the log is empty (a crashed or non-booting kernel) rather
+# than only when a test reports a failure.
 test-quiet: test-iso
-	@timeout $(TEST_TIMEOUT) qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso -no-reboot \
-		-cpu max -drive file=ext2_test.img,format=raw,if=ide 2>&1 \
-		| tee $(BUILD_DIR)/test.log | grep -a "\[TEST\]" || true
+	@rm -f $(BUILD_DIR)/test.log
+	@timeout $(TEST_TIMEOUT) qemu-system-x86_64 -display none \
+		-serial file:$(BUILD_DIR)/test.log -no-reboot \
+		-m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso \
+		-cpu max -drive file=ext2_test.img,format=raw,if=ide >/dev/null 2>&1 || true
+	@$(MAKE) --no-print-directory test-check
+
+test-check:
+	@grep -a "Results:" $(BUILD_DIR)/test.log || true
 	@grep -aq "\[OK\] All tests passed" $(BUILD_DIR)/test.log || { \
 		echo "=== in-kernel suite did not report success; tail: ==="; \
 		tail -30 $(BUILD_DIR)/test.log; exit 1; }

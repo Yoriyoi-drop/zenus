@@ -19,6 +19,14 @@
   enforcement points are its only callers. `cpu`/`io` remain advertised but
   unenforced and the hierarchy is flat.
 
+### Fixed
+- **`make test`/`make test-quiet` capture serial to a file (BUG-054).**
+  Both ran QEMU with `-serial mon:stdio`, which writes nothing when stdout is
+  not a TTY: the log came out empty, `make test` hung to its timeout and
+  `test-quiet` failed with "did not report success". The run now uses
+  `-serial file:` and the log is printed afterwards; the pass gate moved into
+  a shared `test-check` target.
+
 ### Added
 - **Symbolic links in tmpfs (BUG-052).** `symlinkat` and `readlinkat` work for
   tmpfs nodes: the target is stored in the node and read back without
