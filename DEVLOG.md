@@ -3411,3 +3411,23 @@ Yang dikerjakan:
 - Log kosong tetap dianggap gagal: gerbangnya adalah baris `[OK] All tests passed`, bukan exit status `timeout` (124 memang normal karena kernel tidak mematikan mesin setelah suite).
 
 Verifikasi: `make test-quiet` -> `=== Results: 25 passed, 0 failed, 25 total ===`, `make test` mencetak 25 baris `[TEST]` lalu ringkasan yang sama.
+
+## BUG-055 - resolver path mengikuti symlink
+
+Status: sudah di-implementasi + host-tested + smoke-tested + in-kernel suite hijau.
+
+Apa yang kurang: BUG-052 membuat symlink bisa dibuat dan dibaca, tetapi resolver tidak pernah mengikutinya. `open("/link")` mengembalikan node symlink itu sendiri, jadi `cat /link` membaca isi link (path target), bukan isi file yang ditunjuk.
+
+Yang dikerjakan:
+- `open_in_ns` sekarang memanggil `open_in_ns_depth(ns_id, path, depth, follow_final)`. Symlink di komponen tengah selalu diikuti; komponen terakhir hanya kalau `follow_final` benar.
+- `open_in_ns_nofollow` memakai `follow_final = false`, dan `vfs::readlink` pindah ke situ. Tanpa pemisahan ini `readlink` akan menerima node target lalu gagal, sehingga setiap link yang benar-benar resolve dilaporkan `EINVAL`.
+- Setelah link ditemukan, path di-restart dari awal lewat `open_in_ns_depth` dengan `depth - 1`. Restart (bukan melanjutkan di node) membuat target absolut dan relatif memakai satu jalur kode, dan otomatis menangani target yang menyeberang ke mount lain.
+- `join_link_target` menyusun path hasil ekspansi: target relatif diselesaikan terhadap `mount_prefix` + komponen yang sudah dilalui, bukan terhadap `/`. Buffer 256 byte; hasil yang tidak muat ditolak, bukan dipotong.
+- Batas: `MAX_SYMLINK_DEPTH = 8`. Loop (a -> b -> a) tidak dideteksi secara khusus, cukup dihabiskan budgetnya; kedalaman 9 mengembalikan `None`.
+- Target kosong ditolak (`ENOENT` menurut POSIX, bukan "direktori saat ini").
+
+Bug yang ditemukan tes sendiri: versi pertama hanya menyambung target, sehingga `/dirlink/real` (dengan `dirlink -> /dir`) me-resolve ke `/dir`, yaitu *induk* dari file yang diminta — satu komponen hilang. Tes `a_symlinked_directory_component_is_traversed` menangkapnya (inode 1 vs 2). Perbaikannya: `join_link_target` menerima `tail` (`path_segments[i+1..seg_count]`) dan menempelkannya setelah target. Ini contoh persis kenapa setiap fitur harus datang dengan tes: tanpa tes, resolver akan membuka file yang salah secara diam-diam.
+
+Host test baru (4): follow vs readlink, target relatif terhadap direktori link, komponen direktori yang berupa link, serta dangling/loop ditolak.
+
+Verifikasi: cargo test --workspace (266 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (25/25 in-kernel).

@@ -30,8 +30,23 @@
 ### Added
 - **Symbolic links in tmpfs (BUG-052).** `symlinkat` and `readlinkat` work for
   tmpfs nodes: the target is stored in the node and read back without
-  following it. The generic path resolver still does not follow symlinks, which
-  is the next step.
+  following it.
+
+- **The path resolver follows symlinks (BUG-055).** `open_in_ns` expands a
+  link in any component — always in the middle, and in the last one unless the
+  caller asks otherwise. `open_in_ns_nofollow` backs `readlink`, so reading a
+  link still returns the target instead of resolving it first and failing.
+  Relative targets resolve against the link's own directory; expansion restarts
+  from the top so a link may cross into another mount. Depth is bounded at
+  `MAX_SYMLINK_DEPTH` and an expanded path is capped at `MAX_RESOLVED_PATH`,
+  so loops, long chains and over-long expansions are refused rather than
+  recursing or truncating. Four host tests cover it.
+
+### Fixed
+- **A followed symlink no longer drops the rest of the path (BUG-055).**
+  `/dirlink/real` with `dirlink -> /dir` resolved to `/dir` — the link's
+  *parent* — because only the target was re-resolved. The remaining components
+  are appended now. Found by the new traversal test.
 
 ### Fixed
 - **Dead task-teardown machinery removed (BUG-042).** `task_exit()`,

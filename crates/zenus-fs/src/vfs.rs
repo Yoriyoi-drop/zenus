@@ -728,7 +728,13 @@ fn open_in_ns_depth(
             let n = current.fs.readlink(inode, &mut target_buf)?;
             let target = core::str::from_utf8(&target_buf[..n]).ok()?;
             let mut joined_buf = [0u8; MAX_RESOLVED_PATH];
-            let joined = join_link_target(&mut joined_buf, mount_prefix, &path_segments[..i], target)?;
+            let joined = join_link_target(
+                &mut joined_buf,
+                mount_prefix,
+                &path_segments[..i],
+                target,
+                &path_segments[i + 1..seg_count],
+            )?;
             // Restart from the top: the target may cross into another mount,
             // and re-resolving keeps one code path for absolute and relative
             // links instead of two half-correct ones.
@@ -756,6 +762,7 @@ fn join_link_target<'a>(
     mount_prefix: &str,
     prefix: &[&str],
     target: &str,
+    tail: &[&str],
 ) -> Option<&'a str> {
     if target.is_empty() {
         // POSIX: an empty symlink target is ENOENT, not "the current dir".
@@ -778,6 +785,19 @@ fn join_link_target<'a>(
 
     for b in target.as_bytes() {
         push_byte(buf, &mut len, *b)?;
+    }
+
+    // Components after the link in the original path still have to be walked:
+    // `/dirlink/file` where `dirlink` -> `/dir` means `/dir/file`, not
+    // `/dir`. Dropping the tail resolved the link's *parent* instead of the
+    // file the caller named.
+    for part in tail {
+        if len == 0 || buf[len - 1] != b'/' {
+            push_byte(buf, &mut len, b'/')?;
+        }
+        for b in part.as_bytes() {
+            push_byte(buf, &mut len, *b)?;
+        }
     }
 
     core::str::from_utf8(&buf[..len]).ok()
