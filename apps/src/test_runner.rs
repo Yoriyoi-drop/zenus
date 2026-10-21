@@ -118,6 +118,11 @@ const TESTS: &[TestCase] = &[
         "paging/page_size_aligned",
         zenus_mem::paging::tests::test_page_size_aligned
     ),
+    // KPTI: the user view of an address space
+    test!(
+        "kpti/user_view_hides_kernel",
+        zenus_mem::kpti::tests::test_user_view_hides_the_kernel
+    ),
 ];
 
 pub fn run_tests(serial: &mut SerialPort) {

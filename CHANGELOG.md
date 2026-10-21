@@ -44,6 +44,15 @@
   unenforced and the hierarchy is flat.
 
 ### Added
+- **KPTI groundwork: a user view per address space (BUG-060).** `zenus_mem::kpti`
+  builds a PML4 that keeps the user half and zeroes entries 256..511, so a
+  ring-3 address space no longer has the kernel present. It is **not active**:
+  switching CR3 at the boundary needs a trampoline for `syscall` and entry
+  stubs for all 256 IDT vectors, because the CPU fetches every handler through
+  the current CR3. An in-kernel test (`kpti/user_view_hides_kernel`) walks the
+  new table and proves kernel text and the HHDM are gone while user mappings
+  survive.
+
 - **`truncate`/`ftruncate` work on tmpfs (BUG-059).** `FileSystem` gained a
   `truncate` hook that defaults to refusing, and tmpfs implements it: shrinking
   moves the size, growing zeroes the hole (the node buffer *is* the file, so

@@ -11,6 +11,7 @@ pub mod allocator;
 pub mod frame_allocator;
 #[cfg(test)]
 mod free_count_tests;
+pub mod kpti;
 pub mod paging;
 #[cfg(test)]
 mod plan_tests;

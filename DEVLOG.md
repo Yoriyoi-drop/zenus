@@ -3512,3 +3512,23 @@ Yang dikerjakan:
 Host test baru: `truncate_shrinks_and_zeroes_the_hole_it_grows_back_into` (shrink, grow dengan lubang nol, ukuran di luar buffer ditolak tanpa mengubah apa pun, direktori ditolak).
 
 Verifikasi: cargo test --workspace (275 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (25/25 in-kernel).
+
+## BUG-060 - KPTI tahap 1: user view dari address space
+
+Status: tahap 1 selesai + host-tested + in-kernel-tested. **Belum diaktifkan.**
+
+Rencana lengkapnya, karena ini tidak bisa satu commit:
+
+1. **(selesai) Tabel.** PML4 kedua per task yang hanya berisi paruh user. Tanpa ini tidak ada yang bisa diaktifkan.
+2. **Trampoline + jalur syscall.** Satu halaman di alamat virtual tetap yang dipetakan di kedua view; `syscall_entry` harus menukar CR3 di sana sebelum menyentuh memori kernel. `iretq` kembali ke user harus menyalin frame ke stack trampoline dulu, karena setelah CR3 ditukar, stack kernel tidak lagi terpetakan.
+3. **Stub entry untuk 256 vektor IDT.** CPU mengambil handler lewat CR3 yang *sedang aktif*, jadi instruksi pertama setiap handler harus berada di halaman yang terpetakan di kedua view. Ini berarti mengganti `extern "x86-interrupt"` dengan stub asm + dispatcher Rust yang menerima pointer frame.
+4. **Aktivasi.** Scheduler memakai user view saat menjalankan ring 3 dan kernel view saat masuk kernel; `TSS.RSP0` menunjuk entry stack yang terpetakan di kedua view.
+
+Tahap 1 yang dikerjakan sekarang:
+- Modul `zenus-mem/src/kpti.rs`: `build_user_view(kernel_view_cr3)` mengalokasikan PML4, menyalin entri 0..256 dari address space task, dan meng-nol-kan 256..512. `destroy_user_view` membebaskan frame PML4 saja (paruh user dimiliki address space).
+- Peng-nol-an memakai `*mut u8` dengan hitungan byte, bukan `*mut u64` dengan 512*8 — bug yang sudah pernah menggigit di `clone_user_address_space`.
+- `USER_HALF_ENTRIES`, `is_user_slot`, `slot_of` sebagai helper murni.
+- In-kernel test `kpti/user_view_hides_kernel`: membuat address space, memetakan satu halaman user, membangun view, lalu **berjalan di tabel** — halaman user masih resolve, teks kernel dan HHDM tidak, sementara kernel view masih memetakan keduanya. Tes ini sengaja tidak menukar CR3: begitu ditukar, instruksi berikutnya ada di teks kernel yang justru tidak lagi terpetakan. Itu intinya, dan itu juga alasan tahap 3 harus ada sebelum aktivasi.
+- Dua host test untuk pembagian slot PML4 (user < 0x0000_8000_0000_0000, kernel >= 0xFFFF_8000_0000_0000, tidak pernah satu slot).
+
+Verifikasi: cargo test --workspace (277 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (26/26 in-kernel, termasuk tes baru).

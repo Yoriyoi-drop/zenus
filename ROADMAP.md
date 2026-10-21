@@ -45,15 +45,17 @@ RTL8139, virtio-net.
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 275 host unit tests (`make test-host`), 25 in-kernel tests
+**Testing** — 277 host unit tests (`make test-host`), 26 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), a headless boot
 smoke test that requires the *ordinary* kernel to reach the shell prompt
 (`make smoke`), CI running all of them.
 
 ## Partially done
 
-- **User-mode hardening** — SMAP/SMEP are **enabled**; KPTI is not, so a
-  user CR3 still has the whole kernel mapped.
+- **User-mode hardening** — SMAP/SMEP are **enabled**. KPTI has its first stage
+  (`zenus_mem::kpti` builds a user view with the kernel half zeroed and an
+  in-kernel test proves it), but it is not active: a user CR3 still has the
+  whole kernel mapped until the entry stubs exist.
 - **Container story** — the six namespace types exist and work, and cgroup
   `pids` and `memory` limits are now enforced; there is still no OCI runtime, no
   `cpu`/`io` enforcement, and no overlayfs.
@@ -122,8 +124,10 @@ Do not build on these without reading the code:
 checked against a pure, host-tested controller table. `cpu`/`io` remain
 advertised but unenforced, and the hierarchy is flat. Next:
 
-2. **KPTI**, so a user CR3 does not have the kernel half mapped. SMEP/SMEP
-   being on (done) is not the same thing.
+2. **KPTI**, so a user CR3 does not have the kernel half mapped. SMEP/SMAP
+   being on (done) is not the same thing. Stage 1 (the user view) is done;
+   what remains is the trampoline for `syscall`, the return path, and entry
+   stubs for the 256 IDT vectors. `DEVLOG.md` BUG-060 has the plan.
 3. **A driver model** so storage stops being PIO-only: AHCI first.
 4. **Capabilities, next step.** The set exists and is consulted by six syscalls
    and by every file-permission check. What is missing is a way to *gain*
