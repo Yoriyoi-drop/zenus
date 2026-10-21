@@ -156,35 +156,68 @@ mod host_tests {
         }
     }
 
+    /// `euid == 0` no longer bypasses anything; `CAP_DAC_OVERRIDE` does.
+    ///
+    /// The old rule was unreachable in practice: every task is root, so the
+    /// mode bits below it were never consulted for anyone.
     #[test]
-    fn access_check_root_bypasses_everything() {
+    fn access_check_bypass_is_the_capability_not_the_uid() {
         let readonly = stat(1000, 1000, S_IFREG | 0o400, FileType::File);
-        assert!(vfs::access_check(0, 0, 0, 0, &readonly, false));
-        assert!(vfs::access_check(0, 0, 0, 0, &readonly, true));
+
+        assert!(
+            !vfs::access_check(&cred(0, 0), &readonly, true),
+            "being root is not a permission"
+        );
+
+        let root = cred(0, 0).with_caps(true, false);
+        assert!(vfs::access_check(&root, &readonly, false));
+        assert!(vfs::access_check(&root, &readonly, true));
+    }
+
+    /// `CAP_DAC_READ_SEARCH` grants reads and directory searches, not writes
+    /// and not execute on a regular file.
+    #[test]
+    fn access_check_read_search_grants_reads_but_not_writes() {
+        let readonly = stat(1000, 1000, S_IFREG | 0o400, FileType::File);
+        let reader = cred(1500, 1500).with_caps(false, true);
+
+        assert!(vfs::access_check(&reader, &readonly, false));
+        assert!(!vfs::access_check(&reader, &readonly, true));
+
+        assert!(
+            !vfs::access_check_bits(1500, 1500, 1500, 1500, false, true, &readonly, false, false, true),
+            "execute on a regular file is not a search"
+        );
+
+        let dir = stat(1000, 1000, S_IFDIR | 0o700, FileType::Directory);
+        assert!(
+            vfs::access_check_bits(1500, 1500, 1500, 1500, false, true, &dir, false, false, true),
+            "searching a directory is"
+        );
     }
 
     #[test]
     fn access_check_owner_uses_user_bits() {
         let rw = stat(1000, 1000, S_IFREG | S_IRUSR | S_IWUSR, FileType::File);
-        assert!(vfs::access_check(1000, 2000, 1000, 2000, &rw, false));
-        assert!(vfs::access_check(1000, 2000, 1000, 2000, &rw, true));
+        assert!(vfs::access_check(&cred(1000, 2000), &rw, false));
+        assert!(vfs::access_check(&cred(1000, 2000), &rw, true));
 
         let read_only = stat(1000, 1000, S_IFREG | S_IRUSR, FileType::File);
-        assert!(vfs::access_check(1000, 2000, 1000, 2000, &read_only, false));
-        assert!(!vfs::access_check(1000, 2000, 1000, 2000, &read_only, true));
+        assert!(vfs::access_check(&cred(1000, 2000), &read_only, false));
+        assert!(!vfs::access_check(&cred(1000, 2000), &read_only, true));
     }
 
     #[test]
     fn access_check_group_and_other_bits() {
         let group_rw = stat(1000, 2000, S_IFREG | S_IRGRP | S_IWGRP, FileType::File);
         // egid matches, euid does not -> group bits apply.
-        assert!(vfs::access_check(1000, 2000, 1500, 2000, &group_rw, true));
+        assert!(vfs::access_check(&cred(1500, 2000), &group_rw, true));
         // Neither matches -> other bits, which are clear here.
-        assert!(!vfs::access_check(1000, 2000, 1500, 3000, &group_rw, true));
+        assert!(!vfs::access_check(&cred(1500, 3000), &group_rw, true));
 
         let world_r = stat(1000, 2000, S_IFREG | S_IROTH, FileType::File);
-        assert!(vfs::access_check(1000, 2000, 1500, 3000, &world_r, false));
-        assert!(!vfs::access_check(1000, 2000, 1500, 3000, &world_r, true));
+        assert!(vfs::access_check(&cred(1500, 3000), &world_r, false));
+        assert!(!vfs::access_check(&cred(1500, 3000), &world_r, true));
     }
 
     #[test]
@@ -196,14 +229,14 @@ mod host_tests {
             S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR,
             FileType::Directory,
         );
-        assert!(vfs::access_check(1000, 1000, 1000, 1000, &rwx, true));
+        assert!(vfs::access_check(&cred(1000, 1000), &rwx, true));
 
         // rw- without x: creating entries inside would be unresolvable, so
         // write access must be refused.
         let rw_no_x = stat(1000, 1000, S_IFDIR | S_IRUSR | S_IWUSR, FileType::Directory);
-        assert!(!vfs::access_check(1000, 1000, 1000, 1000, &rw_no_x, true));
+        assert!(!vfs::access_check(&cred(1000, 1000), &rw_no_x, true));
         // Reading the directory is still fine.
-        assert!(vfs::access_check(1000, 1000, 1000, 1000, &rw_no_x, false));
+        assert!(vfs::access_check(&cred(1000, 1000), &rw_no_x, false));
     }
 
     #[test]
@@ -937,11 +970,14 @@ mod host_tests {
         vfs::Credentials::new(uid, gid, uid, gid)
     }
 
+    /// Root *with* the capability: what the shell's credentials look like.
     const ROOT_CRED: vfs::Credentials = vfs::Credentials {
         uid: 0,
         gid: 0,
         euid: 0,
         egid: 0,
+        dac_override: true,
+        dac_read_search: true,
     };
 
     /// Regression: `fd_open` was the only VFS caller that ran `access_check`.
@@ -1406,16 +1442,16 @@ mod host_tests {
     #[test]
     fn access_check_other_branch_follows_the_directory_rule() {
         let dir_wx = stat(1000, 2000, S_IFDIR | S_IWOTH | S_IXOTH, FileType::Directory);
-        assert!(vfs::access_check(1500, 3000, 1500, 3000, &dir_wx, true));
+        assert!(vfs::access_check(&cred(1500, 3000), &dir_wx, true));
 
         let dir_w_only = stat(1000, 2000, S_IFDIR | S_IWOTH, FileType::Directory);
         assert!(
-            !vfs::access_check(1500, 3000, 1500, 3000, &dir_w_only, true),
+            !vfs::access_check(&cred(1500, 3000), &dir_w_only, true),
             "writing a directory without +x must be refused for others too"
         );
         // The same mode on a plain file is fine.
         let file_w = stat(1000, 2000, S_IFREG | S_IWOTH, FileType::File);
-        assert!(vfs::access_check(1500, 3000, 1500, 3000, &file_w, true));
+        assert!(vfs::access_check(&cred(1500, 3000), &file_w, true));
     }
 
     // ── ext2 structure decoders ───────────────────────────────────────────

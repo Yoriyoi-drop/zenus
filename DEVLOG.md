@@ -3475,3 +3475,22 @@ Yang dikerjakan:
 Host test baru (2): aturan setuid/setgid (tanpa `CAP_SETUID` masih boleh "pindah" ke uid sendiri, tidak boleh ke uid lain) dan aturan sinyal (uid sama selalu boleh, uid lain butuh `CAP_KILL`).
 
 Verifikasi: cargo test --workspace (273 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (25/25 in-kernel).
+
+## BUG-058 - CAP_DAC_OVERRIDE / CAP_DAC_READ_SEARCH menggantikan jalan pintas euid 0
+
+Status: sudah di-implementasi + host-tested + smoke-tested + in-kernel suite hijau.
+
+Apa yang kurang: `access_check`, `access_check_bits`, dan `may_modify_parent` memulai dengan `if euid == 0 { return true }`. Karena setiap task adalah root, bit permission di bawahnya tidak pernah dibaca siapa pun. Capability `CAP_DAC_OVERRIDE` yang sudah ada di set tidak berpengaruh apa-apa.
+
+Yang dikerjakan:
+- `vfs::Credentials` dapat dua field: `dac_override` dan `dac_read_search`, plus `with_caps(dac_override, dac_read_search)`. `Credentials::new` tetap menghasilkan "tanpa capability", jadi tes lama yang tidak peduli capability tidak berubah arti.
+- `access_check(cred, stat, want_write)` sekarang menerima `&Credentials` (sebelumnya empat angka uid/gid terpisah), dan bypass-nya adalah `cred.dac_override`, bukan `euid == 0`.
+- `access_check_bits` menerima kedua flag; `dac_read_search` mengizinkan baca dan pencarian direktori (`+x` pada direktori), tetapi tidak menulis dan tidak mengeksekusi file biasa.
+- `may_modify_parent` memakai `cred.dac_override`.
+- `zenus-syscall::syscall::fd::cred()` mengisi kedua flag dari `current_caps()`, jadi jalur syscall dan jalur VFS memakai jawaban yang sama.
+
+Kenapa ini penting: `CAP_DAC_OVERRIDE` sekarang benar-benar bisa dicabut. Sebelumnya `prctl(PR_CAPBSET_DROP, CAP_DAC_OVERRIDE)` hanya mengubah angka yang tidak dibaca siapa pun.
+
+Host test diubah/ditambah: tes "root bypass" menjadi `access_check_bypass_is_the_capability_not_the_uid` (root tanpa capability **tidak** boleh menulis file read-only), dan `access_check_read_search_grants_reads_but_not_writes` memaku arti `CAP_DAC_READ_SEARCH` (baca boleh, tulis tidak, eksekusi file biasa tidak, pencarian direktori boleh).
+
+Verifikasi: cargo test --workspace (274 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (25/25 in-kernel).

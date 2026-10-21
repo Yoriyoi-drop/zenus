@@ -847,16 +847,19 @@ pub const MAX_RESOLVED_PATH: usize = 256;
 pub const DEFAULT_FILE_MODE: u16 = 0x81A4;
 pub const DEFAULT_DIR_MODE: u16 = 0x41ED;
 
-pub fn access_check(
-    _uid: u32,
-    _gid: u32,
-    euid: u32,
-    egid: u32,
-    stat: &FileStat,
-    want_write: bool,
-) -> bool {
+pub fn access_check(cred: &Credentials, stat: &FileStat, want_write: bool) -> bool {
     let mode = stat.mode;
-    if euid == 0 {
+    let euid = cred.euid;
+    let egid = cred.egid;
+    // `CAP_DAC_OVERRIDE`, not `euid == 0`. Every task is root, so the old test
+    // passed for every caller and the mode bits below were unreachable in
+    // practice.
+    if cred.dac_override {
+        return true;
+    }
+    // `CAP_DAC_READ_SEARCH` covers reads and directory searches. It does not
+    // grant write, and it does not grant execute on a regular file.
+    if cred.dac_read_search && !want_write {
         return true;
     }
     if euid == stat.uid {
@@ -937,13 +940,20 @@ pub fn access_check_bits(
     gid: u32,
     euid: u32,
     egid: u32,
+    dac_override: bool,
+    dac_read_search: bool,
     stat: &FileStat,
     want_read: bool,
     want_write: bool,
     want_exec: bool,
 ) -> bool {
     let mode = stat.mode;
-    if euid == 0 {
+    if dac_override {
+        return true;
+    }
+    // Read and search only: a directory may be searched, a file may be read,
+    // but nothing may be written and a regular file may not be executed.
+    if dac_read_search && !want_write && (!want_exec || stat.file_type == FileType::Directory) {
         return true;
     }
     // The class to test: owner bits when the caller is the owner, group bits
@@ -988,6 +998,14 @@ pub struct Credentials {
     pub gid: u32,
     pub euid: u32,
     pub egid: u32,
+    /// `CAP_DAC_OVERRIDE`: every read/write/execute check passes.
+    ///
+    /// This replaces the old `euid == 0` shortcut. Every task is root, so that
+    /// shortcut meant file permissions never applied to anyone; the capability
+    /// can at least be dropped.
+    pub dac_override: bool,
+    /// `CAP_DAC_READ_SEARCH`: reads and directory searches pass, writes do not.
+    pub dac_read_search: bool,
 }
 
 impl Credentials {
@@ -997,12 +1015,30 @@ impl Credentials {
             gid,
             euid,
             egid,
+            dac_override: false,
+            dac_read_search: false,
         }
+    }
+
+    /// Add the caller's `CAP_DAC_*` bits.
+    pub fn with_caps(mut self, dac_override: bool, dac_read_search: bool) -> Self {
+        self.dac_override = dac_override;
+        self.dac_read_search = dac_read_search;
+        self
     }
 
     fn may(&self, stat: &FileStat, want_read: bool, want_write: bool, want_exec: bool) -> bool {
         access_check_bits(
-            self.uid, self.gid, self.euid, self.egid, stat, want_read, want_write, want_exec,
+            self.uid,
+            self.gid,
+            self.euid,
+            self.egid,
+            self.dac_override,
+            self.dac_read_search,
+            stat,
+            want_read,
+            want_write,
+            want_exec,
         )
     }
 }
@@ -1014,7 +1050,7 @@ impl Credentials {
 /// wrong object: a writable file inside a read-only directory can still not be
 /// unlinked. Pure, given the parent stat.
 pub fn may_modify_parent(parent_stat: &FileStat, cred: &Credentials) -> bool {
-    if cred.euid == 0 {
+    if cred.dac_override {
         return true;
     }
     if parent_stat.file_type != FileType::Directory {

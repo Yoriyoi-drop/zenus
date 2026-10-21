@@ -360,11 +360,7 @@ pub fn fd_socket(task_id: u64, socket_id: u64) -> Option<u64> {
 pub fn fd_open(task_id: u64, path: &str) -> Option<u64> {
     let node = vfs::open(path)?;
     let stat = node.fs.stat(node.inode);
-    let uid = zenus_sched::scheduler::current_uid();
-    let gid = zenus_sched::scheduler::current_gid();
-    let euid = zenus_sched::scheduler::current_euid();
-    let egid = zenus_sched::scheduler::current_egid();
-    if !vfs::access_check(uid, gid, euid, egid, &stat, false) {
+    if !vfs::access_check(&cred(), &stat, false) {
         return None;
     }
     let mut table = FD_TABLE.lock();
@@ -585,11 +581,16 @@ pub fn current_task() -> u64 {
 /// The calling task's credentials, read once so a permission decision sees a
 /// consistent identity rather than four separate task-table lookups.
 fn cred() -> vfs::Credentials {
+    let caps = zenus_sched::scheduler::current_caps();
     vfs::Credentials::new(
         zenus_sched::scheduler::current_uid(),
         zenus_sched::scheduler::current_gid(),
         zenus_sched::scheduler::current_euid(),
         zenus_sched::scheduler::current_egid(),
+    )
+    .with_caps(
+        caps.has(zenus_sched::caps::CAP_DAC_OVERRIDE),
+        caps.has(zenus_sched::caps::CAP_DAC_READ_SEARCH),
     )
 }
 

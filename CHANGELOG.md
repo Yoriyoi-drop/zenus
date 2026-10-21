@@ -44,6 +44,15 @@
   unenforced and the hierarchy is flat.
 
 ### Fixed
+- **File permissions check a capability, not `euid == 0` (BUG-058).**
+  `access_check`, `access_check_bits` and `may_modify_parent` began with
+  `if euid == 0 { return true }`, and every task is root, so the mode bits
+  below were never consulted. They now bypass on `CAP_DAC_OVERRIDE`, and
+  `CAP_DAC_READ_SEARCH` grants reads and directory searches but not writes.
+  `Credentials` carries both flags and `zenus-syscall` fills them from the
+  task's capability set, so dropping `CAP_DAC_OVERRIDE` now actually
+  restricts file access.
+
 - **`kill` respects uid and no longer reports success for nothing (BUG-057).**
   `setuid`/`setgid` and `kill` now check `CAP_SETUID`/`CAP_SETGID`/`CAP_KILL`
   instead of `euid == 0`, which every task satisfied. `kill(0, sig)` signals

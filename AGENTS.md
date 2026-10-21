@@ -7,7 +7,7 @@ Zenus is an x86_64 kernel written in Rust (`no_std`). It boots via Limine
 fuzzing framework and a host-side unit-test suite.
 
 State: **pre-alpha**. Core subsystems work; the security model is incomplete
-(no KPTI, and a capability set that only six syscalls consult — see
+(no KPTI, and a capability set with no way to gain one back — see
 `SECURITY.md`) and several subsystems are deliberately shallow (see "Known
 shallow spots" below).
 
@@ -105,8 +105,8 @@ Do not assume these work; read the code first.
 - No KPTI, no secure boot, no crypto library.
 - Capabilities exist but are **one set per task** (`zenus_sched::caps`), not
   Linux's permitted/effective/inheritable split. `mount`, `umount2`,
-  `sethostname`, `setuid`, `setgid` and `kill` check one; file permission
-  checks still use `euid == 0`.
+  `sethostname`, `setuid`, `setgid`, `kill` and every file-permission check
+  consult one. Nothing can add a capability back.
 - `zenus-fs/src/cgroup.rs` enforces `pids.max` and `memory.max`; `cpu` and
   `io` are advertised and unenforced, and the hierarchy is flat.
 - `zenus-net/src/ssh.rs` speaks a homegrown `ZENUS_SSH/1.0` line protocol with a
