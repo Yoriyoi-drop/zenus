@@ -3453,3 +3453,25 @@ Host test baru (5): `all`/`none` konsisten, `without` mencabut tepat satu dan id
 Belum dikerjakan (dicatat di ROADMAP): `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH` belum menggantikan jalan pintas euid di `access_check`, `CAP_KILL` belum dipakai `sys_kill`, dan `PR_SET_SECCOMP` masih tidak ada.
 
 Verifikasi: cargo test --workspace (271 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (25/25 in-kernel).
+
+## BUG-057 - CAP_KILL, CAP_SETUID, CAP_SETGID (dan kill(0)/kill(-1) yang tidak mengirim apa pun)
+
+Status: sudah di-implementasi + host-tested + smoke-tested + in-kernel suite hijau.
+
+Apa yang kurang:
+- `set_current_uid`/`set_current_gid` mengizinkan perubahan uid/gid apa pun selama `euid == 0` — dan semua task adalah root. Capability `CAP_SETUID`/`CAP_SETGID` tidak pernah dibaca.
+- `sys_kill` tidak memeriksa pemilik target sama sekali, jadi task mana pun bisa mengirim sinyal ke task mana pun.
+- `kill(0, sig)` dan `kill(-1, sig)` mengembalikan 0 tanpa mengirim sinyal apa pun (bug "sukses diam-diam" yang sama dengan BUG-050/051). Selain itu `kill` ke PID yang tidak ada menjawab -EPERM, bukan -ESRCH, sehingga "tidak ada proses" tidak bisa dibedakan dari "tidak diizinkan".
+
+Yang dikerjakan:
+- Helper murni di `zenus-sched/src/caps.rs`: `may_set_uid(euid, caps, new_uid)`, `may_set_gid(...)`, `may_kill(uid, caps, target_uid)`. Aturannya: boleh menyentuh uid/gid sendiri, atau uid/gid lain dengan capability-nya; boleh memberi sinyal ke uid yang sama, atau uid lain dengan `CAP_KILL`.
+- `set_current_uid`/`set_current_gid` memakai helper itu, bukan `euid == 0`.
+- `sys_kill` dipecah: `deliver_signal_to(task_id, sig)` memegang perilaku per-sinyal (SIGKILL/SIGSTOP/SIGCONT), dan `sys_kill` menangani pemilihan target.
+- `kill(0, sig)` sekarang benar-benar mengirim ke pemanggil (tidak ada process group di Zenus, jadi group-nya adalah dirinya sendiri).
+- `kill(-1, sig)` mengirim ke setiap task yang boleh disentuh pemanggil (`may_kill`), dan mengembalikan -ESRCH kalau tidak ada satu pun.
+- PID yang tidak ada -> -ESRCH; target dengan uid lain tanpa `CAP_KILL` -> -EPERM.
+- `get_task_uid(task_id)` ditambahkan ke scheduler untuk jalur itu.
+
+Host test baru (2): aturan setuid/setgid (tanpa `CAP_SETUID` masih boleh "pindah" ke uid sendiri, tidak boleh ke uid lain) dan aturan sinyal (uid sama selalu boleh, uid lain butuh `CAP_KILL`).
+
+Verifikasi: cargo test --workspace (273 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (25/25 in-kernel).

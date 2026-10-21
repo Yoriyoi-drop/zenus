@@ -57,8 +57,10 @@ than by the hardware:
   hold *less* than its parent. `PR_CAPBSET_READ`/`PR_CAPBSET_DROP` are
   implemented and are the only way to shrink it — nothing can add a capability
   back. `sys_mount`, `sys_umount2` and `sys_sethostname` check
-  `CAP_SYS_ADMIN` instead of `euid == 0`; the rest of the kernel still checks
-  uid, so dropping `CAP_DAC_OVERRIDE` does not restrict file access yet.
+  `CAP_SYS_ADMIN`; `setuid`/`setgid` check `CAP_SETUID`/`CAP_SETGID`; and
+  `kill` checks `CAP_KILL` before signalling another uid. File permission
+  checks still key off uid, so dropping `CAP_DAC_OVERRIDE` does not restrict
+  file access yet.
 - `prctl` classifies every option: `PR_SET_SECCOMP` answers `-EINVAL` (seccomp
   does not exist), `PR_SET_PDEATHSIG`/`PR_GET_PDEATHSIG` answer `-EINVAL` (no
   parent-death signal is delivered), and unknown options fail too.

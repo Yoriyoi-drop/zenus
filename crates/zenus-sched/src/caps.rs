@@ -78,6 +78,29 @@ impl CapSet {
     }
 }
 
+/// Whether a task may switch its uid to `new_uid`.
+///
+/// Pure so the rule can be tested without a scheduler: a task may always
+/// "change" to the uid it already has, and may switch to any other only with
+/// `CAP_SETUID`. Before this, the rule was `euid == 0`, which every task
+/// satisfied.
+pub fn may_set_uid(euid: u32, caps: CapSet, new_uid: u32) -> bool {
+    new_uid == euid || caps.has(CAP_SETUID)
+}
+
+/// Whether a task may switch its gid to `new_gid`. Same rule as uid.
+pub fn may_set_gid(egid: u32, caps: CapSet, new_gid: u32) -> bool {
+    new_gid == egid || caps.has(CAP_SETGID)
+}
+
+/// Whether a task may signal a task owned by `target_uid`.
+///
+/// A task may signal anything running as its own uid; reaching a different
+/// uid takes `CAP_KILL`.
+pub fn may_kill(uid: u32, caps: CapSet, target_uid: u32) -> bool {
+    target_uid == uid || caps.has(CAP_KILL)
+}
+
 #[cfg(test)]
 mod host_tests {
     #[test]
@@ -117,6 +140,39 @@ mod host_tests {
         assert!(!all.has(200));
         // Dropping an unknown capability is a no-op, not a wrap-around.
         assert_eq!(all.without(200), all);
+    }
+
+#[test]
+    fn setuid_needs_cap_setuid_to_reach_another_uid() {
+        use super::{may_set_gid, may_set_uid, CapSet};
+
+        let all = CapSet::all();
+        assert!(may_set_uid(0, all, 1000));
+        assert!(may_set_gid(0, all, 1000));
+
+        let no_setuid = all.without(super::CAP_SETUID);
+        assert!(
+            !may_set_uid(0, no_setuid, 1000),
+            "euid 0 is not a licence to change uid any more"
+        );
+        // Switching to the uid it already has is not a privilege change.
+        assert!(may_set_uid(0, no_setuid, 0));
+
+        let no_setgid = all.without(super::CAP_SETGID);
+        assert!(!may_set_gid(0, no_setgid, 1000));
+        assert!(may_set_gid(0, no_setgid, 0));
+    }
+
+    #[test]
+    fn signalling_another_uid_needs_cap_kill() {
+        use super::{may_kill, CapSet};
+
+        let all = CapSet::all();
+        assert!(may_kill(0, all, 1000));
+
+        let no_kill = all.without(super::CAP_KILL);
+        assert!(may_kill(1000, no_kill, 1000), "same uid is always allowed");
+        assert!(!may_kill(1000, no_kill, 0));
     }
 
     #[test]

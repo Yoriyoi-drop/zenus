@@ -1506,6 +1506,15 @@ pub fn current_caps() -> crate::caps::CapSet {
     get_caps(current_task_id()).unwrap_or(crate::caps::CapSet::none())
 }
 
+/// A task's uid (`None` if the task is unknown).
+pub fn get_task_uid(task_id: u64) -> Option<u32> {
+    let tasks = TASKS.lock();
+    tasks
+        .tasks
+        .iter()
+        .find_map(|s| s.as_ref().filter(|t| t.id == task_id).map(|t| t.uid))
+}
+
 /// Read a task's capability set (`None` if the task is unknown).
 pub fn get_caps(task_id: u64) -> Option<crate::caps::CapSet> {
     let tasks = TASKS.lock();
@@ -1538,8 +1547,10 @@ pub fn set_current_uid(uid: u32) -> bool {
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let mut tasks = TASKS.lock();
     if let Some(ref mut t) = tasks.tasks[idx as usize] {
-        // Only root (uid=0) or current user can set uid
-        if t.euid == 0 || t.euid == uid {
+        // Not "is root": every task is root. Reaching a uid other than the
+        // current one takes CAP_SETUID, so a task that dropped it cannot
+        // regain the reach it gave up.
+        if crate::caps::may_set_uid(t.euid, t.caps, uid) {
             t.uid = uid;
             t.euid = uid;
             return true;
@@ -1553,7 +1564,7 @@ pub fn set_current_gid(gid: u32) -> bool {
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
     let mut tasks = TASKS.lock();
     if let Some(ref mut t) = tasks.tasks[idx as usize] {
-        if t.egid == 0 || t.egid == gid {
+        if crate::caps::may_set_gid(t.egid, t.caps, gid) {
             t.gid = gid;
             t.egid = gid;
             return true;

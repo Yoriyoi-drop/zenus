@@ -1787,29 +1787,8 @@ struct KernelSigAction {
     mask: [u64; 2],
 }
 
-fn sys_kill(pid: u64, sig: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    let sig_num = sig as usize;
-    if sig_num == 0 || sig_num >= 64 {
-        return -1i64 as u64;
-    }
-
-    if pid == 0 {
-        // Send to all processes in current process group
-        return 0;
-    }
-
-    if pid == -1i64 as u64 {
-        // Send to all processes
-        return 0;
-    }
-
-    // Send to specific PID
-    let task_id = scheduler::get_task_id_by_pid(pid);
-    if task_id.is_none() {
-        return -1i64 as u64;
-    }
-    let task_id = task_id.unwrap();
-
+/// Deliver `sig` to one task, with the per-signal special cases.
+fn deliver_signal_to(task_id: u64, sig_num: usize) -> u64 {
     match sig_num {
         signal::SIGKILL => {
             scheduler::signal_deliver(task_id, sig_num);
@@ -1832,6 +1811,50 @@ fn sys_kill(pid: u64, sig: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
             0
         }
     }
+}
+
+fn sys_kill(pid: u64, sig: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let sig_num = sig as usize;
+    if sig_num == 0 || sig_num >= 64 {
+        return -22i64 as u64; // -EINVAL
+    }
+
+    let uid = scheduler::current_uid();
+    let caps = scheduler::current_caps();
+
+    if pid == 0 {
+        // There are no process groups, so the caller's group is just the
+        // caller. Returning 0 without signalling anything — which is what this
+        // did — is the silent success the syscall table used to be full of.
+        return deliver_signal_to(scheduler::current_task_id(), sig_num);
+    }
+
+    if pid == -1i64 as u64 {
+        // "Every process this task may signal". Without `CAP_KILL` that is the
+        // caller's own uid, the same restriction Linux applies.
+        let mut delivered = 0u64;
+        for info in scheduler::list_tasks().iter().flatten() {
+            if zenus_sched::caps::may_kill(uid, caps, info.uid) {
+                deliver_signal_to(info.id, sig_num);
+                delivered += 1;
+            }
+        }
+        return if delivered > 0 { 0 } else { -3i64 as u64 }; // -ESRCH
+    }
+
+    let task_id = match scheduler::get_task_id_by_pid(pid) {
+        Some(id) => id,
+        // -ESRCH, not -EPERM: the process is not there, and the old answer
+        // made "no such process" indistinguishable from "not allowed".
+        None => return -3i64 as u64,
+    };
+
+    let target_uid = scheduler::get_task_uid(task_id).unwrap_or(uid);
+    if !zenus_sched::caps::may_kill(uid, caps, target_uid) {
+        return -1i64 as u64; // -EPERM
+    }
+
+    deliver_signal_to(task_id, sig_num)
 }
 
 fn sys_rt_sigaction(

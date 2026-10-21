@@ -44,6 +44,13 @@
   unenforced and the hierarchy is flat.
 
 ### Fixed
+- **`kill` respects uid and no longer reports success for nothing (BUG-057).**
+  `setuid`/`setgid` and `kill` now check `CAP_SETUID`/`CAP_SETGID`/`CAP_KILL`
+  instead of `euid == 0`, which every task satisfied. `kill(0, sig)` signals
+  the caller instead of returning 0 having done nothing, `kill(-1, sig)`
+  signals every task the caller may reach, a missing PID answers `-ESRCH`
+  rather than `-EPERM`, and an invalid signal answers `-EINVAL`.
+
 - **A followed symlink no longer drops the rest of the path (BUG-055).**
   `/dirlink/real` with `dirlink -> /dir` resolved to `/dir` — the link's
   *parent* — because only the target was re-resolved. The remaining components
