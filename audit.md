@@ -412,7 +412,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 12. ✅ ~~DHCP client~~ — DISCOVER→OFFER→REQUEST→ACK, verified with QEMU
 13. ✅ ~~DNS resolver~~ — Basic stub resolver, A-record queries, verified with example.com + google.com
 14. ✅ ~~IP routing table~~ — Static routes, default gateway, longest-prefix match, DHCP integration
-15. Firewall (netfilter/nftables)
+15. ✅ **Stateful firewall** — `zenus-net/src/firewall.rs`, default-deny rules with connection tracking (`nftables` itself does not exist)
 16. ✅ **DHCP server** — IP pool management, DISCOVER→OFFER→REQUEST→ACK, lease table, subnet/gateway/dns/lease-time options
 17. ✅ **SSH server** — ZENUS_SSH/1.0 encrypted remote shell on port 22
 18. ✅ **Init system** — PID 1 process manager, service lifecycle
@@ -422,12 +422,12 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 22. ✅ **User/group model** — uid/gid/euid/egid in Task, syscalls 100-105, `id`/`whoami` commands
 23. ✅ **File permissions** — mode bits in FileStat, chmod/chown, `ls -l`, `access_check` on open
 24. ✅ **ASLR** — RDRAND-based RNG + per-process userspace stack/heap randomization, kernel at fixed base
-25. Capability system
+25. ✅ **Capability system** — per-task `CapSet`, inherited and droppable via `prctl(PR_CAPBSET_DROP)`; gates mount/umount2/sethostname/setuid/setgid/kill and file permissions. Missing: a way to gain one back, seccomp
 26. Audit logging subsystem
 27. Encryption / crypto API
 28. Disk encryption (LUKS)
 29. ✅ **Container namespaces** — PID + UTS implemented (`crates/zenus-ns/`). Clone flags `CLONE_NEWPID`, `CLONE_NEWUTS`, per-ns hostname, PID remapping. Missing: NET, MOUNT, USER, IPC.
-30. Cgroups v2 (resource control)
+30. ✅ **Cgroups v2 (partial)** — `pids.max` and `memory.max` are enforced; `cpu`/`io` are advertised and unenforced, hierarchy is flat
 31. Overlayfs (container images)
 32. Seccomp (syscall filtering)
 33. ✅ **Virtio drivers** — net, blk, console, balloon (`crates/zenus-virtio/`)
@@ -438,7 +438,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 38. NFS client/server
 39. Device hotplug support
 40. Driver framework / module system
-41. Symbolic link support in VFS
+41. ✅ **Symbolic link support in VFS** — tmpfs nodes, `symlinkat`/`readlinkat`, and the resolver follows links (depth-bounded)
 42. File locking (flock, fcntl)
 43. Swap / page reclaim
 44. Memory overcommit / OOM killer
@@ -447,7 +447,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 47. ✅ **Crash dump** — CPU registers, backtrace, CR3, panic message, serial/disk output
 48. ✅ **Lockdep** — Lock ordering tracking, circular dependency detection, 64 lock classes
 49. ✅ **Testing framework** — 25 unit tests, `make test` to build + run in QEMU
-50. CI/CD pipeline
+50. ✅ **CI** — `.github/workflows/` runs the host suite, the in-kernel suite and lint
 
 ### Top 20 Critical Blockers
 
