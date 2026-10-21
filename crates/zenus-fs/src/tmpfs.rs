@@ -350,6 +350,29 @@ impl FileSystem for TmpFs {
         Some(n)
     }
 
+    fn truncate(&self, inode: u64, size: u64) -> bool {
+        let mut nodes = nodes();
+        let idx = inode as usize;
+        if idx >= node_count() || nodes[idx].file_type != FileType::File {
+            return false;
+        }
+        // The node's buffer is the whole file, so a size past it cannot be
+        // represented. Refusing beats clamping: a clamped `ftruncate` reports
+        // success for a size the file does not have.
+        if size as usize > MAX_FILE_SIZE {
+            return false;
+        }
+        let old = nodes[idx].size as usize;
+        let new = size as usize;
+        // Growing leaves a hole. Zero it, so a read cannot see whatever the
+        // buffer held before the file was shrunk.
+        if new > old {
+            nodes[idx].data[old..new].fill(0);
+        }
+        nodes[idx].size = size as u32;
+        true
+    }
+
     fn unlink(&self, parent_inode: u64, name: &str) -> bool {
         let mut nodes = nodes();
         let pidx = parent_inode as usize;
@@ -482,6 +505,45 @@ mod host_tests {
         // An in-range write still works, so the guard is not over-broad.
         assert_eq!(fs.write(inode, 0, b"ok"), Some(2));
         assert_eq!(fs.stat(inode).size, 2);
+    }
+
+/// `truncate` must zero the hole it creates when a file grows back.
+    ///
+    /// The node's data buffer is the file, so a shrink only moves `size`. If
+    /// growing did not zero the gap, a later read would return whatever the
+    /// buffer held before the file was shortened — data from a previous,
+    /// longer version of the same file.
+    #[test]
+    fn truncate_shrinks_and_zeroes_the_hole_it_grows_back_into() {
+        use crate::vfs::FileType;
+
+        let _serial = crate::host_tests::serial();
+        let fs = TmpFs;
+        TmpFs::reset();
+        let root = fs.root_inode();
+
+        let inode = fs.create(root, "f", FileType::File).expect("create");
+        assert_eq!(fs.write(inode, 0, b"hello world"), Some(11));
+        assert_eq!(fs.stat(inode).size, 11);
+
+        assert!(fs.truncate(inode, 5));
+        assert_eq!(fs.stat(inode).size, 5);
+
+        assert!(fs.truncate(inode, 8));
+        assert_eq!(fs.stat(inode).size, 8);
+        let mut buf = [0u8; 8];
+        assert_eq!(fs.read(inode, 0, &mut buf), Some(8));
+        assert_eq!(&buf[..5], b"hello");
+        assert_eq!(&buf[5..], &[0, 0, 0], "the hole must be zeroed");
+
+        // Larger than the node's buffer: refused, not clamped. A clamped
+        // `ftruncate` would report success for a size the file cannot have.
+        assert!(!fs.truncate(inode, MAX_FILE_SIZE as u64 + 1));
+        assert_eq!(fs.stat(inode).size, 8, "a refused truncate changes nothing");
+
+        // Directories are not files.
+        let dir = fs.create(root, "d", FileType::Directory).expect("mkdir");
+        assert!(!fs.truncate(dir, 0));
     }
 
     #[test]

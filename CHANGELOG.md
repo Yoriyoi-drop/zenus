@@ -43,6 +43,14 @@
   enforcement points are its only callers. `cpu`/`io` remain advertised but
   unenforced and the hierarchy is flat.
 
+### Added
+- **`truncate`/`ftruncate` work on tmpfs (BUG-059).** `FileSystem` gained a
+  `truncate` hook that defaults to refusing, and tmpfs implements it: shrinking
+  moves the size, growing zeroes the hole (the node buffer *is* the file, so
+  without that a grow-back would expose the old contents), and a size past the
+  buffer is refused rather than clamped. Both syscalls report `-EISDIR`,
+  `-EINVAL`, `-EACCES` and `-EBADF` instead of the blanket `-ENOSYS`.
+
 ### Fixed
 - **File permissions check a capability, not `euid == 0` (BUG-058).**
   `access_check`, `access_check_bits` and `may_modify_parent` began with

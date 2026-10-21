@@ -62,6 +62,14 @@ pub trait FileSystem: Send + Sync {
     fn readlink(&self, _inode: u64, _buf: &mut [u8]) -> Option<usize> {
         None
     }
+    /// Resize a regular file to `size` bytes.
+    ///
+    /// Defaults to refusing: a filesystem that cannot resize a file must not
+    /// pretend it did, or `ftruncate` would report success and the next read
+    /// would return the old contents.
+    fn truncate(&self, _inode: u64, _size: u64) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy)]

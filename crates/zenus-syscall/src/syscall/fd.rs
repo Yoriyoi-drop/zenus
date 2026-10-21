@@ -580,7 +580,7 @@ pub fn current_task() -> u64 {
 
 /// The calling task's credentials, read once so a permission decision sees a
 /// consistent identity rather than four separate task-table lookups.
-fn cred() -> vfs::Credentials {
+pub(crate) fn cred() -> vfs::Credentials {
     let caps = zenus_sched::scheduler::current_caps();
     vfs::Credentials::new(
         zenus_sched::scheduler::current_uid(),

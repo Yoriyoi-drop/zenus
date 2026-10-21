@@ -72,7 +72,7 @@ make test-host   # == cargo test --workspace --target x86_64-unknown-linux-gnu
 
 Host unit tests are `#[cfg(test)]` modules inside the kernel crates. They cover
 the pure logic — VMA arithmetic, packet parsing, permission bits, syscall
-numbering, journal replay, the fuzzing bookkeeping — and need no VM. 274 tests
+numbering, journal replay, the fuzzing bookkeeping — and need no VM. 275 tests
 across 11 crates.
 
 ```bash

@@ -3494,3 +3494,21 @@ Kenapa ini penting: `CAP_DAC_OVERRIDE` sekarang benar-benar bisa dicabut. Sebelu
 Host test diubah/ditambah: tes "root bypass" menjadi `access_check_bypass_is_the_capability_not_the_uid` (root tanpa capability **tidak** boleh menulis file read-only), dan `access_check_read_search_grants_reads_but_not_writes` memaku arti `CAP_DAC_READ_SEARCH` (baca boleh, tulis tidak, eksekusi file biasa tidak, pencarian direktori boleh).
 
 Verifikasi: cargo test --workspace (274 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (25/25 in-kernel).
+
+## BUG-059 - truncate/ftruncate diimplementasikan untuk tmpfs
+
+Status: sudah di-implementasi + host-tested + smoke-tested + in-kernel suite hijau.
+
+Apa yang kurang: `sys_truncate` dan `sys_ftruncate` mengembalikan -ENOSYS sejak BUG-051 (sebelumnya mengembalikan 0 tanpa memotong apa pun). VFS tidak punya operasi truncate sama sekali.
+
+Yang dikerjakan:
+- `FileSystem` dapat method default `truncate(inode, size) -> bool` yang mengembalikan false. Filesystem yang tidak bisa memotong file tidak boleh mengaku berhasil.
+- tmpfs mengimplementasikannya: hanya node bertipe `File`, ukuran di atas `MAX_FILE_SIZE` ditolak (bukan dipotong), dan saat file tumbuh lubangnya di-nol-kan. Yang terakhir penting: buffer node adalah file itu sendiri, jadi shrink hanya menggeser `size`; tanpa menol-kan, membaca kembali setelah grow akan menampilkan sisa data versi file yang lebih panjang.
+- `sys_truncate` membuka path, menolak direktori dengan -EISDIR dan tipe lain dengan -EINVAL, memeriksa izin tulis lewat `access_check` (-EACCES), lalu memanggil filesystem (-EINVAL kalau ditolak).
+- `sys_ftruncate` melakukan hal yang sama lewat descriptor: -EBADF kalau fd tidak ada, -EISDIR/-EINVAL untuk tipe yang salah, -EACCES untuk izin.
+- `fd::cred()` menjadi `pub(crate)` supaya jalur ini memakai kredensial yang sama dengan `fd_open`.
+- Keduanya dikeluarkan dari tes "ENOSYS" (tes itu memanggil syscall dengan pointer null; jalur baru membaca CR3, yang tidak boleh dijalankan di host).
+
+Host test baru: `truncate_shrinks_and_zeroes_the_hole_it_grows_back_into` (shrink, grow dengan lubang nol, ukuran di luar buffer ditolak tanpa mengubah apa pun, direktori ditolak).
+
+Verifikasi: cargo test --workspace (275 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (25/25 in-kernel).

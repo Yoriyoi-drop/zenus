@@ -3492,14 +3492,64 @@ fn sys_linkat(
     -1i64 as u64
 }
 
-fn sys_truncate(_path_ptr: u64, _length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    // The VFS has no truncate, so this used to validate the path and then
-    // return 0 without shrinking anything. Fail honestly instead.
-    -38i64 as u64 // -ENOSYS
+/// Resize a file by path.
+///
+/// This used to validate the path and return 0 without shrinking anything —
+/// the same silent success `prctl` and `ftruncate` had. It now reaches
+/// `FileSystem::truncate`, which only tmpfs implements; anything else answers
+/// `-EINVAL` rather than pretending.
+fn sys_truncate(path_ptr: u64, length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let path = match read_user_cstr(path_ptr, 256) {
+        Some(p) => p,
+        None => return -14i64 as u64, // -EFAULT
+    };
+    let node = match vfs::open(path.as_ref()) {
+        Some(n) => n,
+        None => return -2i64 as u64, // -ENOENT
+    };
+    let stat = node.fs.stat(node.inode);
+    if stat.file_type != vfs::FileType::File {
+        return if stat.file_type == vfs::FileType::Directory {
+            -21i64 as u64 // -EISDIR
+        } else {
+            -22i64 as u64 // -EINVAL
+        };
+    }
+    if !vfs::access_check(&cred(), &stat, true) {
+        return -13i64 as u64; // -EACCES
+    }
+    if node.fs.truncate(node.inode, length) {
+        0
+    } else {
+        -22i64 as u64 // -EINVAL: the filesystem refused the size
+    }
 }
 
-fn sys_ftruncate(_fd: u64, _length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
-    -38i64 as u64 // -ENOSYS: not implemented
+fn sys_ftruncate(fd: u64, length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let entry = match fd_get(fd) {
+        Some(e) => e,
+        None => return -9i64 as u64, // -EBADF
+    };
+    if entry.file_type != vfs::FileType::File {
+        return if entry.file_type == vfs::FileType::Directory {
+            -21i64 as u64 // -EISDIR
+        } else {
+            -22i64 as u64 // -EINVAL
+        };
+    }
+    let fs = match entry.fs {
+        Some(f) => f,
+        None => return -22i64 as u64, // -EINVAL: a pipe or socket
+    };
+    let stat = fs.stat(entry.inode);
+    if !vfs::access_check(&cred(), &stat, true) {
+        return -13i64 as u64; // -EACCES
+    }
+    if fs.truncate(entry.inode, length) {
+        0
+    } else {
+        -22i64 as u64 // -EINVAL
+    }
 }
 
 // ── Resource limit syscalls ──
@@ -4623,8 +4673,9 @@ mod host_tests {
         const ENOSYS: u64 = -38i64 as u64;
         assert_eq!(super::sys_setpgid(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_setsockopt(0, 0, 0, 0, 0, 0), ENOSYS);
-        assert_eq!(super::sys_ftruncate(0, 0, 0, 0, 0, 0), ENOSYS);
-        assert_eq!(super::sys_truncate(0, 0, 0, 0, 0, 0), ENOSYS);
+        // `sys_truncate`/`sys_ftruncate` left this list when they were
+        // implemented: they read the user pointer (a CR3 read, so not
+        // host-safe) and are covered by the tmpfs truncate tests instead.
         assert_eq!(super::sys_waitid(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_setrlimit(0, 0, 0, 0, 0, 0), ENOSYS);
         assert_eq!(super::sys_utimensat(0, 0, 0, 0, 0, 0), ENOSYS);
