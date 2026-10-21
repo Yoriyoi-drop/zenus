@@ -45,17 +45,18 @@ RTL8139, virtio-net.
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 277 host unit tests (`make test-host`), 26 in-kernel tests
+**Testing** — 277 host unit tests (`make test-host`), 27 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), a headless boot
 smoke test that requires the *ordinary* kernel to reach the shell prompt
 (`make smoke`), CI running all of them.
 
 ## Partially done
 
-- **User-mode hardening** — SMAP/SMEP are **enabled**. KPTI has its first stage
-  (`zenus_mem::kpti` builds a user view with the kernel half zeroed and an
-  in-kernel test proves it), but it is not active: a user CR3 still has the
-  whole kernel mapped until the entry stubs exist.
+- **User-mode hardening** — SMAP/SMEP are **enabled**. KPTI has its first two
+  stages: `zenus_mem::kpti` builds a user view with the kernel half zeroed, and
+  a page-aligned trampoline (`.text.kpti`/`.kpti_data`) is mapped into it with
+  a stub that switches CR3. It is still not active: a user CR3 has the whole
+  kernel mapped until the 256 IDT vectors get entry stubs.
 - **Container story** — the six namespace types exist and work, and cgroup
   `pids` and `memory` limits are now enforced; there is still no OCI runtime, no
   `cpu`/`io` enforcement, and no overlayfs.

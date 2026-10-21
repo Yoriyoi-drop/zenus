@@ -25,6 +25,114 @@ use crate::paging;
 /// user view. The split is a property of the 4-level layout, not a choice.
 pub const USER_HALF_ENTRIES: usize = 256;
 
+core::arch::global_asm!(
+    ".intel_syntax noprefix",
+    // The entry text. It is mapped into the user view at the same virtual
+    // address as in the kernel view, so the CPU can fetch the first
+    // instructions of an entry before the kernel is reachable again.
+    ".section .text.kpti, \"ax\"",
+    ".globl kpti_round_trip",
+    "kpti_round_trip:",
+    // Switch to the caller's user view. From here until the CR3 switch back,
+    // every byte this code touches — its own instructions, the slot below, the
+    // return address — must be mapped in *both* views. That is the invariant
+    // the whole file exists to keep, and the reason the return address is not
+    // read until after the switch back.
+    "  mov rax, rdi",
+    "  mov cr3, rax",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  ret",
+    // The data page. The entry stub needs the kernel CR3 *before* it can
+    // switch, so the value cannot live in the kernel's .data.
+    ".section .kpti_data, \"aw\"",
+    ".balign 8",
+    ".globl kpti_kernel_cr3_slot",
+    "kpti_kernel_cr3_slot:",
+    "  .quad 0",
+);
+
+extern "C" {
+    /// Run a few instructions under `user_cr3` and come back.
+    ///
+    /// This is not the real entry path yet — it only proves the trampoline page
+    /// is mapped and executable in the user view and that the CR3 pair can be
+    /// switched from code that stays mapped. Stage 3 replaces it with the
+    /// `syscall` and IDT stubs.
+    pub fn kpti_round_trip(user_cr3: u64);
+    static kpti_kernel_cr3_slot: u64;
+    static __kpti_text_start: u8;
+    static __kpti_text_end: u8;
+    static __kpti_data_start: u8;
+    static __kpti_data_end: u8;
+}
+
+/// The linked range of the entry text, page-aligned by the linker script.
+pub fn trampoline_text_range() -> (u64, u64) {
+    let start = core::ptr::addr_of!(__kpti_text_start) as u64;
+    let end = core::ptr::addr_of!(__kpti_text_end) as u64;
+    (start, end)
+}
+
+/// The linked range of the entry data (the kernel-CR3 slot).
+pub fn trampoline_data_range() -> (u64, u64) {
+    let start = core::ptr::addr_of!(__kpti_data_start) as u64;
+    let end = core::ptr::addr_of!(__kpti_data_end) as u64;
+    (start, end)
+}
+
+/// Publish the kernel CR3 where the entry stub can read it.
+///
+/// Called once, after `paging::init` has recorded the kernel PML4. Until it
+/// runs, the slot holds 0 and the stub would load CR3 = 0 if it were reached —
+/// which is why nothing calls the stub until this has run.
+pub fn init_trampoline() {
+    let slot = core::ptr::addr_of!(kpti_kernel_cr3_slot) as *mut u64;
+    // SAFETY: the slot is a plain `.quad` in a writable section, and this is
+    // the only writer. The write is volatile so it is not elided as a dead
+    // store to a location nothing in Rust reads.
+    unsafe {
+        core::ptr::write_volatile(slot, paging::kernel_cr3());
+    }
+}
+
+/// Map the trampoline's pages into `cr3` as supervisor pages.
+///
+/// Supervisor, not user: ring 3 must not be able to read or execute them, it
+/// only needs them *present* so the CPU can fetch the entry stub at CPL0 while
+/// the user view is loaded.
+fn map_trampoline_into(cr3: u64) -> bool {
+    let kernel = paging::kernel_cr3();
+    let (text_start, text_end) = trampoline_text_range();
+    let (data_start, data_end) = trampoline_data_range();
+
+    let mut va = text_start;
+    while va < text_end {
+        let phys = match paging::virt_to_phys_raw(kernel, va) {
+            Some(p) => p,
+            None => return false,
+        };
+        if !paging::map_supervisor_page_raw(cr3, va, phys, false) {
+            return false;
+        }
+        va += paging::PAGE_SIZE as u64;
+    }
+
+    va = data_start;
+    while va < data_end {
+        let phys = match paging::virt_to_phys_raw(kernel, va) {
+            Some(p) => p,
+            None => return false,
+        };
+        if !paging::map_supervisor_page_raw(cr3, va, phys, true) {
+            return false;
+        }
+        va += paging::PAGE_SIZE as u64;
+    }
+
+    true
+}
+
 /// Build the user view for `kernel_view_cr3`.
 ///
 /// The user half is shared with the address space it came from: the two tables
@@ -63,7 +171,17 @@ pub fn build_user_view(kernel_view_cr3: u64) -> Option<u64> {
         );
     }
 
-    Some(frame.as_u64() | (kernel_view_cr3 & 0xFFF))
+    let view = frame.as_u64() | (kernel_view_cr3 & 0xFFF);
+
+    // The trampoline is the one part of the kernel half a user view keeps: the
+    // CPU fetches the entry stub through whatever CR3 is loaded, so it has to be
+    // present before the kernel is reachable again.
+    if !map_trampoline_into(view) {
+        destroy_user_view(view);
+        return None;
+    }
+
+    Some(view)
 }
 
 /// Free a user view's PML4.
@@ -123,6 +241,44 @@ mod host_tests {
 #[cfg(feature = "testing")]
 pub mod tests {
     use super::*;
+
+/// The trampoline must be reachable — and executable — from the user view.
+    ///
+    /// The round trip switches CR3 to the user view, runs a few instructions in
+    /// the trampoline page, and switches back. Nothing else in the kernel is
+    /// reachable in between, so if any of the three things the stub touches (its
+    /// own code, the CR3 slot, and then the return address after switching back)
+    /// were missing from the user view, this test would fault instead of
+    /// returning.
+    pub fn test_trampoline_round_trip() -> Result<(), &'static str> {
+        let kernel = crate::paging::kernel_cr3();
+        let (text_start, _) = trampoline_text_range();
+
+        let view = match build_user_view(kernel) {
+            Some(v) => v,
+            None => return Err("no frame for the user view"),
+        };
+
+        if crate::paging::virt_to_phys_raw(view, text_start).is_none() {
+            destroy_user_view(view);
+            return Err("the trampoline must be mapped in the user view");
+        }
+
+        // SAFETY: the view maps the trampoline text and data pages at the same
+        // addresses as the kernel view, and the stub switches back to the kernel
+        // CR3 before touching the stack. See the assembly in this file.
+        unsafe {
+            kpti_round_trip(view);
+        }
+
+        let back = crate::paging::get_level4_addr().as_u64();
+        destroy_user_view(view);
+
+        if back != (kernel & !0xFFF) {
+            return Err("the trampoline must restore the kernel CR3");
+        }
+        Ok(())
+    }
 
     /// A user view keeps the user mappings and drops every kernel mapping.
     ///

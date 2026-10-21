@@ -15,6 +15,15 @@ SECTIONS {
     __text_start = .;
     .text : ALIGN(4K) {
         KEEP(*(.limine_reqs))
+        /* The KPTI trampoline gets its own page range so the user view can map
+         * exactly it and nothing else. It has to come before the .text
+         * wildcard, which would otherwise swallow the section and leave the
+         * range covering whatever happened to be linked next to it. */
+        . = ALIGN(4K);
+        __kpti_text_start = .;
+        KEEP(*(.text.kpti))
+        . = ALIGN(4K);
+        __kpti_text_end = .;
         *(.text .text.*)
         . = ALIGN(4K);
     } :text
@@ -28,6 +37,14 @@ SECTIONS {
     } :rodata
 
     .data : ALIGN(4K) {
+        /* The trampoline's data page. It is mapped into the user view because
+         * the entry stub has to read the kernel CR3 before it can switch to it,
+         * and before the switch nothing outside the trampoline is reachable. */
+        . = ALIGN(4K);
+        __kpti_data_start = .;
+        KEEP(*(.kpti_data))
+        . = ALIGN(4K);
+        __kpti_data_end = .;
         *(.data .data.*)
         . = ALIGN(4K);
     } :data

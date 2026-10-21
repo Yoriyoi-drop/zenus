@@ -44,6 +44,15 @@
   unenforced and the hierarchy is flat.
 
 ### Added
+- **KPTI stage 2: a trampoline that can switch CR3 (BUG-061).** `.text.kpti`
+  and `.kpti_data` are page-aligned ranges holding an entry stub and the kernel
+  CR3 it needs; both are mapped supervisor-only into every user view, because
+  the CPU fetches entry code through whatever CR3 is loaded. An in-kernel test
+  switches to a user view, runs the stub, and checks it comes back on the
+  kernel CR3 — the stub reads the return address only after switching back,
+  since the kernel stack is not mapped in the user view. Still not active:
+  the 256 IDT vectors need the same treatment.
+
 - **KPTI groundwork: a user view per address space (BUG-060).** `zenus_mem::kpti`
   builds a PML4 that keeps the user half and zeroes entries 256..511, so a
   ring-3 address space no longer has the kernel present. It is **not active**:

@@ -244,6 +244,47 @@ pub extern "C" fn map_user_page_raw(
     }
 }
 
+/// Map a page into an arbitrary address space as a **supervisor** page.
+///
+/// `map_user_page_raw` sets U/S; this one leaves it clear. The KPTI trampoline
+/// needs exactly that: present in the user view so the CPU can fetch it at
+/// CPL0, but not reachable from ring 3.
+pub extern "C" fn map_supervisor_page_raw(
+    cr3_phys_raw: u64,
+    virt: u64,
+    phys: u64,
+    writable: bool,
+) -> bool {
+    let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
+    let offset = VirtAddr::new(hhdm);
+    let cr3_phys = cr3_phys_raw & !0xFFF;
+    let pt_virt = (cr3_phys + hhdm) as *mut PageTable;
+    let mut mapper = unsafe { OffsetPageTable::new(&mut *pt_virt, offset) };
+
+    let va = match VirtAddr::try_new(virt) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let page = Page::<Size4KiB>::containing_address(va);
+    let frame = PhysFrame::containing_address(PhysAddr::new(phys));
+
+    let mut flags = PageTableFlags::PRESENT;
+    if writable {
+        flags |= PageTableFlags::WRITABLE;
+    }
+
+    let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
+    let result = unsafe { mapper.map_to(page, frame, flags, &mut *allocator) };
+
+    match result {
+        Ok(flush) => {
+            flush.flush();
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 pub fn virt_to_phys_raw(cr3_raw: u64, virt: u64) -> Option<u64> {
     let hhdm = HHDM_OFFSET.load(Ordering::Acquire);
     let cr3_phys = cr3_raw & !0xFFF;

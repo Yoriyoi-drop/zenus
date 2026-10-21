@@ -48,9 +48,9 @@ make fuzz-smoke     # in-kernel fuzzing campaign
 - **In-kernel tests** are `#[cfg(feature = "testing")] pub mod tests` modules
   returning `Result<(), &'static str>`, registered in
   `apps/src/test_runner.rs`. Only this layer *can* test MMIO/IDT/APIC. Most of
-  the 26 cases are still pure assertions; `kpti/user_view_hides_kernel` is the
-  exception — it builds real page tables and walks them. New hardware tests
-  belong here.
+  the 27 cases are still pure assertions; the two `kpti/*` cases are the
+  exception — they build real page tables and one of them switches CR3. New
+  hardware tests belong here.
 
 Conventions:
 

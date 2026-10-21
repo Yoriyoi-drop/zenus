@@ -252,7 +252,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 - **Watchdog:** ✅ **FUNCTIONAL** — Software watchdog dengan APIC timer integration, 30s default timeout, pet mechanism (shell loop + scheduler tick), auto-reboot on expiry, stop/status API. `crates/zenus-arch/src/watchdog.rs`
 - **Fault tolerance:** Tidak ada. Single point of failure di semua layer.
 - **Crash diagnostics:** ✅ **FUNCTIONAL** — Crash dump: full CPU register save (16 GP + RIP/RFLAGS/CS/SS), CR3 capture, 16-entry backtrace via frame pointer walk, panic message recording, serial dump + disk save support. `crates/zenus-arch/src/crash.rs`
-- **Testing:** ✅ **26 unit tests** across block_cache, VFS, ext2, paging. `make test` untuk build + run QEMU.
+- **Testing:** ✅ **27 unit tests** across block_cache, VFS, ext2, paging. `make test` untuk build + run QEMU.
 - **Missing:** CI/CD, kmemleak, kdump/kexec, fault injection, fuzzing, stress testing framework.
 
 ### Perbandingan
@@ -261,7 +261,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 | Watchdog | softdog/hwdog | softdog/hwdog | softdog/hwdog | softdog | Software watchdog |
 | Crash dump | kdump | kdump | kdump | kdump | Crash dump (reg+bt) |
 | Lock checking | lockdep | lockdep | lockdep | lockdep | Lockdep (basic) |
-| Test framework | LTP+ktest | LTP+ktest | LTP+ktest | LTP | 26 unit tests |
+| Test framework | LTP+ktest | LTP+ktest | LTP+ktest | LTP | 27 unit tests |
 
 ---
 
@@ -340,7 +340,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 ### Detail
 - **Build system:** Makefile + Cargo. Builds kernel menjadi ISO atau HDD image. Limine terintegrasi. **Functional** tapi tidak optimized.
 - **Documentation:** **TIDAK ADA.** Tidak ada README, ARCHITECTURE.md, CONTRIBUTING, API docs, atau inline docs yang berarti.
-- **Testing:** **FUNCTIONAL — Phase 1.8 complete.** 26 unit tests across block cache (LRU logic), VFS (path resolution), ext2 (struct sizes/constants), and paging (PAGE_SIZE). Test runner di `apps/src/test_runner.rs` dengan `#[cfg(feature = "testing")]` di setiap crate. `make test` untuk build + run QEMU. Tes berjalan saat boot (sebelum APIC timer) dan halt setelah selesai. Test kernel di `test_kernel/` untuk boot chain (assembly).
+- **Testing:** **FUNCTIONAL — Phase 1.8 complete.** 27 unit tests across block cache (LRU logic), VFS (path resolution), ext2 (struct sizes/constants), and paging (PAGE_SIZE). Test runner di `apps/src/test_runner.rs` dengan `#[cfg(feature = "testing")]` di setiap crate. `make test` untuk build + run QEMU. Tes berjalan saat boot (sebelum APIC timer) dan halt setelah selesai. Test kernel di `test_kernel/` untuk boot chain (assembly).
 - **CI/CD:** Tidak ada. Tidak ada GitHub Actions, GitLab CI, atau Jenkins.
 - **API stability:** Belum ada konsep API/ABI stability. Semua berubah setiap commit.
 - **Driver model:** Tidak ada framework untuk driver. Setiap driver ad-hoc. Tidak ada hotplug, device tree, atau probing framework.
@@ -446,7 +446,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 46. ✅ **Watchdog** — Software watchdog, 30s timeout, APIC timer integration, pet/auto-reboot
 47. ✅ **Crash dump** — CPU registers, backtrace, CR3, panic message, serial/disk output
 48. ✅ **Lockdep** — Lock ordering tracking, circular dependency detection, 64 lock classes
-49. ✅ **Testing framework** — 26 unit tests, `make test` to build + run in QEMU
+49. ✅ **Testing framework** — 27 unit tests, `make test` to build + run in QEMU
 50. ✅ **CI** — `.github/workflows/` runs the host suite, the in-kernel suite and lint
 
 ### Top 20 Critical Blockers
@@ -468,7 +468,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 | 13 | **No memory management** | Kernel | Heap 4MB fixed, no swap, no OOM — akan crash pada beban |
 | 14 | **~~ELF loader broken/crippled~~** | Kernel | ✅ **Rewritten** with `map_user_page_raw` — menunggu user binary |
 | 15 | **~~No block cache~~** | Filesystem | ✅ **64-entry LRU** — hit/miss ratio tracked |
-| 16 | **~~No testing~~** | Reliability | ✅ **26 unit tests** — `make test` untuk build+run QEMU |
+| 16 | **~~No testing~~** | Reliability | ✅ **27 unit tests** — `make test` untuk build+run QEMU |
 | 17 | **No documentation** | Developer | Tidak ada cara bagi developer baru untuk memahami sistem |
 | 18 | **~~No container support~~** | Cloud | ✅ **PARTIAL — PID + UTS namespaces** (clone_task, PID remapping, per-ns hostname). Masih kurang: NET, MOUNT, USER, IPC, cgroups, overlayfs |
 | 19 | ~~**ASLR tidak ada**~~ | Security | ✅ **PARTIAL — per-process userspace ASLR via RDRAND+PRNG, kernel at fixed base** |
@@ -488,7 +488,7 @@ Zenus OS adalah kernel server 64-bit x86 yang ditulis dalam Rust, menggunakan Li
 5. **Basic disk filesystem** — ✅ ext2 read-only: superblock/BGDT/inode parsing, directory iteration, file read via block cache. **Verified**: `read_dir("/")` returns `lost+found(11), hello.txt(12), subdir(13)`; `read(hello.txt)` returns `"Hello from ext2 filesystem on Zenus!"`.
 6. **Block cache** — ✅ 64-entry LRU write-back cache di `block_cache.rs`. `bc_read`, `bc_write`, `bc_flush`, `bc_stats` via global `BLOCK_CACHE` SpinLock. Boot-time stats: 4 misses, 0 hits.
 7. **Block I/O scheduler** — ✅ Minimal noop scheduler via block cache layer. Synchronous ATA PIO — I/O queuing tidak diperlukan.
-8. **Testing framework** — ✅ **26 unit tests** across block_cache, VFS, ext2, paging. `make test` build + run via QEMU. `testing` feature flag di workspace crates. Test runner prints results over serial and halts.
+8. **Testing framework** — ✅ **27 unit tests** across block_cache, VFS, ext2, paging. `make test` build + run via QEMU. `testing` feature flag di workspace crates. Test runner prints results over serial and halts.
 
 ### Phase 2: Networking & Security (6-12 months) → Beta
 **Goal:** Jaringan berfungsi, security model dasar.

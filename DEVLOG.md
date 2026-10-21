@@ -3532,3 +3532,21 @@ Tahap 1 yang dikerjakan sekarang:
 - Dua host test untuk pembagian slot PML4 (user < 0x0000_8000_0000_0000, kernel >= 0xFFFF_8000_0000_0000, tidak pernah satu slot).
 
 Verifikasi: cargo test --workspace (277 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (26/26 in-kernel, termasuk tes baru).
+
+## BUG-061 - KPTI tahap 2: halaman trampoline dan tukar CR3
+
+Status: tahap 2 selesai + in-kernel-tested. **Belum diaktifkan** (butuh tahap 3).
+
+Apa yang kurang: tahap 1 hanya membangun tabel user view. Belum ada kode yang bisa berjalan *di* view itu, karena begitu CR3 ditukar, instruksi berikutnya ada di teks kernel yang justru tidak lagi terpetakan.
+
+Yang dikerjakan:
+- Section baru di linker script: `.text.kpti` (dipetakan sebagai `__kpti_text_start..__kpti_text_end`, tepat satu halaman) dan `.kpti_data` (`__kpti_data_start..__kpti_data_end`). Keduanya harus `KEEP` dan diletakkan **sebelum** wildcard `.text .text.*`, kalau tidak rentangnya ikut menelan teks lain dan pemetaan user view jadi lebih lebar dari yang dimaksud.
+- Stub asm `kpti_round_trip` di section itu: `mov cr3, rdi` (masuk ke user view), baca slot kernel CR3, `mov cr3, rcx` (kembali), lalu `ret`. Alamat kembali sengaja baru dibaca **setelah** kembali ke kernel view: stack kernel tidak terpetakan di user view, jadi `ret` sebelum tukar balik akan fault. Inilah invarian yang seluruh file ini jaga.
+- Slot `kpti_kernel_cr3_slot` ada di `.kpti_data`, bukan `.data` biasa, karena stub harus bisa membacanya sebelum kernel bisa diakses. `kpti::init_trampoline()` menulis nilai `kernel_cr3()` ke situ saat boot (dua jalur boot: normal dan testing).
+- `paging::map_supervisor_page_raw` — pemetaan dengan U/S = 0. Trampoline harus *hadir* di user view supaya CPU bisa mengambil instruksinya di CPL0, tetapi tidak boleh bisa disentuh ring 3.
+- `build_user_view` memetakan kedua rentang trampoline ke view baru. Kalau gagal, view dibuang dan fungsi mengembalikan `None`.
+- In-kernel test `kpti/trampoline_round_trip`: membangun view dari kernel CR3, memastikan teks trampoline terpetakan, lalu **benar-benar menukar CR3** dan menjalankannya. Kalau salah satu dari tiga hal yang disentuh stub (kodenya sendiri, slot CR3, dan alamat kembali setelah tukar balik) tidak ada di view, tes ini fault, bukan lulus. Setelah kembali, tes memeriksa CR3 sudah kembali ke kernel.
+
+Verifikasi: cargo build + make build (simbol `__kpti_text_start/end` dan `__kpti_data_start/end` benar), make smoke (prompt shell tercapai), make test-quiet (27/27 in-kernel, termasuk tes round-trip).
+
+Sisa tahap 3 dan 4 (belum dikerjakan): stub entry untuk 256 vektor IDT (CPU mengambil handler lewat CR3 yang aktif, jadi instruksi pertama setiap handler harus di halaman trampoline; ini berarti mengganti `extern "x86-interrupt"` dengan stub asm + dispatcher Rust), lalu aktivasi di scheduler dengan `TSS.RSP0` menunjuk entry stack yang terpetakan di kedua view.

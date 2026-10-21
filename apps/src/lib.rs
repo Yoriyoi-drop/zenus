@@ -397,6 +397,10 @@ pub extern "C" fn entry() -> ! {
     cpu::init();
     frame_allocator::global_init(mem_regions, hhdm_offset);
     paging::init(hhdm_offset);
+    // Publish the kernel CR3 where the KPTI entry stub can read it. Nothing
+    // executes the stub yet (KPTI is not active), but the slot must not be 0
+    // when it is.
+    zenus_mem::kpti::init_trampoline();
     frame_allocator::reserve_boot_stack(hhdm_offset);
     interrupts::init();
     // Clear U/S at all four levels of every present entry, then turn on SMEP +
@@ -725,6 +729,7 @@ pub extern "C" fn entry() -> ! {
     cpu::init();
     frame_allocator::global_init(mem_regions, hhdm_offset);
     paging::init(hhdm_offset);
+    zenus_mem::kpti::init_trampoline();
     frame_allocator::reserve_boot_stack(hhdm_offset);
     interrupts::init();
     zenus_console::vga::init(hhdm_offset);
