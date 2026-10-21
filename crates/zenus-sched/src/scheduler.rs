@@ -744,6 +744,8 @@ pub fn clone_task(
         task.euid = parent.euid;
         task.egid = parent.egid;
         task.no_new_privs = parent.no_new_privs;
+        // Inherited, never widened: a child can only hold what its parent held.
+        task.caps = parent.caps;
         task.parent_pid = parent.id;
         task.uts_ns = new_uts_ns;
         task.pid_ns = new_pid_ns;
@@ -1494,6 +1496,41 @@ pub fn get_no_new_privs(task_id: u64) -> bool {
         .iter()
         .find_map(|s| s.as_ref().filter(|t| t.id == task_id).map(|t| t.no_new_privs))
         .unwrap_or(false)
+}
+
+/// The capability set of the running task.
+///
+/// Falls back to `CapSet::none()` when there is no current task, so a lookup
+/// from an odd context fails closed rather than granting everything.
+pub fn current_caps() -> crate::caps::CapSet {
+    get_caps(current_task_id()).unwrap_or(crate::caps::CapSet::none())
+}
+
+/// Read a task's capability set (`None` if the task is unknown).
+pub fn get_caps(task_id: u64) -> Option<crate::caps::CapSet> {
+    let tasks = TASKS.lock();
+    tasks
+        .tasks
+        .iter()
+        .find_map(|s| s.as_ref().filter(|t| t.id == task_id).map(|t| t.caps))
+}
+
+/// Replace a task's capability set.
+///
+/// Only ever called with a subset of the current set (see `PR_CAPBSET_DROP`):
+/// the kernel deliberately exposes no way to add a capability back, because
+/// there is no privilege boundary that could justify one.
+pub fn set_caps(task_id: u64, caps: crate::caps::CapSet) {
+    let mut tasks = TASKS.lock();
+    if let Some(slot) = tasks
+        .tasks
+        .iter_mut()
+        .find(|s| s.as_ref().map_or(false, |t| t.id == task_id))
+    {
+        if let Some(t) = slot.as_mut() {
+            t.caps = caps;
+        }
+    }
 }
 
 pub fn set_current_uid(uid: u32) -> bool {

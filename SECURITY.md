@@ -50,14 +50,25 @@ than by the hardware:
 
 ### 2. No privilege separation beyond uid/gid
 
-- No capabilities. `prctl` classifies every option: `PR_SET_SECCOMP` answers
-  `-EINVAL` (seccomp does not exist), `PR_SET_PDEATHSIG`/`PR_GET_PDEATHSIG`
-  answer `-EINVAL` (no parent-death signal is delivered), and unknown options
-  fail too. `PR_SET_NO_NEW_PRIVS`/`PR_GET_NO_NEW_PRIVS` are honoured for real
-  (the flag is stored and inherited by children). `PR_SET_NAME`/`PR_GET_NAME`
-  work; `PR_SET_KEEPCAPS`/`PR_GET_KEEPCAPS` are accepted as no-ops because
-  there is no capability set to keep.
-- `root` (euid 0) bypasses every permission check.
+- **A capability set exists, but it is one set per task** (`zenus_sched::caps`),
+  not Linux's permitted/effective/inheritable split: the set is both the
+  bounding set and the effective set. Every task starts with all 17
+  capabilities and `clone_task` copies the parent's, so a task can only ever
+  hold *less* than its parent. `PR_CAPBSET_READ`/`PR_CAPBSET_DROP` are
+  implemented and are the only way to shrink it — nothing can add a capability
+  back. `sys_mount`, `sys_umount2` and `sys_sethostname` check
+  `CAP_SYS_ADMIN` instead of `euid == 0`; the rest of the kernel still checks
+  uid, so dropping `CAP_DAC_OVERRIDE` does not restrict file access yet.
+- `prctl` classifies every option: `PR_SET_SECCOMP` answers `-EINVAL` (seccomp
+  does not exist), `PR_SET_PDEATHSIG`/`PR_GET_PDEATHSIG` answer `-EINVAL` (no
+  parent-death signal is delivered), and unknown options fail too.
+  `PR_SET_NO_NEW_PRIVS`/`PR_GET_NO_NEW_PRIVS` are honoured for real (the flag
+  is stored and inherited by children). `PR_SET_NAME`/`PR_GET_NAME` work;
+  `PR_SET_KEEPCAPS`/`PR_GET_KEEPCAPS` are accepted as no-ops because there is
+  no `setuid` exec that would drop capabilities in the first place.
+- `root` (euid 0) still bypasses every permission check, and every task is
+  root by default — the capability set narrows what a task may do, the uid
+  model does not.
 - No LSM, no audit log of security decisions. `syslog` and the error-code
   counters record *events*, not *decisions*.
 

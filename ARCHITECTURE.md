@@ -142,8 +142,10 @@ userspace workspace.
 stored on the task and inherited by children); `PR_SET_SECCOMP` is *not*
 implemented and returns `-EINVAL` rather than claiming success, and
 `PR_SET_PDEATHSIG` also returns `-EINVAL` because the parent-death signal is
-never delivered. Capabilities themselves still do not exist, so
-`PR_SET/GET_KEEPCAPS` remain accepted no-ops.
+never delivered. `PR_CAPBSET_READ`/`PR_CAPBSET_DROP` operate on the per-task
+capability set in `zenus_sched::caps`, which is both the bounding and the
+effective set — one set, not Linux's three. `PR_SET/GET_KEEPCAPS` remain
+accepted no-ops because no `setuid` exec drops capabilities.
 
 ## Layer 7 — Console and diagnostics (`zenus-console`)
 

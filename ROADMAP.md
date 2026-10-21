@@ -45,7 +45,7 @@ RTL8139, virtio-net.
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 266 host unit tests (`make test-host`), 25 in-kernel tests
+**Testing** — 271 host unit tests (`make test-host`), 25 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), a headless boot
 smoke test that requires the *ordinary* kernel to reach the shell prompt
 (`make smoke`), CI running all of them.
@@ -60,6 +60,11 @@ smoke test that requires the *ordinary* kernel to reach the shell prompt
 - **Service management** — the init system supervises and restarts services and
   now starts them in dependency order (`service_register_with_deps`); there is
   still no health checking beyond "still running" and no declarative manifests.
+- **Capabilities** — a per-task set exists (`zenus_sched::caps`), is inherited
+  and can be dropped with `PR_CAPBSET_DROP`; `mount`, `umount2` and
+  `sethostname` gate on `CAP_SYS_ADMIN`. There is one set, not Linux's
+  permitted/effective/inheritable split, and most permission checks still use
+  uid rather than a capability.
 - **Shell** — ~90 builtins, no job control, no pipelines, no redirection.
 
 ## Known broken
@@ -98,7 +103,7 @@ Do not build on these without reading the code:
 | Thing | Reality |
 |---|---|
 | SSH | `ZENUS_SSH/1.0`, a homegrown line protocol with a weak keystream and a default password |
-| Capabilities / seccomp | `PR_SET_NO_NEW_PRIVS` is tracked and inherited; `PR_SET_SECCOMP` fails with `-EINVAL`; no capability set yet |
+| Capabilities / seccomp | A per-task set exists and gates `mount`/`umount2`/`sethostname`; it is one set, not the Linux three, and file access still keys off uid. `PR_SET_SECCOMP` fails with `-EINVAL` |
 | Container runtime / OCI | Does not exist |
 | Cryptography | No library at all |
 | Userspace | Ring-3 programs are built from this workspace by hand; no libc |
@@ -119,7 +124,10 @@ advertised but unenforced, and the hierarchy is flat. Next:
 2. **KPTI**, so a user CR3 does not have the kernel half mapped. SMEP/SMEP
    being on (done) is not the same thing.
 3. **A driver model** so storage stops being PIO-only: AHCI first.
-4. **Capabilities and a real `prctl`**, replacing the current no-ops.
+4. **Capabilities, next step.** The set exists and three syscalls check it.
+   What is missing is coverage: `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH` should
+   replace the `euid == 0` shortcuts in `access_check`, `CAP_KILL` should gate
+   `sys_kill` for other uids, and `PR_SET_SECCOMP` is still absent.
 
 Boot testing is done: `make smoke` boots the ordinary kernel headless and fails
 unless the shell prompt appears, and `make test-quiet` now fails when the

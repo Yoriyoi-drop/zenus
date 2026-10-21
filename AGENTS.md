@@ -7,8 +7,9 @@ Zenus is an x86_64 kernel written in Rust (`no_std`). It boots via Limine
 fuzzing framework and a host-side unit-test suite.
 
 State: **pre-alpha**. Core subsystems work; the security model is incomplete
-(no KPTI, no capabilities — see `SECURITY.md`) and several subsystems are
-deliberately shallow (see "Known shallow spots" below).
+(no KPTI, and a capability set that only three syscalls consult — see
+`SECURITY.md`) and several subsystems are deliberately shallow (see "Known
+shallow spots" below).
 
 ## Build and run
 
@@ -101,9 +102,12 @@ Do not assume these work; read the code first.
   * QEMU's default `qemu64` model has neither feature, so any test target that
     should exercise them needs `-cpu max` — `make test` and the fuzz targets
     have it.
-- No KPTI, no capabilities, no secure boot, no crypto library.
-- `zenus-fs/src/cgroup.rs` is a **read-only view** of the cgroup v2 layout:
-  create/unlink/write all fail, no controller is enforced.
+- No KPTI, no secure boot, no crypto library.
+- Capabilities exist but are **one set per task** (`zenus_sched::caps`), not
+  Linux's permitted/effective/inheritable split. Only `mount`, `umount2` and
+  `sethostname` check one; everything else still checks `euid == 0`.
+- `zenus-fs/src/cgroup.rs` enforces `pids.max` and `memory.max`; `cpu` and
+  `io` are advertised and unenforced, and the hierarchy is flat.
 - `zenus-net/src/ssh.rs` speaks a homegrown `ZENUS_SSH/1.0` line protocol with a
   hand-rolled keystream and a default password of `zenus`. It is not SSH.
 - The ZENUS_SSH keystream has ~2 bits of entropy per byte (pinned by a test).

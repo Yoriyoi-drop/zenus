@@ -3,8 +3,32 @@
 ## Unreleased
 
 ### Added
-- **`fchdir` works (BUG-053).** `FdEntry` now records the path a descriptor
-  was opened through (inherited by `dup`/`dup2`/`clone`), and `fchdir` switches
+- **A per-task capability set (BUG-056).** `zenus_sched::caps` defines
+  `CapSet` and 17 `CAP_*` bits; every task starts with all of them and
+  `clone_task` copies the parent's, so a child can hold less but never more.
+  `sys_mount`, `sys_umount2` and `sys_sethostname` now check
+  `CAP_SYS_ADMIN` instead of `euid == 0` — a check that could not fail, since
+  every task is root. `prctl(PR_CAPBSET_READ/DROP)` is implemented and is the
+  only way to shrink the set. It is **one** set per task, both bounding and
+  effective, not Linux's three; the rest of the kernel still checks uid, so
+  dropping `CAP_DAC_OVERRIDE` does not restrict file access yet.
+
+- **The path resolver follows symlinks (BUG-055).** `open_in_ns` expands a
+  link in any component — always in the middle, and in the last one unless the
+  caller asks otherwise. `open_in_ns_nofollow` backs `readlink`, so reading a
+  link still returns the target instead of resolving it first and failing.
+  Relative targets resolve against the link's own directory; expansion restarts
+  from the top so a link may cross into another mount. Depth is bounded at
+  `MAX_SYMLINK_DEPTH` and an expanded path is capped at `MAX_RESOLVED_PATH`,
+  so loops, long chains and over-long expansions are refused rather than
+  recursing or truncating. Four host tests cover it.
+
+- **Symbolic links in tmpfs (BUG-052).** `symlinkat` and `readlinkat` work for
+  tmpfs nodes: the target is stored in the node and read back without
+  following it.
+
+- **`fchdir` works (BUG-053).** `FdEntry` records the path a descriptor was
+  opened through (inherited by `dup`/`dup2`/`clone`), and `fchdir` switches
   the task's cwd to it, rejecting non-directories with `-ENOTDIR`.
 
 - **cgroup v2 `pids` and `memory` limits are enforced (BUG-041).** The
@@ -20,338 +44,17 @@
   unenforced and the hierarchy is flat.
 
 ### Fixed
+- **A followed symlink no longer drops the rest of the path (BUG-055).**
+  `/dirlink/real` with `dirlink -> /dir` resolved to `/dir` — the link's
+  *parent* — because only the target was re-resolved. The remaining components
+  are appended now. Found by the new traversal test.
+
 - **`make test`/`make test-quiet` capture serial to a file (BUG-054).**
   Both ran QEMU with `-serial mon:stdio`, which writes nothing when stdout is
   not a TTY: the log came out empty, `make test` hung to its timeout and
   `test-quiet` failed with "did not report success". The run now uses
   `-serial file:` and the log is printed afterwards; the pass gate moved into
   a shared `test-check` target.
-
-### Added
-- **Symbolic links in tmpfs (BUG-052).** `symlinkat` and `readlinkat` work for
-  tmpfs nodes: the target is stored in the node and read back without
-  following it.
-
-- **The path resolver follows symlinks (BUG-055).** `open_in_ns` expands a
-  link in any component — always in the middle, and in the last one unless the
-  caller asks otherwise. `open_in_ns_nofollow` backs `readlink`, so reading a
-  link still returns the target instead of resolving it first and failing.
-  Relative targets resolve against the link's own directory; expansion restarts
-  from the top so a link may cross into another mount. Depth is bounded at
-  `MAX_SYMLINK_DEPTH` and an expanded path is capped at `MAX_RESOLVED_PATH`,
-  so loops, long chains and over-long expansions are refused rather than
-  recursing or truncating. Four host tests cover it.
-
-### Fixed
-- **A followed symlink no longer drops the rest of the path (BUG-055).**
-  `/dirlink/real` with `dirlink -> /dir` resolved to `/dir` — the link's
-  *parent* — because only the target was re-resolved. The remaining components
-  are appended now. Found by the new traversal test.
-
-### Fixed
-- **Dead task-teardown machinery removed (BUG-042).** `task_exit()`,
-  `TERMINATED_STACKS` and `reap_terminated_stacks()` were unreachable: `sys_exit`
-  uses `exit_current_task()` and `reap_task()` frees the kernel stack directly.
-  The deferred-free path and the unreachable `task_exit` are gone, so teardown
-  has exactly two consistent paths. The `meminfo` `Used` line also gained host
-  tests (`zenus-mem/src/used_memory_tests.rs`).
-- **`prctl(PR_SET_NO_NEW_PRIVS)` is honoured (BUG-043).** The flag is stored on
-  the task, inherited by `clone_task`, and returned by `PR_GET_NO_NEW_PRIVS`.
-  `PR_SET_SECCOMP` still fails with `-EINVAL` because seccomp does not exist —
-  the kernel no longer claims otherwise.
-- **`io_stats()` reports the real read/write split (BUG-044).** It returned
-  `(total, 0, 0)`; reads and writes are now counted separately and
-  `total == reads + writes`.
-- **Fuzz minimisation uses a real crash oracle (BUG-045).** `minimize()`
-  accepted any non-empty candidate and shrank every crash to one byte without
-  reproducing it; the campaign now calls `minimize_with` with
-  `execute_input(candidate) == Crash`, and the predicate-free helpers are gone.
-- **Init starts services in dependency order (BUG-046).**
-  `service_register_with_deps` records prerequisites and `init_system_start`
-  starts a service only once every dependency is running.
-- **Eleven silent-success syscall stubs return `-ENOSYS` (BUG-047).**
-  `ftruncate`, `fchownat`, `setrlimit`, `fchdir`, `utimensat`, `setpgid`,
-  `setsockopt`, `nice` and the three `sched_*` calls no longer report success
-  without doing anything.
-
-### Testing
-- **Fuzz campaigns now run headlessly (BUG-048).** `make fuzz-smoke` ran QEMU
-  with `-serial stdio`, which writes nothing in a non-TTY (CI) run, so the
-  target reported "campaign did not finish" even when the campaign had
-  completed. It now writes serial straight to the log and reports
-  `[FUZZ] EXIT code=0` (verified: 2000 cases, 0 crashes).
-- **A boot smoke test, and a `test-quiet` that can actually fail.** `make smoke`
-  builds the ordinary kernel's ISO, boots it headless under `-cpu max`, and fails
-  unless the shell prompt (`zenus$ `) appears on the serial line. Nothing before
-  it checked that the *shipping* kernel boots — `make test` runs the `testing`
-  kernel, which is a different binary — so a panic or a triple fault at boot was
-  invisible until it shipped. `make test-quiet` had two defects in one line: it
-  ended in `| grep -a "\[TEST\]"`, so its exit status was grep's and it reported
-  success whenever the suite merely ran; and the kernel does not power off after
-  the suite, so the target never returned and a CI step running it hung until the
-  job timeout. It now caps the VM with `timeout`, keeps the log, and requires the
-  `[OK] All tests passed` summary. CI runs `make smoke` in both pipelines.
-
-### Security
-- **SMAP and SMEP are enabled at boot.** This was item 1 of `ROADMAP.md` and
-  the top gap in `SECURITY.md`; it is done. Five separate defects had to be
-  fixed first, and each one was a real bug on its own, independent of SMAP:
-  - `zenus_arch::cpu::stac`/`clac` were declared `nomem`, which told LLVM the
-    inline asm touches no memory and therefore permitted it to hoist a
-    `read_volatile`/`copy_nonoverlapping` across the pair. Every user-memory
-    copy in the syscall layer was inside that window and could be scheduled
-    after the `clac`, so with SMAP on it faulted. The `mov cr4` guard around
-    them was also pointless: `STAC` sets AC whether or not SMAP is enabled.
-  - `sys_write`'s stdout/stderr path read the user buffer byte-by-byte through a
-    raw pointer with **no `stac` at all** — its comment said as much ("SMAP
-    disabled, so the kernel can access user memory directly"). It now streams in
-    fixed chunks through the direct map, which also means an unmapped buffer is
-    `EFAULT` instead of a ring-0 page fault.
-  - `signal::setup_signal_frame`/`restore_signal_frame` pushed and popped the
-    `ucontext` frame through raw user pointers, and never checked the frame was
-    mapped. A signal handler could wedge the machine from the timer handler.
-  - The page-fault handler read faulting stacks with a bare `read_volatile` and
-    no translation check, so it faulted *itself*: a nested `#PF` re-entered the
-    handler and the machine wedged in a silent loop printing one header. It now
-    walks the tables and reads through the HHDM, which is supervisor-only and so
-    needs no `stac` at all.
-  - `sys_execve` built the new image's initial user stack while the **old** CR3
-    was still loaded. `load_elf` randomises `stack_top`, so those writes went to
-    an address the loaded CR3 did not map. The shell's `run` command did switch
-    CR3 but left interrupts enabled across the window, so a timer tick could
-    run the ISR on the half-built address space. Both now go through
-    `zenus_syscall::userstack::write_initial_user_stack`.
-
-### Fixed
-- `clone_user_address_space` zeroed each new page table with
-  `write_bytes(ptr, 0, 512 * 8)` against a `*mut u64`. `write_bytes` counts
-  *elements*, so that is 4096 elements = 32 KiB per table instead of 4 KiB —
-  three tables per `fork`, so every fork zeroed 24 KiB past the end of a page
-  table it had just taken from the frame allocator. `page_table_bytes()` makes
-  the count a byte count, and `a_page_table_is_exactly_one_page` pins it.
-- The page-fault dump mislabelled five of its eight fault-type encodings. It
-  indexed the error code as present?/user?/write?, when bit 1 is W/R and bit 2
-  is U/S — so `0x1`, a supervisor read of a *present* page, printed as
-  "supervisor-write-nonpresent". That is what a SMAP violation looks like, and
-  it is why this took as long as it did to find. It now also prints
-  `[SMAP: supervisor touched a user page without stac]` when that is the case.
-- `make test` and `make test-quiet` did not pass `-cpu max`. QEMU's default
-  `qemu64` model has no SMEP and no SMAP, so the in-kernel suite was silently
-  not testing them at all.
-
-### Fixed
-- **BUG-039: `free_frames_count` reported the recycled stack, not the free
-  memory.** It used to be `free_count` — the depth of the stack of frames handed
-  back by `free_frame` — which is zero on a fresh allocator. `sys_mmap` budgets
-  against this number, so on a 2 GiB machine `mmap` was capped at 16 384 pages
-  (the stack size) no matter how much was actually free, and `meminfo`'s free
-  line bore no relation to the machine. It is now the recycled stack **plus** the
-  pages each of `alloc_frame`'s two passes can still reach, computed the same way
-  the allocator reaches them, and it is exact: the two passes are disjoint and
-  the stack holds pages both have moved past. `meminfo` prints it as `Free:`
-  rather than `Free stack:`, and the seven new tests in `free_count_tests.rs`
-  check the number against a real drain at every step rather than against a
-  second copy of the allocator's arithmetic.
-
-### Fixed
-- **BUG-038: the frame allocator served memory that does not exist.** Its second
-  pass — the one that serves the pages below the 16 MiB floor that pass one
-  cannot see — advanced `regions[i].base` in place without shrinking `length`,
-  so a region's claimed end grew by a page per allocation until the *first* pass,
-  which trusts `base + length`, started handing it out. On a 32 MiB region that
-  was 3584 phantom pages, and `total_memory` drifted up with them. The pass now
-  keeps `regions` read-only and moves allocator-owned state instead: a `floor`
-  (the seeded `next_free`, and the ceiling the low pass may not cross) and a
-  per-region `low_cursor`, which `reserve_region` shifts along with the region it
-  belongs to. Two things had blocked the fix for three attempts: `reserve_region`
-  had no tests (six of the seven unnoticed mutations were of it), and the seeding
-  lives in `global_init`, which reads `rsp` and so no host test could call it.
-  The seeding decision is now the pure `plan_regions`, which `global_init` *and*
-  `FrameAllocator::new` both call — the two paths were previously equivalent only
-  by inspection. `plan_tests.rs` adds 11 tests; 15 of 16 mutations are caught and
-  the survivor is a dead store, with the reason recorded in `reset`. `DEVLOG.md`
-  BUG-038 has the full account.
-- **A sub-page `reserve_region` reserved nothing.** It split the region list on
-  exact byte boundaries, so `[0x1000, 0x5000)` minus `[0x1800, 0x2000)` became
-  `[0x1000, 0x1800)` and `[0x2000, 0x5000)`. `alloc_frame` rounds a region's base
-  *up*, so it went on serving page `0x1000` — a page the reservation overlapped.
-  The reservation now rounds both ends out to page boundaries, which is the safe
-  direction: it reserves at least what was asked for. Every caller today is
-  already page aligned, so this changes nothing for them and closes the hole for
-  anything that is not.
-- **`reserve_region` could spin forever.** The branch that swallows a whole region
-  `continue`s without advancing its index, relying on `region_count` having gone
-  down. Lose that decrement and the loop never terminates — a hang rather than a
-  wrong answer, which is the worst failure mode a test can have. It is now pinned
-  by a test that turns the hang into a failure.
-- **`reserve_region` has tests at all.** It reshapes the region list four different
-  ways and runs during initialisation, before there is a shell, where a mistake
-  has neither a test behind it nor a log anyone reads. Six of the seven mutations
-  that went unnoticed during the three reverted attempts at the allocator's
-  second pass (BUG-038) were mutations of this function, and the function was
-  untested. Ten of thirteen mutations are now caught; the three that are not are
-  unreachable through the public API and are listed, with the reason, in
-  `crates/zenus-mem/src/reserve_tests.rs`.
-
-### Fixed
-- **BUG-035: the heap corrupted itself after a single `run`.** `size` in a block
-  header is a payload length, but every header must be 16-byte aligned — and
-  with the header immediately before its payload, those two only hold if each
-  block's *extent* is a multiple of the alignment. A 3-byte block does not give
-  that, and 3-byte blocks are routine: `devfs::readdir` allocates a `String` per
-  entry name, and `run` allocates an 8616-byte buffer for an ELF. The leftover
-  header was placed at the payload's *end*, so the next allocation from it
-  rounded its own header up past it and overwrote that block's `next` and
-  `canary`. The free list's chain became a small integer, the walk stopped, and
-  no further program could start. All three addresses now come from one
-  round-up, and the header records the payload length rounded up. Verified:
-  two `run`s plus `meminfo` reports 8063 KB free.
-- Every hex dump printed `0x0x...`. `write_hex` emits its own prefix and 26 call
-  sites added another, across the crash dump (all 19 registers), `acpi`, `virtio`
-  and the shell.
-- `make iso` and `make test-iso` shared one `libzenus.a`, so after a
-  `make test-iso` the next `make iso` linked the *testing* archive and the ISO
-  booted straight into the in-kernel suite instead of the shell. Each build now
-  has its own `CARGO_TARGET_DIR`, the archive steps are phony, and the ISO rules
-  copy their own linked kernel in rather than re-running the linker.
-
-- **BUG-036: the frame allocator never recycled a single page.** `free_frame`
-  refused any frame falling inside a known region, as a double-free guard — but
-  regions describe memory *available to be handed out*, so every frame the
-  allocator ever returned matched and every free was discarded. `free_stack`
-  stayed empty, `used_memory` (decremented after that guard, so also never
-  reached) stayed at 0, and `sys_mmap` — which budgets against the stack depth —
-  refused every mapping. Recycling and the double-free guard are fixed and
-  mutation-checked; the `free_frames_count` under-report is still open and its
-  design is written up in `DEVLOG.md`.
-- Two more frame-allocator tests, chosen because the mutation checks showed my
-  earlier fixtures never reached the allocator's second pass: a region
-  straddling the 16 MiB floor, drained completely, and `free_frame` refusing a
-  non-frame address. Seven mutations of the allocator are now caught in total;
-  before these, three went unnoticed.
-
-- **A clean `fuzz-coverage` run reported `EXIT code=3`.** The campaign completed
-  50 000 cases with `crashes=0` and still printed a watchdog `TIMEOUT` and
-  `EXIT code=3` on top of its own verdict, so a passing campaign read as a failed
-  one and CI would act on that. `campaign_task` set `CAMPAIGN_DONE` before
-  `finish()` set `EXITING`, and the watchdog reads `CAMPAIGN_DONE` as "finished
-  without publishing a verdict, abort" — so it had a window in which the
-  campaign was done but the verdict had not been published yet, and it took it.
-  Only runs finishing near the deadline hit it, which is what a long coverage
-  campaign does. `EXITING` is now set first. Confirmed by reverting the reorder:
-  `TIMEOUT` and `EXIT code=3` come straight back.
-
-- Nothing this tick: `fuzz-coverage` ran clean at 50 000 cases again, and a
-  third attempt at the frame allocator's second-pass fix was reverted for the
-  third time. `DEVLOG.md` BUG-038 records the mutation results across all three
-  attempts (2/5, 4/10, 14/21 caught) and what would actually settle it. Both
-  pieces it asked for now exist and the repair has landed — see the top of this
-  section.
-
-### Observability
-- The heap allocator verifies its own free list on every `alloc` and `dealloc`
-  and names the first thing wrong: bad magic or canary, a non-ascending chain, a
-  block outside the arena, or **a block whose extent runs past the end of the
-  arena**. That last one is the check that matters — a header with an inflated
-  `size` has a perfectly valid magic and canary and a header inside the arena, so
-  anything that only inspects the header passes it.
-- On the first fault the allocator dumps the raw qwords around the bad block
-  plus the chain from the head, and prints what `alloc_mut` last decided about
-  its split. `alloc_mut` cannot print on the happy path — the formatter
-  allocates, and a check that allocates changes the thing it measures — so the
-  split decision is recorded into a static array and printed later.
-- The corruption report also says whether the freed pointer is inside the arena
-  and which free block encloses it, which separates "stale pointer" from "double
-  free of a coalesced block".
-- All of it was added for BUG-034, still open: one user program runs, then the
-  free list is corrupt and no further program can start. `DEVLOG.md` records the
-  two distinct faults now characterised, and explicitly that hardware
-  watchpoints do not work on QEMU 8.2.2 TCG, so nobody spends another cycle
-  building one.
-
-### Testing
-- Added a host unit-test layer: `#[cfg(test)] mod host_tests` inside the
-  kernel crates, run with `make test-host` / `cargo test --workspace`. 151
-  tests across 11 crates, covering VMA arithmetic, packet parsing, permission
-  bits, syscall numbering, the journal, the fuzzer's bookkeeping, namespaces,
-  the error-code catalog and the initial user-stack layout.
-- Removed the workspace-wide default cargo target. `cargo test` could not run
-  against `x86_64-unknown-none` (no `std`, therefore no test harness); kernel
-  builds now always pass `--target x86_64-unknown-none` explicitly. CI runs
-  the host suite and lints the kernel target separately.
-- `make build` now exists (the README documented it; the target did not).
-
-### Fixed
-- Task frames were built at the top of the stack in `create_user_task`, inside
-  the area `TSS.RSP0` points at, so the first timer tick overwrote the saved
-  user context. All constructors share `frame_base()` now, and
-  `stack_size_is_valid()` rejects stacks too small for it (below the guard the
-  subtraction underflowed to ~2^64).
-- NIC interrupts were routed to `32 + irq_line` while the handler is installed
-  at a fixed vector, so every RX interrupt was acknowledged and dropped.
-  Vectors are now shared constants used by both the IDT and the drivers.
-- `VmaTable::find_free` recursed forever on `size == 0`, overflowed on large
-  inputs, and could return a range overlapping an existing mapping.
-- ext2 structure decoders read past short buffers.
-- `.zpk` entry paths could escape the install prefix via `..`, and a rejected
-  image still created a package directory. Records were also read by casting
-  byte offsets to `#[repr(C)]` pointers, which is undefined behaviour when a
-  payload length is not a multiple of 4.
-- VFS silently truncated paths longer than 32 components, resolving a
-  *different* file than requested.
-- `access_check` did not require the execute bit for "other" on directories.
-- `dns::parse_response` read one byte past the buffer on a truncated
-  compression pointer; `ipv4::parse` accepted other protocol versions and
-  ignored header options when validating the checksum.
-- `lockdep` gave class id 0 to the first lock, which is also the "unregistered"
-  sentinel, so it never checked it.
-- Error-code counters merged every module's `*-0001` into one slot, and the
-  code parser dropped all two-letter `ZN-FS-*` codes.
-- `journal_replay` retired the header before flushing the redo data; a crash in
-  that window lost the transaction with no journal left.
-- `journal_init`/`journal_replay` wrote the header straight to the device,
-  leaving a stale cached copy that the next `journal_begin` wrote back.
-- `virtio-blk`'s flush reported failure when no virtio-blk was present, which
-  wedged `journal_commit` and every later `journal_begin`; its completion poll
-  used a bare `hlt`, which never wakes with interrupts disabled.
-- The fuzzer's corpus cursor advanced twice per call, so a campaign replayed
-  the first input forever; the minimiser looped forever on inputs containing a
-  zero byte.
-- `idle_until` could never return to its caller's frame, making the fuzzing
-  watchdog's abort unreachable — a timeout could not be reported.
-- `sysctl_init` appended a duplicate copy of every default on each call;
-  `kernel.uptime` divided 100 Hz ticks by 1000 and was never incremented.
-- `tmpfs` removed non-empty directories, orphaning their children, and handed
-  out `&'static mut` for its node table.
-- PIC EOI was issued from application processors, re-aiming the interrupt line.
-- `userspace/{syscall_core,pipe_test}` called `SYS_PIPE = 22`, which is
-  `SYS_ACCESS` after the syscall renumbering.
-- The cgroup2 filesystem reported success for create/unlink/write on a
-  read-only view.
-
-### Changed
-- Unsynchronised globals are now atomics or locked: journal state, the route
-  table, tmpfs nodes, error counters.
-- `block_cache::evict_one` no longer overwrites the hash slot when a window is
-  full; it prefers an empty slot, then a clean one.
-- Removed dead code: the duplicated VMA table in `zenus-sched`, and
-  `zenus-fs/{cred,initrd}.rs` plus `zenus-net/checksum.rs`, none of which were
-  ever compiled.
-
-### Docs
-- Rewritten against the tree: `README.md`, `AGENTS.md`, `ARCHITECTURE.md`,
-  `SECURITY.md`, `ROADMAP.md`, `CONTRIBUTING.md`, `SUMMARY.md`,
-  `doc/fuzzing.md`, plus status banners on `audit.md`, `DESIGN.md` and
-  `AETHER.md`.
-- The previous `ROADMAP.md` claimed Phases 2 and 3 were 100 % complete,
-  including a capability system, KPTI, encryption, NAT and incremental
-  backups — none of which exist in this tree — and counted the 25 in-kernel
-  tests as the whole suite.
-- `ROADMAP.md` now separates what is done, what is partial, and what is a view
-  rather than an implementation (the cgroup2 tree, ZENUS_SSH, the container
-  story), and lists the next six items in priority order.
-- `audit.md`, `DESIGN.md` and `AETHER.md` are now labelled as what they are: a
-  dated audit snapshot, and two design proposals for things that do not exist.
 
 ## Version 0.1.0 - Pre-Alpha (2026-06-25)
 

@@ -1271,9 +1271,10 @@ fn sys_sethostname(name_ptr: u64, len: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u
     if len == 0 || len > 64 {
         return -1i64 as u64;
     }
-    let euid = zenus_sched::scheduler::current_euid();
-    if euid != 0 {
-        return -1i64 as u64;
+    // The hostname is shared by every task in the UTS namespace, so it takes
+    // `CAP_SYS_ADMIN` rather than "is root": root here is every task.
+    if !has_cap(zenus_sched::caps::CAP_SYS_ADMIN) {
+        return -1i64 as u64; // -EPERM
     }
     let mut buf = [0u8; 64];
     unsafe {
@@ -2516,12 +2517,12 @@ fn sys_mount(
     {
         return -1i64 as u64;
     }
-    // Mounting is a privileged operation and `sys_mount` never checked. Since
-    // `current_euid()` is 0 for every task that has not explicitly dropped
-    // privileges, the check has to be here: without it any ring-3 program could
-    // attach an ext2 filesystem for any device it could name.
-    if zenus_sched::scheduler::current_euid() != 0 {
-        return -1i64 as u64;
+    // Mounting is a privileged operation and `sys_mount` never checked. The
+    // check is against `CAP_SYS_ADMIN`, not `euid == 0`: every task starts at
+    // euid 0 and nothing could lower it, so the uid check could not fail. A
+    // task that drops the capability is refused here.
+    if !has_cap(zenus_sched::caps::CAP_SYS_ADMIN) {
+        return -1i64 as u64; // -EPERM
     }
     // BUG-005 follow-up: the flags used to be dropped on the floor, so
     // MS_BIND (and any other unsupported bit) produced a full mount instead of
@@ -2628,8 +2629,8 @@ fn sys_mount(
 fn sys_umount2(target_ptr: u64, _flags: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
     // Unmount is privileged for the same reason mount is: it removes a
     // filesystem from the tree, and any task could do it.
-    if zenus_sched::scheduler::current_euid() != 0 {
-        return -1i64 as u64;
+    if !has_cap(zenus_sched::caps::CAP_SYS_ADMIN) {
+        return -1i64 as u64; // -EPERM
     }
     if !validate_user_ptr::<u8>(target_ptr) {
         return -1i64 as u64;
@@ -3604,7 +3605,8 @@ pub enum PrctlSupport {
     Implemented,
     /// Accepted and honoured as a no-op because there is nothing to honour:
     /// `PR_SET_PDEATHSIG` on a kernel with no `execve`-time reaping, and
-    /// `PR_SET/GET_KEEPCAPS` on a kernel with no capabilities.
+    /// `PR_SET/GET_KEEPCAPS`, which is about keeping capabilities across a
+    /// `setuid` exec — Zenus never drops them there, so the flag has no work.
     NoOp,
     /// Not implemented. Must fail with `-EINVAL` so callers cannot rely on it.
     Unsupported,
@@ -3621,6 +3623,17 @@ pub const PR_SET_KEEPCAPS: u64 = 8;
 pub const PR_GET_KEEPCAPS: u64 = 9;
 pub const PR_SET_NO_NEW_PRIVS: u64 = 38;
 pub const PR_GET_NO_NEW_PRIVS: u64 = 39;
+pub const PR_CAPBSET_READ: u64 = 23;
+pub const PR_CAPBSET_DROP: u64 = 24;
+
+/// Whether the calling task holds `cap`.
+///
+/// Privileged syscalls check this rather than `euid == 0`. Every task starts at
+/// euid 0 and nothing could lower it, so the uid check could never fail; the
+/// capability set can be dropped, which makes the check mean something.
+fn has_cap(cap: u8) -> bool {
+    zenus_sched::scheduler::current_caps().has(cap)
+}
 
 /// Classify a `prctl` option. Pure, so the host tests can pin the answer for
 /// every option the kernel claims.
@@ -3636,6 +3649,7 @@ pub fn prctl_support(option: u64) -> PrctlSupport {
         PR_SET_PDEATHSIG | PR_GET_PDEATHSIG => PrctlSupport::Unsupported,
         PR_SET_SECCOMP => PrctlSupport::Unsupported,
         PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => PrctlSupport::Implemented,
+        PR_CAPBSET_READ | PR_CAPBSET_DROP => PrctlSupport::Implemented,
         _ => PrctlSupport::Unsupported,
     }
 }
@@ -3685,6 +3699,33 @@ fn sys_prctl(option: u64, arg2: u64, arg3: u64, _a4: u64, _a5: u64, _a6: u64) ->
                 } else {
                     0
                 }
+            }
+            PR_CAPBSET_READ => {
+                if arg2 >= zenus_sched::caps::CAP_COUNT as u64 {
+                    return -22i64 as u64; // -EINVAL
+                }
+                if has_cap(arg2 as u8) {
+                    1
+                } else {
+                    0
+                }
+            }
+            PR_CAPBSET_DROP => {
+                // Linux drops from the *bounding* set, which affects children
+                // but not the caller. Zenus has one set per task that is both
+                // the bounding and the effective set, so this removes the
+                // capability from this task immediately and from anything it
+                // clones. There is deliberately no way to add it back.
+                if arg2 >= zenus_sched::caps::CAP_COUNT as u64 {
+                    return -22i64 as u64; // -EINVAL
+                }
+                let task_id = scheduler::current_task_id();
+                let caps = match scheduler::get_caps(task_id) {
+                    Some(caps) => caps,
+                    None => return -1i64 as u64,
+                };
+                scheduler::set_caps(task_id, caps.without(arg2 as u8));
+                0
             }
             // Nothing else is classified `Implemented`; fall through to EINVAL.
             _ => -22i64 as u64, // -EINVAL

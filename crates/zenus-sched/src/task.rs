@@ -148,6 +148,12 @@ pub struct Task {
     /// gain privileges via `execve`. Zenus has no privilege-gaining execve
     /// yet, so the flag is recorded truthfully rather than silently dropped.
     pub no_new_privs: bool,
+    /// What this task is allowed to do beyond its uid.
+    ///
+    /// Every task the kernel creates starts with the full set; `clone_task`
+    /// inherits the parent's, so a task can only ever hold *less* than its
+    /// parent, and `PR_CAPBSET_DROP` is the only way to shrink it.
+    pub caps: crate::caps::CapSet,
     pub parent_pid: u64,
     pub exit_code: u64,
     /// Which cgroup this task belongs to (`0` is the root).
@@ -195,6 +201,7 @@ impl Task {
             euid: 0,
             egid: 0,
             no_new_privs: false,
+            caps: crate::caps::CapSet::all(),
             parent_pid: 0,
             exit_code: 0,
             cgroup: 0,

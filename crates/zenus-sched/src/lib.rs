@@ -7,6 +7,7 @@ extern crate std;
 
 extern crate alloc;
 
+pub mod caps;
 pub mod init;
 pub mod scheduler;
 pub mod signal;
@@ -24,6 +25,19 @@ mod host_tests {
         frame_base, stack_size_is_valid, DEFAULT_HEAP_BRK, FRAME_BYTES, ISR_DESCENT,
         MIN_TASK_STACK, STACK_GUARD,
     };
+
+    /// Every task the kernel creates starts with the full capability set.
+    ///
+    /// That is what makes the capability check meaningful rather than a
+    /// restriction nobody can reach: `clone_task` copies the parent's set, and
+    /// `PR_CAPBSET_DROP` is the only thing that ever shrinks it.
+    #[test]
+    fn a_new_task_starts_with_every_capability() {
+        let task = crate::task::Task::new(1, 0x1000, "probe");
+        assert_eq!(task.caps, crate::caps::CapSet::all());
+        assert!(task.caps.has(crate::caps::CAP_SYS_ADMIN));
+        assert!(task.caps.has(crate::caps::CAP_SYS_BOOT));
+    }
 
     /// A kernel task — one made by `create_task_named`, which is *every*
     /// kernel task including init and the fuzzing campaign task — must still

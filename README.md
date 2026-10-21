@@ -57,9 +57,10 @@ Implemented and exercised:
   see `SECURITY.md`)
 
 Known gaps are listed in `ROADMAP.md` and `SECURITY.md`. The important ones:
-there is no KPTI (so a user CR3 still has the kernel half mapped), no capability
-system, no driver isolation or hotplug, and storage is PIO-only. SMEP and SMAP
-*are* enabled at boot.
+there is no KPTI (so a user CR3 still has the kernel half mapped), the
+capability set is one per task and only `mount`/`umount2`/`sethostname` consult
+it, there is no driver isolation or hotplug, and storage is PIO-only. SMEP and
+SMAP *are* enabled at boot.
 
 ## Testing
 
@@ -71,7 +72,7 @@ make test-host   # == cargo test --workspace --target x86_64-unknown-linux-gnu
 
 Host unit tests are `#[cfg(test)]` modules inside the kernel crates. They cover
 the pure logic — VMA arithmetic, packet parsing, permission bits, syscall
-numbering, journal replay, the fuzzing bookkeeping — and need no VM. 266 tests
+numbering, journal replay, the fuzzing bookkeeping — and need no VM. 271 tests
 across 11 crates.
 
 ```bash

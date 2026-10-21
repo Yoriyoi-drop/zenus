@@ -3431,3 +3431,25 @@ Bug yang ditemukan tes sendiri: versi pertama hanya menyambung target, sehingga 
 Host test baru (4): follow vs readlink, target relatif terhadap direktori link, komponen direktori yang berupa link, serta dangling/loop ditolak.
 
 Verifikasi: cargo test --workspace (266 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (25/25 in-kernel).
+
+## BUG-056 - capability set per task (ROADMAP item 4, tahap pertama)
+
+Status: sudah di-implementasi + host-tested + smoke-tested + in-kernel suite hijau.
+
+Apa yang kurang: tidak ada model capability sama sekali. "Privileged" berarti `euid == 0`, dan setiap task dimulai dengan euid 0, jadi `sys_mount`, `sys_umount2`, dan `sys_sethostname` menerima semua pemanggil. Pemeriksaannya ada, tetapi tidak mungkin gagal — sama saja dengan tidak ada. `prctl(PR_CAPBSET_READ/DROP)` juga ditolak.
+
+Yang dikerjakan:
+- Modul baru `zenus-sched/src/caps.rs`: `CapSet` (bitmask u64) dengan 17 capability (`CAP_CHOWN` .. `CAP_SYS_TTY_CONFIG`), operasi `all`/`none`/`from_bits`/`has`/`without`/`bits`. Semuanya `const fn`, jadi bisa dipakai di posisi konstanta.
+- `from_bits` mem-mask bit di atas `CAP_COUNT`; `has` mengembalikan false untuk capability yang tidak dikenal. Nilai rusak tidak bisa memberi capability yang tidak ada.
+- `Task` dapat field `caps`, default `CapSet::all()`. `clone_task` menyalin set induk, jadi anak hanya bisa memegang **lebih sedikit** dari induknya.
+- Accessor scheduler `current_caps`/`get_caps`/`set_caps`; `current_caps` gagal-tertutup ke `CapSet::none()` kalau tidak ada task aktif.
+- `sys_mount`, `sys_umount2`, `sys_sethostname` sekarang memeriksa `CAP_SYS_ADMIN`, bukan euid. Mengembalikan -EPERM.
+- `prctl(PR_CAPBSET_READ, cap)` -> 1/0, `prctl(PR_CAPBSET_DROP, cap)` -> mencabut capability dari task (idempoten), -EINVAL untuk nomor di luar rentang. Keduanya dipindah ke `PrctlSupport::Implemented`.
+
+Keputusan desain yang didokumentasikan di kode: hanya ada **satu** set per task, bukan permitted/effective/inheritable seperti Linux; set ini sekaligus bounding set dan effective set. Konsekuensinya `PR_CAPBSET_DROP` mencabut seketika untuk task itu sendiri (di Linux hanya untuk anak-anaknya), dan tidak ada cara menambah kembali. Ini disengaja: belum ada batas privilege yang bisa membenarkan penambahan.
+
+Host test baru (5): `all`/`none` konsisten, `without` mencabut tepat satu dan idempoten, capability tak dikenal tidak pernah dipegang, `from_bits` tidak bisa memberi capability di luar rentang, dan task baru memegang semua capability. Tes prctl yang ada diperluas untuk `PR_CAPBSET_*`.
+
+Belum dikerjakan (dicatat di ROADMAP): `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH` belum menggantikan jalan pintas euid di `access_check`, `CAP_KILL` belum dipakai `sys_kill`, dan `PR_SET_SECCOMP` masih tidak ada.
+
+Verifikasi: cargo test --workspace (271 hijau), cargo build --target x86_64-unknown-none, make smoke (prompt shell tercapai), make test-quiet (25/25 in-kernel).

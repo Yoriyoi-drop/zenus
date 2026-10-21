@@ -113,8 +113,21 @@ mod host_tests {
             PrctlSupport::Name
         );
 
-        // No capability set exists, so KEEPCAPS has nothing to honour and is a
-        // truthful no-op.
+        // The capability set exists now, so `PR_CAPBSET_READ`/`DROP` are
+        // implemented rather than refused: a task can read what it holds and
+        // give a capability up.
+        assert_eq!(
+            prctl_support(crate::syscall::PR_CAPBSET_READ),
+            PrctlSupport::Implemented
+        );
+        assert_eq!(
+            prctl_support(crate::syscall::PR_CAPBSET_DROP),
+            PrctlSupport::Implemented
+        );
+
+        // KEEPCAPS is about keeping capabilities across a `setuid` exec. Zenus
+        // never drops them there, so the flag still has nothing to do — but the
+        // reason is now "no privilege transition", not "no capabilities".
         assert_eq!(
             prctl_support(crate::syscall::PR_SET_KEEPCAPS),
             PrctlSupport::NoOp
