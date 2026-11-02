@@ -72,7 +72,7 @@ make test-host   # == cargo test --workspace --target x86_64-unknown-linux-gnu
 
 Host unit tests are `#[cfg(test)]` modules inside the kernel crates. They cover
 the pure logic — VMA arithmetic, packet parsing, permission bits, syscall
-numbering, journal replay, the fuzzing bookkeeping — and need no VM. 277 tests
+numbering, journal replay, the fuzzing bookkeeping — and need no VM. 281 tests
 across 11 crates.
 
 ```bash
@@ -80,7 +80,7 @@ make test        # QEMU: the in-kernel suite (apps/src/test_runner.rs)
 ```
 
 The in-kernel suite is the only layer that *can* test real MMIO, the IDT and the
-APIC. Today its 25 cases are still pure assertions (block-cache fields, VFS
+APIC. Today its 27 cases are still pure assertions (block-cache fields, VFS
 path helpers, ext2 struct sizes, paging constants) — a second host-test layer
 that happens to run inside QEMU. It is invoked directly from `entry()` on the
 boot CPU, before any task is created, and reports over the serial line.
