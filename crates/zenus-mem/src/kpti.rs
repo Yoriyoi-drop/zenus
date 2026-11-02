@@ -15,8 +15,6 @@
 //! handler must live in a page mapped in both views). Until those exist, a task
 //! still runs with the kernel view, and nothing here is on the hot path.
 
-use core::sync::atomic::Ordering;
-
 use crate::paging;
 
 /// PML4 entries that belong to the user half of the address space.

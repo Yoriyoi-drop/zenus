@@ -405,9 +405,6 @@ impl FreeListAllocator {
                 self.record_split_trace(prev, curr, aligned_data, size, block_size, region_end);
                 return aligned_data as *mut u8;
             }
-
-            prev = curr;
-            curr = unsafe { (*block).next as usize };
         }
 
         zenus_console::kerror_code!(
