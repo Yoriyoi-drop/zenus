@@ -3219,6 +3219,18 @@ fn sys_futex(uaddr: u64, op: u64, val: u64, _a4: u64, _a5: u64, _a6: u64) -> u64
     }
 }
 
+/// Ticks to wait for `timeout_ms`, or `u64::MAX` for an infinite wait.
+///
+/// Pure: the old expression `(timeout_ms + 9) / 10` wrapped for a `timeout_ms`
+/// just below `u64::MAX`, turning an almost-infinite wait into a zero-tick one.
+pub fn poll_timeout_ticks(timeout_ms: u64) -> u64 {
+    if timeout_ms == u64::MAX {
+        u64::MAX
+    } else {
+        timeout_ms.saturating_add(9) / 10
+    }
+}
+
 // ── Poll syscall ──
 
 #[repr(C)]
@@ -3245,11 +3257,7 @@ fn sys_poll(fds_ptr: u64, nfds: u64, timeout_ms: u64, _a4: u64, _a5: u64, _a6: u
     }
 
     let start = zenus_arch::interrupts::pit::get_ticks();
-    let timeout_ticks = if timeout_ms == u64::MAX {
-        u64::MAX
-    } else {
-        (timeout_ms + 9) / 10
-    };
+    let timeout_ticks = poll_timeout_ticks(timeout_ms);
 
     loop {
         let mut ready = 0u64;
@@ -3424,11 +3432,7 @@ fn sys_select(
     }
 
     let start = zenus_arch::interrupts::pit::get_ticks();
-    let timeout_ticks = if timeout_ms == u64::MAX {
-        u64::MAX
-    } else {
-        (timeout_ms + 9) / 10
-    };
+    let timeout_ticks = poll_timeout_ticks(timeout_ms);
 
     loop {
         let mut ready = 0u64;
@@ -4257,9 +4261,9 @@ mod host_tests {
     use super::MS_RDONLY as SYSCALL_MS_RDONLY;
     use super::{
         brk_action, checked_array_len, mmap_extent, mount_flags_from_syscall, mprotect_range,
-        munmap_page_range, nanosleep_deadline, select_timeout_ms, shm_page_count,
-        validate_user_range, BrkAction, MAX_XFER, MS_NODEV, MS_NOEXEC, MS_NOSUID,
-        USER_SPACE_LIMIT,
+        munmap_page_range, nanosleep_deadline, poll_timeout_ticks, select_timeout_ms,
+        shm_page_count, validate_user_range, BrkAction, MAX_XFER, MS_NODEV, MS_NOEXEC,
+        MS_NOSUID, USER_SPACE_LIMIT,
     };
 
     #[repr(C)]
@@ -4638,6 +4642,29 @@ mod host_tests {
         assert!(
             body.contains("validate_user_range(readfds_ptr, 8)"),
             "sys_select must validate the fd_set bytes before reading them"
+        );
+    }
+
+    /// Regression: `sys_poll` computed its deadline as
+    /// `(timeout_ms + 9) / 10` with bare arithmetic, so a `timeout_ms` just
+    /// below `u64::MAX` wrapped to a tiny (or zero) tick count.
+    #[test]
+    fn the_poll_timeout_cannot_wrap() {
+        assert_eq!(poll_timeout_ticks(0), 0);
+        assert_eq!(poll_timeout_ticks(9), 1);
+        assert_eq!(poll_timeout_ticks(10), 1);
+        assert_eq!(poll_timeout_ticks(u64::MAX - 1), u64::MAX / 10);
+        assert_eq!(poll_timeout_ticks(u64::MAX), u64::MAX);
+
+        let source = include_str!("syscall.rs");
+        let body = source
+            .split("fn sys_poll(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("sys_poll exists");
+        assert!(
+            body.contains("poll_timeout_ticks(timeout_ms)"),
+            "sys_poll must derive its timeout from poll_timeout_ticks"
         );
     }
 

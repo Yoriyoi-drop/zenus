@@ -3648,3 +3648,17 @@ Sisa tahap 3 dan 4 (belum dikerjakan): stub entry untuk 256 vektor IDT (CPU meng
 **Yang salah:** `timeout_ms = tv_sec * 1000 + tv_nsec / 1_000_000` memakai `*`/`+` tanpa cek, sehingga `tv_sec` besar wrap. `readfds_ptr` juga dibaca per byte tanpa `validate_user_range`.
 
 **Fix:** helper murni `select_timeout_ms(sec, nsec) -> Option<u64>` memakai `checked_mul`/`checked_add`. `sys_select` memakainya dan memvalidasi 8 byte fd_set sebelum membacanya.
+
+---
+
+## BUG-069 — `sys_poll` timeout wrap
+
+**Status:** sudah di-fix
+**Keparahan:** sedang — `timeout_ms` dekat `u64::MAX` membuat `(timeout_ms + 9) / 10` wrap ke nilai kecil
+**Test:** `crates/zenus-syscall/src/syscall.rs` → `host_tests::the_poll_timeout_cannot_wrap`
+
+**Di mana:** `crates/zenus-syscall/src/syscall.rs` — `sys_poll`
+
+**Yang salah:** perhitungan `timeout_ticks` memakai `+` tanpa cek. Untuk `timeout_ms` hampir `u64::MAX`, hasilnya wrap.
+
+**Fix:** helper murni `poll_timeout_ticks(timeout_ms) -> u64` memakai `saturating_add(9)` dan mempertahankan `u64::MAX` untuk wait tanpa batas. `sys_poll` memakainya.
