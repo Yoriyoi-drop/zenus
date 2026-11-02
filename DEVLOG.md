@@ -1864,30 +1864,29 @@ berarti menambahkan kode yang *terlihat* seperti perbaikan tanpa bukti — persi
 yang `AGENTS.md` larang ("kalau tidak bisa dibuktikan gagal dulu, itu bukan
 regression test — catatan saja").
 
-1. **Fault di dalam `make fuzz-smoke`.** Belum ada diagnostics yang cukup. Yang
-   diketahui: `CAUSE=instruction-fetch`, `ADDR == RIP`, `RSP == IDLE_RSP - 8`.
-   Hipotesis yang harus diuji, berurutan: (a) kedalaman frame
-   `run_campaign` vs ukuran stack task, (b) `fuzz_guard` checkpoint, (c)
-   `idle_until` yang menimpa RSP tanpa menyimpannya.
-2. **Page fault berulang di `make test`.** Handler-nya sendiri fault membaca
-   stack, jadi dump tidak pernahCetak. Yang diketahui: test pertama
-   (`test_new_cache_empty`) selesai, jadi bukan boot lagi.
-3. **SMAP/SMEP.** Tidak berubah; masih item #1 di `ROADMAP.md`.
+Catatan: dua item di bawah ini (page fault di `make test`, dan SMAP/SMEP)
+sudah tertutup di sesi ini (BUG-031 dan BUG-033). `make test` lolos 25/25
+dan kemudian 27/27 dengan SMEP+SMAP nyata; ketiga target fuzz hijau.
+Sisa kerja benar-benar ada di `ROADMAP.md` "Next, in order":
 
-Kalau ada yang mau diambil berikutnya, urutannya:
+1. **KPTI stages 3-4.** 256 IDT entry stubs (CPU mengambil handler lewat
+   CR3 yang aktif, jadi instruksi pertama setiap handler harus di halaman
+   trampoline) — berarti mengganti `extern "x86-interrupt"` dengan stub asm
+   + dispatcher Rust — lalu aktivasi di scheduler dengan `TSS.RSP0` menunjuk
+   entry stack yang terpetakan di kedua view.
+2. **Driver model** agar storage tidak PIO-only: AHCI dulu.
+3. **Capabilities yang sungguhan.** Ada cara untuk *mendapatkan* capability
+   kembali (tidak ada `capset`-style, tidak ada file capabilities pada ELF)
+   dan seccomp (`PR_SET_SECCOMP` masih `-EINVAL`).
+4. **cgroup `cpu`/`io` enforcement** + hierarki non-datar (pids/memory sudah
+   ditegakkan di BUG-041; cpu/io hanya diiklankan).
+5. **Boot smoke test di CI** (`make smoke`) — target sudah ada, belum dipasang
+   ke CI workflow.
 
-Ketiga target fuzz sekarang hijau, jadi tidak ada lagi item yang perlu
-dikejar dari sisi itu. Yang tersisa:
-
-1. **`make test`** — masih page fault setelah test pertama, dan handler
-   page-fault-nya sendiri ikut fault saat membaca stack sehingga tidak ada
-   jejak. Butuh QEMU + gdb; mekanismenya sudah diketahui (attach gdb
-   menghentikan CPU saat connect, monitor socket untuk menghentikan VM yang
-   sedang berjalan) tapi belum dijalankan terhadap build `testing`.
-2. **`make test`** — butuh QEMU + gdb, dan jejak yang sudah ada tidak
-   cukup untuk menemukan penyebabnya sendiri.
-3. **SMAP/SMEP** — selesai, lihat BUG-033. Item #1 di `ROADMAP.md` sudah
-   tertutup; tidak ada lagi yang perlu diambil dari sisi itu.
+`reap_terminated_stacks()` masih jalur mati (TERMINATED_STACKS hanya diisi
+oleh `task_exit()` yang tidak ada syscall yang memakainya). `global_init`'s
+seeding of the frame-allocator cursors belum bisa diuji di host (baca `rsp`),
+jadi pass kedua `alloc_frame` masih punya catatan cacat di tempatnya.
 
 ---
 
