@@ -3606,3 +3606,17 @@ Sisa tahap 3 dan 4 (belum dikerjakan): stub entry untuk 256 vektor IDT (CPU meng
 **Yang salah:** di mode x2APIC, fungsi langsung membaca MSR 0x802. Pada AP sebelum `init_ap`, APIC belum di-enable, sehingga akses MSR bisa fault dan memperburuk jalur exception awal.
 
 **Fix:** cek bit EN (bit 10) di `IA32_APIC_BASE` (0x1B) dulu; jika APIC belum di-enable, kembalikan 0 (BSP/unknown) alih-alih membaca MSR x2APIC.
+
+---
+
+## BUG-066 — `sys_munmap` menghitung rentang halaman dengan `+` yang bisa wrap
+
+**Status:** sudah di-fix
+**Keparahan:** sedang — `addr + length` wrap dekat `u64::MAX`, sehingga loop unmap berjalan dengan rentang yang salah/sedikit
+**Test:** `crates/zenus-syscall/src/syscall.rs` → `host_tests::the_munmap_page_range_cannot_wrap`
+
+**Di mana:** `crates/zenus-syscall/src/syscall.rs` — `sys_munmap`
+
+**Yang salah:** `end_page = ((addr + length) + 0xFFF) & !0xFFF` memakai `+` tanpa cek. Untuk `addr` dekat u64::MAX hasilnya wrap dan loop unmap tidak menutup rentang yang dimaksud.
+
+**Fix:** helper murni `munmap_page_range(addr, length) -> Option<(u64, u64)>` memakai `checked_add` di kedua penambahan dan menolak bila hasil tidak maju. `sys_munmap` memakainya.

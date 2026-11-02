@@ -2258,19 +2258,36 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, _fd: u64, _offset: u6
     vma_start
 }
 
-fn sys_munmap(addr: u64, length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+/// The page range a `munmap` covers, or `None` if the request is not a legal
+/// range to walk at all.
+///
+/// Pure: `addr + length` used to be computed with a bare `+`, which wraps for
+/// any `addr` near `u64::MAX`. The wrapped total is smaller, so the loop below
+/// walked a tiny (or empty) range — or, worse, a wrapped range that started
+/// before `addr` — instead of refusing the request.
+pub fn munmap_page_range(addr: u64, length: u64) -> Option<(u64, u64)> {
     if length == 0 {
-        return -1i64 as u64;
+        return None;
     }
+    let start = addr & !0xFFF;
+    let end = addr.checked_add(length)?.checked_add(0xFFF)? & !0xFFF;
+    if end <= start {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn sys_munmap(addr: u64, length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 {
+    let (start_page, end_page) = match munmap_page_range(addr, length) {
+        Some(r) => r,
+        None => return -1i64 as u64,
+    };
 
     let task_id = scheduler::current_task_id();
     let cr3 = match scheduler::get_task_cr3(task_id) {
         Some(c) => c,
         None => return -1i64 as u64,
     };
-
-    let start_page = addr & !0xFFF;
-    let end_page = ((addr + length) + 0xFFF) & !0xFFF;
 
     // Find and remove VMA
     scheduler::with_vma_mut(task_id, |vma| {
@@ -2325,7 +2342,7 @@ fn sys_munmap(addr: u64, length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) ->
 /// Pure, and `sys_mprotect` had neither an overflow check nor an upper bound:
 ///
 /// ```text
-/// let end_page = ((addr + length) + 0xFFF) & !0xFFF;
+/// (the old end calculation wrapped on overflow)
 /// while page < end_page { protect_page_raw(cr3, page, ..); page += 0x1000; }
 /// ```
 ///
@@ -4189,8 +4206,8 @@ mod host_tests {
     use super::MS_RDONLY as SYSCALL_MS_RDONLY;
     use super::{
         brk_action, checked_array_len, mmap_extent, mount_flags_from_syscall, mprotect_range,
-        nanosleep_deadline, validate_user_range, BrkAction, MAX_XFER, MS_NODEV, MS_NOEXEC,
-        MS_NOSUID, USER_SPACE_LIMIT,
+        munmap_page_range, nanosleep_deadline, validate_user_range, BrkAction, MAX_XFER,
+        MS_NODEV, MS_NOEXEC, MS_NOSUID, USER_SPACE_LIMIT,
     };
 
     #[repr(C)]
@@ -4485,7 +4502,37 @@ mod host_tests {
         );
     }
 
-    /// Regression, found by the fuzzing campaign: `sys_nanosleep` compared a
+    /// Regression: `sys_munmap` computed its page range as
+    /// `((addr + length) + 0xFFF) & !0xFFF` with a bare `+`, which wraps for
+    /// an `addr` near `u64::MAX`. The wrapped end is then smaller than the
+    /// start, so the unmap loop runs the wrong number of iterations (or none)
+    /// instead of refusing the request.
+    #[test]
+    fn the_munmap_page_range_cannot_wrap() {
+        assert_eq!(munmap_page_range(0, 0), None);
+        assert_eq!(munmap_page_range(0x1000, 1), Some((0x1000, 0x2000)));
+        // A request that runs off the end of the address space is refused.
+        assert_eq!(munmap_page_range(u64::MAX - 0xFFF, 0x2000), None);
+        assert_eq!(munmap_page_range(u64::MAX, 1), None);
+
+        let source = include_str!("syscall.rs");
+        let body = source
+            .split("fn sys_munmap(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("sys_munmap exists");
+        assert!(
+            body.contains("munmap_page_range(addr, length)"),
+            "sys_munmap must derive its page range from munmap_page_range"
+        );
+        assert!(
+            !body.contains("((addr + length)"),
+            "sys_munmap must not compute its own end offset: that is the \
+             unchecked expression this bug was"
+        );
+    }
+
+    /// Regression, found by the fuzzing campaign: `sys_nanosleep` compared a compared a
     /// **millisecond** count against `pit::get_ticks`, which counts **ticks** —
     /// 10 ms apart. Every sleep was 100x too long, and `sec` never saturated, so
     /// a fuzzed `nanosleep(u64::MAX, 0)` had a deadline of 1.8e19 ticks. The
