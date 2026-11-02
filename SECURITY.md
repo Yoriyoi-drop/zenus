@@ -15,7 +15,7 @@ deploy this on anything you care about.
 |---|---|
 | User/kernel address separation | Yes — per-process CR3, `USER_SPACE_LIMIT = 0x0000_8000_0000_0000` |
 | SMEP / SMAP | **Enabled at boot**, in `apps::entry`. Needs a CPU (or QEMU `-cpu max`) that has them |
-| KPTI | Not implemented |
+| KPTI | Partially implemented: stage 1 (user view) and stage 2 (trampoline + CR3 swap) are built and tested, but not yet active; IDT entry stubs (stage 3) and scheduler activation (stage 4) remain |
 | Unix permission bits (uid/gid/mode) | Yes, in `vfs::access_check` |
 | Path confinement | Components are bounded (`MAX_PATH_SEGMENTS`), over-long paths are refused, `..` cannot escape a mount prefix |
 | Package install confinement | `.zpk` entry paths are validated before anything is written |
@@ -28,13 +28,14 @@ deploy this on anything you care about.
 
 ## The gaps that matter
 
-### 1. No KPTI
+### 1. KPTI partially implemented
 
-SMEP and SMAP are on. What is *not* on is page-table isolation from user
-mappings: a user CR3 keeps the kernel half mapped, and a `%cr3` write or a
-kernel bug that lands in ring 0 while a user CR3 is loaded still finds the
-whole kernel image mapped. KPTI (or PCID-based user/entry trampolines) is the
-usual answer and is not implemented.
+SMEP and SMAP are on. Page-table isolation has its first two stages: `zenus_mem::kpti`
+builds a per-task user view with the kernel half zeroed, and a page-aligned
+trampoline (`.text.kpti`/`.kpti_data`) can switch CR3. It is **not active yet**:
+a user CR3 still has the whole kernel mapped until entry stubs for the 256 IDT
+vectors and the syscall/return paths are in place. KPTI (or PCID-based
+trampolines) is the usual answer and is in progress.
 
 Two supporting rules the kernel relies on, both enforced by the source rather
 than by the hardware:

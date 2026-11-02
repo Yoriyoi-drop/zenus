@@ -23,15 +23,14 @@ It is **pre-alpha**. The core is real; the security model is not finished.
 | Block cache | 512 sectors, 4-way, write-back |
 | Kernel heap | 8 MiB static arena |
 | Namespaces | 16 each: PID, UTS, mount, net, user, IPC |
-| Host unit tests | 158 |
-| In-kernel tests | 25 |
+| Host unit tests | 277 |
+| In-kernel tests | 27 |
 | `unsafe` blocks | 465 in the kernel, 472 tree-wide, plus 11 `unsafe impl` |
 
 ## The three things that would change the risk picture most
 
-1. **SMAP/SMEP are implemented and switched off.** They fault in userspace
-   programs, and the PML4 U/S interaction behind that is not understood. Until
-   it is fixed, kernel code can read and write user memory freely.
+1. **SMAP/SMEP are enabled at boot** (fixed, see DEVLOG BUG-033). Kernel code
+   may no longer read or write user pages without `stac`/`clac`.
 2. **No privilege model.** No capabilities, `prctl` is a no-op, `root` bypasses
    everything.
 3. **No cryptography.** No TLS, no disk encryption, no secure boot. The
