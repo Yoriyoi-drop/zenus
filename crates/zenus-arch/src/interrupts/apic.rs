@@ -50,12 +50,14 @@ pub fn init_ap(virt: u64) {
 
 pub fn current_apic_id() -> u32 {
     if X2APIC_MODE.load(Ordering::Relaxed) {
-        // x2APIC: IA32_X2APIC_APIC_ID (MSR 0x802) holds the FULL APIC ID
-        // in bits [31:0]. It is NOT the xAPIC MMIO layout (id in [31:24]),
-        // so the previous `>> 24` returned 0 for every CPU (ids 0..3).
-        // Consequence: smp::current_cpu() reported 0 on all APs → every
-        // AP raced on AP_GDT[0] → `mov ss, 0x10` #GP → IDT=0 → #DF →
-        // triple fault while wake_aps() waited ("Waiting for APs...").
+        // x2APIC MSRs are only readable once the APIC is enabled. APs reach
+        // `gdt::init_ap`/`current_cpu` before `apic::init_ap`, so reading
+        // 0x802 there faults; treat an unenabled APIC as BSP-less/unknown
+        // (index 0) instead of touching the MSR.
+        let base = unsafe { crate::cpu::read_msr(0x1B) };
+        if base & (1 << 10) == 0 {
+            return 0;
+        }
         (unsafe { crate::cpu::read_msr(0x802) }) as u32
     } else {
         lapic_read(0x20) >> 24

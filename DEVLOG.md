@@ -3592,3 +3592,17 @@ Sisa tahap 3 dan 4 (belum dikerjakan): stub entry untuk 256 vektor IDT (CPU meng
 **Di mana:** `crates/zenus-fuzz/src/lib.rs` (heartbeat 500 kasus), `apps/src/fuzz_runner.rs` (watchdog `waiting`)
 
 **Yang diubah:** progress line kini menampilkan karakter spinner yang berputar (`|`, `/`, `-`, `\`) setiap 500 kasus dan setiap detik pada watchdog, sehingga run panjang tetap terlihat hidup di serial.
+
+---
+
+## BUG-065 — `current_apic_id()` membaca MSR x2APIC sebelum APIC di-enable
+
+**Status:** sudah di-fix
+**Keparahan:** sedang — AP/early fault path bisa memanggil `smp::current_cpu()` sebelum `apic::init_ap`, lalu `read_msr(0x802)` fault
+**Test:** `make smoke` (prompt shell tercapai), `make test-quiet` (27/27)
+
+**Di mana:** `crates/zenus-arch/src/interrupts/apic.rs` — `current_apic_id`
+
+**Yang salah:** di mode x2APIC, fungsi langsung membaca MSR 0x802. Pada AP sebelum `init_ap`, APIC belum di-enable, sehingga akses MSR bisa fault dan memperburuk jalur exception awal.
+
+**Fix:** cek bit EN (bit 10) di `IA32_APIC_BASE` (0x1B) dulu; jika APIC belum di-enable, kembalikan 0 (BSP/unknown) alih-alih membaca MSR x2APIC.
