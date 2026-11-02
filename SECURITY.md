@@ -117,9 +117,9 @@ This is where most of the real work has gone, and where the tests live:
 
 ## Memory safety
 
-465 `unsafe` blocks remain in the kernel crates and `apps` (472 tree-wide),
-plus 11 `unsafe impl`. Most of them are unavoidable: MMIO, port I/O,
-IDT descriptors, inline assembly for context switching and the syscall return
+Several hundred `unsafe` blocks remain in the kernel crates and `apps`,
+plus `unsafe impl`s — most of them unavoidable: MMIO, port I/O, IDT
+descriptors, inline assembly for context switching and the syscall return
 path, and ELF loading. The parsers that used to be unsafe have been converted
 to bounds-checked code. Run `cargo clippy --all-targets --all-features
 --target x86_64-unknown-linux-gnu` before submitting.
