@@ -3378,6 +3378,16 @@ fn sys_getsockopt(
     0
 }
 
+/// Milliseconds from a `timespec`, or `None` if the multiplication overflows.
+///
+/// Pure: `sys_select` used to compute `tv_sec * 1000 + tv_nsec / 1_000_000`
+/// with bare arithmetic, so a large `tv_sec` (reachable from user space) wrapped
+/// and produced a tiny timeout or an absurdly large one.
+pub fn select_timeout_ms(sec: u64, nsec: u64) -> Option<u64> {
+    let ms = sec.checked_mul(1000)?;
+    ms.checked_add(nsec / 1_000_000)
+}
+
 // ── Select syscalls ──
 
 fn sys_select(
@@ -3401,10 +3411,17 @@ fn sys_select(
             None => return -1i64 as u64,
         };
         let ts = unsafe { &*ts_ptr };
-        ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000
+        match select_timeout_ms(ts.tv_sec, ts.tv_nsec) {
+            Some(ms) => ms,
+            None => return -1i64 as u64,
+        }
     } else {
         u64::MAX
     };
+
+    if readfds_ptr != 0 && !validate_user_range(readfds_ptr, 8) {
+        return -1i64 as u64;
+    }
 
     let start = zenus_arch::interrupts::pit::get_ticks();
     let timeout_ticks = if timeout_ms == u64::MAX {
@@ -4240,8 +4257,9 @@ mod host_tests {
     use super::MS_RDONLY as SYSCALL_MS_RDONLY;
     use super::{
         brk_action, checked_array_len, mmap_extent, mount_flags_from_syscall, mprotect_range,
-        munmap_page_range, nanosleep_deadline, shm_page_count, validate_user_range, BrkAction,
-        MAX_XFER, MS_NODEV, MS_NOEXEC, MS_NOSUID, USER_SPACE_LIMIT,
+        munmap_page_range, nanosleep_deadline, select_timeout_ms, shm_page_count,
+        validate_user_range, BrkAction, MAX_XFER, MS_NODEV, MS_NOEXEC, MS_NOSUID,
+        USER_SPACE_LIMIT,
     };
 
     #[repr(C)]
@@ -4589,6 +4607,37 @@ mod host_tests {
         assert!(
             body.contains("shm_page_count(size)"),
             "sys_shmat must derive its page count from shm_page_count"
+        );
+    }
+
+    /// Regression: `sys_select` computed its timeout as
+    /// `tv_sec * 1000 + tv_nsec / 1_000_000` with bare arithmetic, so a
+    /// user-supplied large `tv_sec` wrapped and produced a bogus deadline.
+    /// The fd_set pointer was also read without validating that its (up to)
+    /// eight bytes were mapped.
+    #[test]
+    fn the_select_timeout_cannot_wrap() {
+        assert_eq!(select_timeout_ms(0, 0), Some(0));
+        assert_eq!(select_timeout_ms(1, 500_000_000), Some(1500));
+        assert_eq!(select_timeout_ms(u64::MAX / 1000 + 1, 0), None);
+        assert_eq!(
+            select_timeout_ms(1, u64::MAX),
+            Some(1000 + (u64::MAX / 1_000_000))
+        );
+
+        let source = include_str!("syscall.rs");
+        let body = source
+            .split("fn sys_select(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("sys_select exists");
+        assert!(
+            body.contains("select_timeout_ms(ts.tv_sec, ts.tv_nsec)"),
+            "sys_select must derive its timeout from select_timeout_ms"
+        );
+        assert!(
+            body.contains("validate_user_range(readfds_ptr, 8)"),
+            "sys_select must validate the fd_set bytes before reading them"
         );
     }
 

@@ -3634,3 +3634,17 @@ Sisa tahap 3 dan 4 (belum dikerjakan): stub entry untuk 256 vektor IDT (CPU meng
 **Yang salah:** `pages = (size + 0xFFF) / 0x1000` wrap dekat `u64::MAX` (menjadi 0) dan tidak ada batas ukuran, sehingga request raksasa bisa mengalokasikan banyak frame atau membuat segment invalid. `sys_shmat` juga menghitung `page_count * 0x1000` dan `vma_start + ...` tanpa cek overflow.
 
 **Fix:** helper murni `shm_page_count(size) -> Option<u64>` memakai `checked_add`, menolak `size == 0` dan `size > MAX_MAPPING_SIZE`. `sys_shmget` dan `sys_shmat` memakainya; `sys_shmat` juga memakai `checked_mul`/`checked_add` untuk rentang mapping.
+
+---
+
+## BUG-068 — `sys_select` timeout wrap dan fd_set tidak divalidasi
+
+**Status:** sudah di-fix
+**Keparahan:** sedang — timeout wrap dan pembacaan fd_set yang tak ter-validasi
+**Test:** `crates/zenus-syscall/src/syscall.rs` → `host_tests::the_select_timeout_cannot_wrap`
+
+**Di mana:** `crates/zenus-syscall/src/syscall.rs` — `sys_select`
+
+**Yang salah:** `timeout_ms = tv_sec * 1000 + tv_nsec / 1_000_000` memakai `*`/`+` tanpa cek, sehingga `tv_sec` besar wrap. `readfds_ptr` juga dibaca per byte tanpa `validate_user_range`.
+
+**Fix:** helper murni `select_timeout_ms(sec, nsec) -> Option<u64>` memakai `checked_mul`/`checked_add`. `sys_select` memakainya dan memvalidasi 8 byte fd_set sebelum membacanya.
