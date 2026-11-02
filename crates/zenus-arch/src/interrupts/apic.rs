@@ -76,13 +76,19 @@ pub fn current_apic_id() -> u32 {
 /// MSR 0x80D) — harmless, and restored to 0 afterwards. Returns true only
 /// if the value survives the round-trip.
 fn x2apic_msrs_work() -> bool {
-    const LDR: u32 = 0x80D;
-    const PROBE: u64 = 0x0200_0000;
+    // Use TPR (MSR 0x808): its low 4 bits are a valid task-priority value
+    // and the rest are reserved, so a value of 0x10 exercises a real write
+    // without tripping a #GP on reserved bits. The LDR (0x80D) value used
+    // previously set bits that some implementations reject, faulting the
+    // probe itself instead of returning "not implemented".
+    const SVR: u32 = 0x80F;
+    const PROBE: u64 = 0x0000_0100;
     unsafe {
-        crate::cpu::write_msr(LDR, PROBE);
-        let back = crate::cpu::read_msr(LDR);
-        crate::cpu::write_msr(LDR, 0);
-        back == PROBE
+        let saved = crate::cpu::read_msr(SVR);
+        crate::cpu::write_msr(SVR, saved | PROBE);
+        let back = crate::cpu::read_msr(SVR);
+        crate::cpu::write_msr(SVR, saved);
+        back == (saved | PROBE)
     }
 }
 
@@ -91,6 +97,13 @@ fn enable_lapic() {
     let base_raw = unsafe { crate::cpu::read_msr(0x1B) };
     let mut x2apic = (base_raw & (1 << 11)) != 0;
     let apic_was_disabled = (base_raw & (1 << 10)) == 0;
+
+    // x2APIC MSRs are only accessible once the APIC is enabled. Limine
+    // leaves EN clear, so turn it on temporarily before probing; the
+    // permanent enable happens below.
+    if x2apic && apic_was_disabled {
+        unsafe { crate::cpu::write_msr(0x1B, base_raw | (1 << 10)); }
+    }
 
     if x2apic && !x2apic_msrs_work() {
         // EXTD claims x2APIC but the MSRs are dead (QEMU TCG). Drop back to

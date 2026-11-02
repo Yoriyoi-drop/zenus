@@ -92,9 +92,8 @@ pub fn init() {
     }
 }
 
-pub fn init_ap() {
-    let cpu = crate::smp::current_cpu() as usize;
-    let idx = if cpu < MAX_CPUS { cpu } else { 0 };
+pub fn init_ap(cpu: u32) {
+    let idx = (cpu as usize).min(MAX_CPUS - 1);
 
     let tss = unsafe { &mut *AP_TSS[idx].as_mut_ptr() };
     *tss = TaskStateSegment::new();

@@ -142,23 +142,23 @@ run: run-gui
 
 run-serial: $(ISO)
 	qemu-system-x86_64 -display none -serial stdio -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
-		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
+		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0,rombar=0
 
 run-gui: $(ISO)
 	qemu-system-x86_64 -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
-		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
+		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0,rombar=0
 
 run-bios: $(ISO)
 	qemu-system-x86_64 -nographic -m 2G -smp $(SMP) -cdrom $(ISO) -no-reboot \
-		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
+		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0,rombar=0
 
 run-uefi: $(ISO)
 	qemu-system-x86_64 -serial mon:stdio -m 2G -smp $(SMP) -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -no-reboot \
-		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
+		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0,rombar=0
 
 run-gdb: $(ISO)
 	qemu-system-x86_64 -m 2G -smp $(SMP) -cdrom $(ISO) -s -S -no-reboot \
-		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0
+		-cpu max -netdev user,id=net0 -device rtl8139,netdev=net0,rombar=0
 
 run-qemu: run-gui
 
@@ -244,7 +244,7 @@ test: test-iso
 	@timeout $(TEST_TIMEOUT) qemu-system-x86_64 -display none \
 		-serial file:$(BUILD_DIR)/test.log -no-reboot \
 		-m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso \
-		-cpu max -drive file=ext2_test.img,format=raw,if=ide >/dev/null 2>&1 || true
+		-cpu max -net none -drive file=ext2_test.img,format=raw,if=ide >/dev/null 2>&1 || true
 	@grep -a "\[TEST\]" $(BUILD_DIR)/test.log || true
 	@$(MAKE) --no-print-directory test-check
 
@@ -268,7 +268,7 @@ test-quiet: test-iso
 	@timeout $(TEST_TIMEOUT) qemu-system-x86_64 -display none \
 		-serial file:$(BUILD_DIR)/test.log -no-reboot \
 		-m 2G -smp $(SMP) -cdrom $(BUILD_DIR)/zenus-test.iso \
-		-cpu max -drive file=ext2_test.img,format=raw,if=ide >/dev/null 2>&1 || true
+		-cpu max -net none -drive file=ext2_test.img,format=raw,if=ide >/dev/null 2>&1 || true
 	@$(MAKE) --no-print-directory test-check
 
 test-check:
@@ -367,7 +367,7 @@ define fuzz_run
 	@timeout $(FUZZ_TIMEOUT) qemu-system-x86_64 \
 		-display none -serial file:$(call FUZZ_LOG,$(2)) -no-reboot \
 		-m $(FUZZ_MEM) -smp $(FUZZ_SMP) -cdrom $(call FUZZ_ISO,$(2)) \
-		-cpu max >/dev/null 2>&1 || true
+		-cpu max -net none >/dev/null 2>&1 || true
 	@grep -a '\[FUZZ\]' $(call FUZZ_LOG,$(2)) || true
 	@echo "--- crash list ---"
 	@grep -a '\[FUZZ\] CRASH' $(call FUZZ_LOG,$(2)) || echo "(no crash reported)"

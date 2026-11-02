@@ -131,12 +131,9 @@ pub fn wake_aps() {
 
 pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
     crate::cpu::enable_sse();
-    crate::gdt::init_ap();
-    // IDTR is per-CPU: load the kernel IDT built by interrupts::init() on
-    // the BSP before anything can fault on this AP (else #DF → triple
-    // fault kills the whole VM).
+    let cpu_id = crate::smp::cpu_number_for_apic(info.lapic_id);
+    crate::gdt::init_ap(cpu_id);
     crate::interrupts::idt::load_ap();
-    let cpu_id = cpu_number_for_apic(info.lapic_id);
     crate::cpu::init_syscall_ap(cpu_id);
 
     let apic_base = unsafe { crate::cpu::read_msr(0x1B) & 0xFFFFF000 };
@@ -147,7 +144,6 @@ pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
     crate::interrupts::apic::init_timer_ap(48);
 
     AP_READY_COUNT.fetch_add(1, Ordering::Release);
-    zenus_console::kinfo!("AP CPU started");
 
     let idle_fn = unsafe { AP_IDLE_FN };
     if let Some(f) = idle_fn {

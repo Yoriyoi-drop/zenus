@@ -40,7 +40,7 @@ mkdir -p "$(dirname "$log")"
 # SMEP and no SMAP, so a boot that exercises them needs a model that has them.
 # `-display none` because there is no console to draw on.
 "$qemu" -display none -serial "file:$log" -m 2G -smp "$smp" -cdrom "$iso" \
-    -no-reboot -cpu max -netdev user,id=net0 -device rtl8139,netdev=net0 "$@" &
+    -no-reboot -cpu max -netdev user,id=net0 -device rtl8139,netdev=net0,rombar=0 "$@" &
 pid=$!
 
 deadline=$(( $(date +%s) + timeout ))

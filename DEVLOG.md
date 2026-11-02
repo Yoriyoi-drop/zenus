@@ -3550,3 +3550,33 @@ Yang dikerjakan:
 Verifikasi: cargo build + make build (simbol `__kpti_text_start/end` dan `__kpti_data_start/end` benar), make smoke (prompt shell tercapai), make test-quiet (27/27 in-kernel, termasuk tes round-trip).
 
 Sisa tahap 3 dan 4 (belum dikerjakan): stub entry untuk 256 vektor IDT (CPU mengambil handler lewat CR3 yang aktif, jadi instruksi pertama setiap handler harus di halaman trampoline; ini berarti mengganti `extern "x86-interrupt"` dengan stub asm + dispatcher Rust), lalu aktivasi di scheduler dengan `TSS.RSP0` menunjuk entry stack yang terpetakan di kedua view.
+
+---
+
+## BUG-062 — x2APIC probe faulted on reserved bits / disabled APIC
+
+**Status:** sudah di-fix
+**Keparahan:** tinggi — boot GPF pada QEMU dengan `-cpu max` (x2APIC aktif), `make test`/`make smoke` tidak bisa jalan
+**Test:** host tidak; verifikasi via `make test-quiet` (27/27) dan `make smoke`
+
+**Di mana:** `crates/zenus-arch/src/interrupts/apic.rs` — `x2apic_msrs_work`, `enable_lapic`
+
+**Yang salah:** probe menulis `0x0200_0000` ke LDR (0x80D), yang men-set bit reserved → `#GP`. Selain itu probe dijalankan sebelum APIC di-enable, sehingga akses MSR x2APIC juga fault. Hasilnya boot GPF di `wrmsr`.
+
+**Fix:** probe memakai SVR (0x80F) dengan bit enable (0x100) yang valid, menyimpan/mengembalikan nilai asli; EN bit di-set sementara sebelum probe. Fallback xAPIC tetap berjalan kalau probe gagal.
+
+## BUG-063 — `gdt::init_ap()` memanggil `smp::current_cpu()` sebelum APIC siap
+
+**Status:** sudah di-fix
+**Keparahan:** tinggi — AP bring-up hang: semua AP fault di `gdt::init_ap` karena `current_cpu()` membaca MSR x2APIC 0x802 sebelum APIC di-enable
+**Test:** `make smoke` (prompt shell tercapai)
+
+**Di mana:** `crates/zenus-arch/src/gdt.rs` — `init_ap`; `crates/zenus-arch/src/smp.rs` — `ap_entry`
+
+**Yang salah:** `init_ap` memanggil `smp::current_cpu()`, yang di mode x2APIC membaca MSR 0x802. Pada AP, APIC belum di-enable saat GDT diinisialisasi, sehingga akses MSR fault dan AP tidak pernah mencapai `AP_READY_COUNT`.
+
+**Fix:** `init_ap(cpu: u32)` menerima indeks CPU dari `ap_entry` (yang sudah punya `info.lapic_id` dan `cpu_number_for_apic` tidak butuh MSR), sehingga tidak ada akses APIC sebelum waktunya.
+
+## Stabilitas toolchain
+
+`Makefile` dan `boot-smoke.sh`: QEMU 10.2 gagal menemukan ROM `efi-e1000.rom`/`efi-rtl8139.rom` pada direktori default. `make test`/`test-quiet` menambahkan `-net none`; perangkat RTL8139 menambahkan `rombar=0`. Ini membuat `make test` dan `make smoke` bisa dijalankan di lingkungan saat ini.
