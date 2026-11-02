@@ -101,19 +101,18 @@
 ## Version 0.1.0 - Pre-Alpha (2026-06-25)
 
 ### Overview
-First public release of Zenus OS. Pre-Alpha quality with core foundation complete (100% Phase 1, 100% Phase 2, 100% Phase 3, 10% Phase 4).
+First public release of Zenus OS. Pre-Alpha quality with core foundation complete. See `ROADMAP.md` for what is actually built, partial, and missing — checked against the tree, not against intention.
 
 ### Major Changes
-- Initial kernel release with full foundation (Phase 1, 2, 3 complete)
-- Excellent architecture foundation with excellent modularity and educational value
-- Core infrastructure (boot, memory, scheduler, filesystem, networking) complete
-- User mode execution working (Ring 3 via SYSCALL/SYSRET)
-- Production-grade server infrastructure complete (SSH, services, supervision)
-- virtio drivers and multi-queue NIC support
-- Container namespaces (PID + UTS) ready for network control
-- Comprehensive networking stack (TCP, UDP, DHCP, DNS, routing)
-- ext2 filesystem with journaling and crash recovery
-- 25 unit tests across critical systems
+- Initial kernel release with full foundation (boot, memory, scheduler, filesystem, networking)
+- Layered, modular architecture with per-crate host unit tests
+- User mode execution working (Ring 3 via SYSCALL/SYSRET, 109 syscalls)
+- Services: init system (PID 1) with service supervision, `.zpk` package manager, sysctl, ZENUS_SSH/1.0 (homegrown line protocol — not real SSH)
+- virtio drivers (net, blk, console, balloon) and RTL8139 PIO NIC
+- All six namespace types (PID, UTS, mount, net, user, IPC); cgroup `pids`/`memory` enforced
+- Comprehensive networking stack (TCP, UDP, ICMP, DHCP client+server, DNS, static routing, stateful firewall)
+- ext2 filesystem (read-write, write-ahead journalling, fsck), block cache, VFS with mount table
+- Host unit tests across all kernel crates; in-kernel test suite; in-kernel fuzzing campaigns
 
 ### Breaking Changes
 - None (first public release)
@@ -165,54 +164,28 @@ First public release of Zenus OS. Pre-Alpha quality with core foundation complet
 - Syslog with 4096-entry buffer
 
 ### Known Issues
-- Missing syscalls (fork, exec, pipe, signal handling)
-- No user/kernel isolation (no SMAP/SMEP, no KPTI)
-- ATA PIO-only driver (poor performance)
-- Networking driver PIO-only (poor performance)
-- Limited concurrency (128 tasks, 16 TCP connections)
+- KPTI not yet active (stages 1-2 built and tested; IDT entry stubs + scheduler activation remain)
+- No way to gain a capability back (one per-task set; `PR_CAPBSET_DROP` only shrinks)
+- `PR_SET_SECCOMP` returns `-EINVAL` (no seccomp)
+- cgroup `cpu`/`io` advertised but unenforced; hierarchy flat
+- Storage PIO-only (no AHCI/NVMe/USB driver model)
 - No dynamic memory management (swap, OOM)
 - Shell runs in kernel space (security risk)
-- No package manager in user space
-- No SSH server in production
-- No firewall support
-- No secure boot
-- No capability system
-- Minimal security features
+- No overlayfs, no OCI container runtime
+- No cryptography (no TLS, no disk encryption, no secure boot)
+- `ZENUS_SSH/1.0` is a weak homegrown line protocol with a default password — not real SSH
 
 ### Highlights from Audit
-**Phase 1 (Foundation): ✅ 100% Complete**
-- User mode execution verified with "Hello from user mode!" message
-- Per-process address spaces implemented with CR3 switching
-- Verified ELF loader with proper user page table setup
-- ext2 filesystem functional: root, hello.txt, subdir read/write
-- Block cache working with proper LRU logic
-- 25 unit tests across block_cache, VFS, ext2, paging
+The audit scorecard in this section predates the work in `ROADMAP.md`; it credits Phase 3 at 100% and lists TCP congestion control, a firewall and journalling as missing when all three shipped. Read `ROADMAP.md` for the checked-against-tree status instead. Highlights that still hold:
 
-**Phase 2 (Networking & Security): ✅ 100% Complete**
-- TCP stack 11/11 RFC 793 states
-- Full BSD socket API
-- DHCP client/server with IP allocation
-- DNS stub resolver
-- IP routing table with longest-prefix match
-- User/group model (UID/GID, syscalls 100-105)
-
-**Phase 3 (Server Infrastructure): ✅ 100% Complete**
-- SSH server (ZENUS_SSH/1.0)
-- Init system with service lifecycle
-- Package manager (.zpk format)
-- Initrd script execution with startup.sh
-- Sysctl interface for 8 kernel parameters
-- Service supervision with health checks
-- Reliable logging (4096-entry syslog)
-- Watchdog system (30s timeout)
-- Crash dump with backtrace (16 frames)
-
-**Phase 4 (Cloud & Production): ✅ 10% Complete**
-- Virtio drivers (net, blk, balloon, console)
-- Multi-queue NIC support (virtio-net VIRTIO_NET_F_MQ)
-- Container namespaces (PID + UTS isolation)
-
-**Production Score: 41% (+15% Phase 3 complete, +1.5% Virtio drivers, +1% namespaces)**
+- User mode execution verified (Hello from userspace under `-cpu max` with SMEP+SMAP on)
+- Per-process address spaces with CR3 switching; SMAP/SMEP enabled at boot
+- ext2 read-write with write-ahead journalling and fsck; block cache
+- TCP with congestion control and retransmission; stateful firewall; DHCP/DNS
+- Init system (PID 1) with service supervision and dependency-ordered start
+- `.zpk` package manager with path confinement; sysctl interface
+- All six namespace types; cgroup `pids`/`memory` enforced
+- Host unit tests + in-kernel suite + in-kernel fuzzing campaigns
 
 ## Installation and Usage
 
@@ -435,31 +408,16 @@ make test
 
 ## Future Plans
 
-### Phase 1 (Foundation) ✅ COMPLETE
-- User mode execution
-- Per-process address spaces
-- ELF loader
-- Basic disk filesystem
+### Status (per `ROADMAP.md`, checked against the tree)
 
-### Phase 2 (Networking & Security) ✅ COMPLETE
-- Enhanced TCP/IP stack
-- Security hardening
-- Platform security
+Phase claims in older releases (100% Phase 1/2/3) are not accurate; `ROADMAP.md` lists what is built, partial, and missing. Open work, in order:
 
-### Phase 3 (Server Infrastructure) ✅ COMPLETE
-- Server services
-- System management
-- Storage & persistence
-
-### Phase 4 (Cloud & Production) ✅ IN PROGRESS
-- VirtIO drivers
-- Container namespaces
-- Cloud integration
-
-### Phase 5 (Enterprise Production) 🔄 PLANNING
-- High-availability clusters
-- Enterprise security
-- Cloud orchestration
+- Close remaining parser holes (fuzz campaigns now trustworthy: `crashes=0`)
+- KPTI stages 3-4: 256 IDT entry stubs + scheduler activation (not yet active)
+- Driver model: AHCI first, so storage is not PIO-only
+- Capabilities: a way to *gain* a capability back (no `capset`/file capabilities yet); seccomp
+- cgroup `cpu`/`io` enforcement; non-flat hierarchy
+- Boot smoke test in CI (already added via `make smoke`)
 
 ## Legal
 
