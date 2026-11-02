@@ -3620,3 +3620,17 @@ Sisa tahap 3 dan 4 (belum dikerjakan): stub entry untuk 256 vektor IDT (CPU meng
 **Yang salah:** `end_page = ((addr + length) + 0xFFF) & !0xFFF` memakai `+` tanpa cek. Untuk `addr` dekat u64::MAX hasilnya wrap dan loop unmap tidak menutup rentang yang dimaksud.
 
 **Fix:** helper murni `munmap_page_range(addr, length) -> Option<(u64, u64)>` memakai `checked_add` di kedua penambahan dan menolak bila hasil tidak maju. `sys_munmap` memakainya.
+
+---
+
+## BUG-067 — `sys_shmget`/`sys_shmat` ukuran tak terbatas dan perkalian halaman bisa wrap
+
+**Status:** sudah di-fix
+**Keparahan:** sedang — DoS/alokasi tak terbatas dan rentang VMA yang salah pada shared memory
+**Test:** `crates/zenus-syscall/src/syscall.rs` → `host_tests::the_shm_page_count_cannot_wrap`
+
+**Di mana:** `crates/zenus-syscall/src/syscall.rs` — `sys_shmget`, `sys_shmat`
+
+**Yang salah:** `pages = (size + 0xFFF) / 0x1000` wrap dekat `u64::MAX` (menjadi 0) dan tidak ada batas ukuran, sehingga request raksasa bisa mengalokasikan banyak frame atau membuat segment invalid. `sys_shmat` juga menghitung `page_count * 0x1000` dan `vma_start + ...` tanpa cek overflow.
+
+**Fix:** helper murni `shm_page_count(size) -> Option<u64>` memakai `checked_add`, menolak `size == 0` dan `size > MAX_MAPPING_SIZE`. `sys_shmget` dan `sys_shmat` memakainya; `sys_shmat` juga memakai `checked_mul`/`checked_add` untuk rentang mapping.

@@ -2164,6 +2164,19 @@ pub fn mmap_extent(length: u64, max_size: u64, free_frames: usize) -> Option<(u6
     Some((pages, size))
 }
 
+/// Number of pages a shared-memory segment of `size` bytes needs, or `None`
+/// if the request is not a legal size.
+///
+/// Pure: the old expression `(size + 0xFFF) / 0x1000` wrapped for `size` near
+/// `u64::MAX`, producing zero pages for a gigantic request, and nothing capped
+/// the allocation loop against an attacker-chosen size.
+pub fn shm_page_count(size: u64) -> Option<u64> {
+    if size == 0 || size > zenus_mem::vma::MAX_MAPPING_SIZE {
+        return None;
+    }
+    size.checked_add(0xFFF).map(|n| n / 0x1000)
+}
+
 /// Undo the first `count` pages of a mapping that is being abandoned.
 ///
 /// Unmaps them, returns their frames, and releases the `memory.max` charge that
@@ -2833,7 +2846,10 @@ impl ShmTable {
         }
         for i in 0..MAX_SHMSEG {
             if !self.segments[i].valid {
-                let pages = (size + 0xFFF) / 0x1000;
+                let pages = match shm_page_count(size) {
+                    Some(p) => p,
+                    None => return None,
+                };
                 let mut phys_addrs = alloc::vec::Vec::new();
                 for _ in 0..pages {
                     if let Some(f) = zenus_mem::frame_allocator::FRAME_ALLOCATOR
@@ -2923,14 +2939,32 @@ fn sys_shmat(shmid: u64, _shmaddr: u64, _shmflg: u64, _a4: u64, _a5: u64, _a6: u
         return -1i64 as u64;
     }
 
-    let page_count = (size + 0xFFF) / 0x1000;
+    let page_count = match shm_page_count(size) {
+        Some(p) => p,
+        None => return -1i64 as u64,
+    };
+    let page_bytes = match page_count.checked_mul(0x1000) {
+        Some(b) => b,
+        None => return -1i64 as u64,
+    };
+    let mapping_end = match vma_start.checked_add(page_bytes) {
+        Some(e) => e,
+        None => return -1i64 as u64,
+    };
     for i in 0..page_count {
-        let page_phys = phys + i * 0x1000;
+        let offset = match i.checked_mul(0x1000) {
+            Some(o) => o,
+            None => return -1i64 as u64,
+        };
+        let page_phys = match phys.checked_add(offset) {
+            Some(p) => p,
+            None => return -1i64 as u64,
+        };
         zenus_mem::paging::map_user_page_raw(cr3, vma_start + i * 0x1000, page_phys, true, false);
     }
 
     scheduler::with_vma_mut(task_id, |vma| {
-        vma.insert(vma_start, vma_start + page_count * 0x1000, 3, 1);
+        vma.insert(vma_start, mapping_end, 3, 1);
     });
 
     // Remember where this task mapped the segment so `shmdt` can find it again.
@@ -4206,8 +4240,8 @@ mod host_tests {
     use super::MS_RDONLY as SYSCALL_MS_RDONLY;
     use super::{
         brk_action, checked_array_len, mmap_extent, mount_flags_from_syscall, mprotect_range,
-        munmap_page_range, nanosleep_deadline, validate_user_range, BrkAction, MAX_XFER,
-        MS_NODEV, MS_NOEXEC, MS_NOSUID, USER_SPACE_LIMIT,
+        munmap_page_range, nanosleep_deadline, shm_page_count, validate_user_range, BrkAction,
+        MAX_XFER, MS_NODEV, MS_NOEXEC, MS_NOSUID, USER_SPACE_LIMIT,
     };
 
     #[repr(C)]
@@ -4529,6 +4563,32 @@ mod host_tests {
             !body.contains("((addr + length)"),
             "sys_munmap must not compute its own end offset: that is the \
              unchecked expression this bug was"
+        );
+    }
+
+    /// Regression: `sys_shmget`/`sys_shmat` derived their page count as
+    /// `(size + 0xFFF) / 0x1000` with a bare `+`, which wraps for `size` near
+    /// `u64::MAX` (to zero pages), and nothing capped the allocation against an
+    /// attacker-chosen size. `sys_shmat` then multiplied the (possibly huge)
+    /// page count by `0x1000` without checking for overflow.
+    #[test]
+    fn the_shm_page_count_cannot_wrap() {
+        assert_eq!(shm_page_count(0), None);
+        assert_eq!(shm_page_count(1), Some(1));
+        assert_eq!(shm_page_count(0x1000), Some(1));
+        assert_eq!(shm_page_count(0x1001), Some(2));
+        assert_eq!(shm_page_count(u64::MAX), None);
+        assert_eq!(shm_page_count(zenus_mem::vma::MAX_MAPPING_SIZE + 1), None);
+
+        let source = include_str!("syscall.rs");
+        let body = source
+            .split("fn sys_shmat(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn ").next())
+            .expect("sys_shmat exists");
+        assert!(
+            body.contains("shm_page_count(size)"),
+            "sys_shmat must derive its page count from shm_page_count"
         );
     }
 
