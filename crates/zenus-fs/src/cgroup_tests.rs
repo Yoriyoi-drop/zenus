@@ -369,3 +369,46 @@ fn cpu_and_io_limits_through_the_filesystem() {
     assert!(fs.write(cpu_max, 0, b"max").is_some());
     assert_eq!(read_str(&fs, cpu_max), "max\n");
 }
+
+/// `cpu.max` binds: charging past the limit is refused and changes nothing;
+/// charging exactly up to the limit still fits.
+#[test]
+fn cpu_max_refuses_the_charge_that_would_exceed_it() {
+    let mut t = CgroupTable::empty();
+    t.reset();
+    let g = t.create("cpu").expect("created");
+    assert!(t.set_cpu_max(g, 4096));
+    assert_eq!(t.attach(g, 1), Ok(()));
+
+    assert!(t.charge_cpu(1, 2048), "first charge fits");
+    assert_eq!(t.cpu_used(g), 2048);
+    assert!(!t.charge_cpu(1, 4096), "second charge would exceed 4096");
+    assert_eq!(t.cpu_used(g), 2048, "the refused charge is not counted");
+
+    assert!(t.charge_cpu(1, 2048), "exactly at the limit still fits");
+    assert!(!t.charge_cpu(1, 1), "one tick over does not");
+
+    // The root is unlimited: any charge succeeds.
+    assert!(t.charge_cpu(2, 1 << 40));
+}
+
+/// `io.max` binds: charging past the limit is refused and changes nothing.
+#[test]
+fn io_max_refuses_the_charge_that_would_exceed_it() {
+    let mut t = CgroupTable::empty();
+    t.reset();
+    let g = t.create("io").expect("created");
+    assert!(t.set_io_max(g, 8192));
+    assert_eq!(t.attach(g, 1), Ok(()));
+
+    assert!(t.charge_io(1, 4096), "first charge fits");
+    assert_eq!(t.io_used(g), 4096);
+    assert!(!t.charge_io(1, 8192), "second charge would exceed 8192");
+    assert_eq!(t.io_used(g), 4096, "the refused charge is not counted");
+
+    assert!(t.charge_io(1, 4096), "exactly at the limit still fits");
+    assert!(!t.charge_io(1, 1), "one byte over does not");
+
+    // The root is unlimited: any charge succeeds.
+    assert!(t.charge_io(2, 1 << 40));
+}

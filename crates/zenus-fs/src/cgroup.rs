@@ -215,6 +215,10 @@ struct Cgroup {
     pids_max: u64,
     cpu_max: u64,
     io_max: u64,
+    /// Cumulative CPU ticks charged to this group. Enforced by the scheduler.
+    cpu_used: u64,
+    /// Cumulative IO bytes charged to this group. Enforced by the IO scheduler.
+    io_used: u64,
     members: Vec<Member>,
 }
 
@@ -308,6 +312,8 @@ impl CgroupTable {
             pids_max: CGROUP_UNLIMITED,
             cpu_max: CGROUP_UNLIMITED,
             io_max: CGROUP_UNLIMITED,
+            cpu_used: 0,
+            io_used: 0,
             members: Vec::new(),
         });
         Some(id)
@@ -466,6 +472,62 @@ impl CgroupTable {
         }
     }
 
+    /// `cpu_used` for `id`, or `0` if it does not exist. The root is always `0`.
+    pub fn cpu_used(&self, id: u64) -> u64 {
+        if id == CGROUP_ROOT {
+            return 0;
+        }
+        self.index_of(id).map(|i| self.groups[i].cpu_used).unwrap_or(0)
+    }
+
+    /// `io_used` for `id`, or `0` if it does not exist. The root is always `0`.
+    pub fn io_used(&self, id: u64) -> u64 {
+        if id == CGROUP_ROOT {
+            return 0;
+        }
+        self.index_of(id).map(|i| self.groups[i].io_used).unwrap_or(0)
+    }
+
+    /// Charge `ticks` of CPU to `task`'s group, enforcing `cpu.max`.
+    ///
+    /// `false` means the charge would push the group past `cpu.max` and nothing
+    /// was charged — the caller must not run the task. A task in no group (or
+    /// the unlimited root) always succeeds.
+    pub fn charge_cpu(&mut self, task: u64, ticks: u64) -> bool {
+        let Some(gid) = self.group_of_task(task) else {
+            return true;
+        };
+        let max = self.cpu_max(gid).unwrap_or(CGROUP_UNLIMITED);
+        if max != CGROUP_UNLIMITED && self.cpu_used(gid).saturating_add(ticks) > max {
+            return false;
+        }
+        let Some(i) = self.index_of(gid) else {
+            return true;
+        };
+        self.groups[i].cpu_used = self.groups[i].cpu_used.saturating_add(ticks);
+        true
+    }
+
+    /// Charge `bytes` of IO to `task`'s group, enforcing `io.max`.
+    ///
+    /// `false` means the charge would push the group past `io.max` and nothing
+    /// was charged — the caller must not submit the IO. A task in no group (or
+    /// the unlimited root) always succeeds.
+    pub fn charge_io(&mut self, task: u64, bytes: u64) -> bool {
+        let Some(gid) = self.group_of_task(task) else {
+            return true;
+        };
+        let max = self.io_max(gid).unwrap_or(CGROUP_UNLIMITED);
+        if max != CGROUP_UNLIMITED && self.io_used(gid).saturating_add(bytes) > max {
+            return false;
+        }
+        let Some(i) = self.index_of(gid) else {
+            return true;
+        };
+        self.groups[i].io_used = self.groups[i].io_used.saturating_add(bytes);
+        true
+    }
+
     /// Which group a task belongs to, or `None` if it is not attached anywhere.
     pub fn group_of_task(&self, task: u64) -> Option<u64> {
         if self.root_members.iter().any(|m| m.task == task) {
@@ -611,6 +673,18 @@ pub fn io_max_for_task(task: u64) -> u64 {
         .lock()
         .io_max(group_of_task(task))
         .unwrap_or(CGROUP_UNLIMITED)
+}
+
+/// Charge `ticks` of CPU to a task's group, enforcing `cpu.max`. The scheduler
+/// consults this before running a task past its quota.
+pub fn charge_cpu_for_task(task: u64, ticks: u64) -> bool {
+    CGROUP_TABLE.lock().charge_cpu(task, ticks)
+}
+
+/// Charge `bytes` of IO to a task's group, enforcing `io.max`. The IO scheduler
+/// consults this before submitting IO past its bandwidth limit.
+pub fn charge_io_for_task(task: u64, bytes: u64) -> bool {
+    CGROUP_TABLE.lock().charge_io(task, bytes)
 }
 
 /// Empty the table. Tests only.
