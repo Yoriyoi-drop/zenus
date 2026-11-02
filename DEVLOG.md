@@ -3662,3 +3662,17 @@ Sisa tahap 3 dan 4 (belum dikerjakan): stub entry untuk 256 vektor IDT (CPU meng
 **Yang salah:** perhitungan `timeout_ticks` memakai `+` tanpa cek. Untuk `timeout_ms` hampir `u64::MAX`, hasilnya wrap.
 
 **Fix:** helper murni `poll_timeout_ticks(timeout_ms) -> u64` memakai `saturating_add(9)` dan mempertahankan `u64::MAX` untuk wait tanpa batas. `sys_poll` memakainya.
+
+---
+
+## BUG-070 — `Ext2Fs::write` posisi dan ukuran file bisa wrap/truncate
+
+**Status:** sudah di-fix
+**Keparahan:** sedang — write pada posisi dekat u64::MAX dapat wrap, dan `new_size` dapat melewati batas u32 tanpa pengecekan
+**Test:** `crates/zenus-fs/src/lib.rs` → `host_tests::ext2_write_position_cannot_wrap`
+
+**Di mana:** `crates/zenus-fs/src/ext2.rs` — `Ext2Fs::write`
+
+**Yang salah:** `logical_block = ((offset + written) / block_size) as u32` dan `new_size = offset + written` memakai arithmetic/cast tanpa cek. Posisi besar dapat wrap menjadi blok kecil; ukuran baru dapat overflow sebelum dibandingkan dengan `u32::MAX`.
+
+**Fix:** helper murni `write_logical_block(offset, written, block_size) -> Option<u32>` memakai `checked_add` dan menolak blok di luar u32. `read` dan `write` memakai `checked_add` untuk `end`/`new_size`, dan `write` menolak posisi yang tidak dapat direpresentasikan.

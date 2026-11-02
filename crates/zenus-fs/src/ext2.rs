@@ -38,6 +38,23 @@ pub fn group_count(count: u64, per_group: u64) -> Option<u64> {
     Some(count.div_ceil(per_group))
 }
 
+/// The logical block number for byte `offset + written` in an ext2 file, or
+/// `None` if the position or its block number cannot be represented.
+///
+/// Pure, so the write path's `((offset + written) / block_size) as u32`
+/// cannot silently wrap a huge or overflowing position into a small block.
+pub fn write_logical_block(offset: u64, written: u64, block_size: u64) -> Option<u32> {
+    if block_size == 0 {
+        return None;
+    }
+    let pos = offset.checked_add(written)?;
+    let block = pos / block_size;
+    if block > u32::MAX as u64 {
+        return None;
+    }
+    Some(block as u32)
+}
+
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct RawSuperblock {
@@ -625,7 +642,10 @@ impl FileSystem for Ext2Fs {
 
         let block_size = self.block_size;
         let start_block = (offset / block_size) as u32;
-        let end = core::cmp::min(offset + buf.len() as u64, size);
+        let end = match offset.checked_add(buf.len() as u64) {
+            Some(e) => core::cmp::min(e, size),
+            None => size,
+        };
         let end_block = end.div_ceil(block_size) as u32;
         let mut written = 0u64;
 
@@ -669,8 +689,15 @@ impl FileSystem for Ext2Fs {
         let len = buf.len();
 
         while written < len as u64 {
-            let logical_block = ((offset + written) / self.block_size) as u32;
-            let block_off = ((offset + written) % self.block_size) as usize;
+            let pos = match offset.checked_add(written) {
+                Some(p) => p,
+                None => return None,
+            };
+            let logical_block = match write_logical_block(offset, written, self.block_size) {
+                Some(b) => b,
+                None => return None,
+            };
+            let block_off = (pos % self.block_size) as usize;
             let to_copy = (block_size - block_off).min((len as u64 - written) as usize);
 
             let mut phys = self.inode_read_block(&raw, logical_block);
@@ -704,7 +731,10 @@ impl FileSystem for Ext2Fs {
             written += to_copy as u64;
         }
 
-        let new_size = offset + written;
+        let new_size = match offset.checked_add(written) {
+            Some(n) => n,
+            None => return None,
+        };
         if new_size > raw.size_low as u64 {
             if new_size > u32::MAX as u64 {
                 return None;

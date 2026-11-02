@@ -2207,4 +2207,21 @@ mod host_tests {
         assert!(bc_read(dev as u8, 7, &mut buf));
         assert_eq!(&buf, &[0x11; 8]);
     }
+
+    /// Regression: ext2 write used to compute `(offset + written) / block_size`
+    /// and `offset + written` with bare arithmetic/casts, so a huge write
+    /// position could wrap or truncate into a small block number.
+    #[test]
+    fn ext2_write_position_cannot_wrap() {
+        use crate::ext2::write_logical_block;
+
+        assert_eq!(write_logical_block(0, 0, 1024), Some(0));
+        assert_eq!(write_logical_block(1023, 1, 1024), Some(1));
+        assert_eq!(write_logical_block(0, u64::MAX, 1024), None);
+        assert_eq!(write_logical_block(u64::MAX, 1, 1024), None);
+        assert_eq!(write_logical_block(0, 1, 0), None);
+        assert_eq!(write_logical_block(0, u64::MAX, 1), None);
+        assert_eq!(write_logical_block(u32::MAX as u64, 0, 1), Some(u32::MAX));
+        assert_eq!(write_logical_block(1, 0, 1), Some(1));
+    }
 }
