@@ -29,6 +29,8 @@ fn the_root_group_accepts_everything_and_cannot_be_removed() {
     assert_eq!(t.lookup_name("/"), Some(0));
     assert_eq!(t.pids_max(0), Some(CGROUP_UNLIMITED));
     assert_eq!(t.memory_max(0), Some(CGROUP_UNLIMITED));
+    assert_eq!(t.cpu_max(0), Some(CGROUP_UNLIMITED));
+    assert_eq!(t.io_max(0), Some(CGROUP_UNLIMITED));
     assert!(!t.remove(0), "the root cannot be removed");
 
     // A task in the root is always attachable and always chargeable.
@@ -306,4 +308,64 @@ fn a_directory_inode_is_not_mistaken_for_a_file() {
         "each group's files are its own"
     );
     assert_eq!(fs.stat(dir).file_type, FileType::Directory);
+}
+
+/// `cpu.max` and `io.max` are unlimited by default, accept a real limit, refuse
+/// the root, and refuse garbage instead of parsing it as zero.
+#[test]
+fn cpu_and_io_limits_bind_like_pids_and_memory() {
+    let mut t = CgroupTable::empty();
+    t.reset();
+    let g = t.create("limited").expect("created");
+
+    assert_eq!(t.cpu_max(g), Some(CGROUP_UNLIMITED));
+    assert_eq!(t.io_max(g), Some(CGROUP_UNLIMITED));
+
+    assert!(t.set_cpu_max(g, 50_000));
+    assert!(t.set_io_max(g, 10_000_000));
+    assert_eq!(t.cpu_max(g), Some(50_000));
+    assert_eq!(t.io_max(g), Some(10_000_000));
+
+    // The root is unlimited and cannot be limited.
+    assert_eq!(t.cpu_max(0), Some(CGROUP_UNLIMITED));
+    assert_eq!(t.io_max(0), Some(CGROUP_UNLIMITED));
+    assert!(!t.set_cpu_max(0, 1));
+    assert!(!t.set_io_max(0, 1));
+
+    // An unknown group cannot be limited.
+    assert!(!t.set_cpu_max(999, 1));
+    assert!(!t.set_io_max(999, 1));
+}
+
+/// `cpu.max`/`io.max` written through the filesystem read back what was written,
+/// and garbage is refused rather than parsed as zero.
+#[test]
+fn cpu_and_io_limits_through_the_filesystem() {
+    let _serial = crate::host_tests::serial();
+    reset_for_tests();
+    let fs = CgroupFs;
+
+    let dir = fs
+        .create(fs.root_inode(), "cg", FileType::Directory)
+        .expect("mkdir");
+    let cpu_max = fs.lookup(dir, "cpu.max").expect("listed");
+    let io_max = fs.lookup(dir, "io.max").expect("listed");
+
+    assert_eq!(read_str(&fs, cpu_max), "max\n", "unlimited by default");
+    assert_eq!(read_str(&fs, io_max), "max\n", "unlimited by default");
+
+    assert!(fs.write(cpu_max, 0, b"12345").is_some());
+    assert_eq!(read_str(&fs, cpu_max), "12345\n");
+    assert!(fs.write(io_max, 0, b"67890").is_some());
+    assert_eq!(read_str(&fs, io_max), "67890\n");
+
+    // Garbage is refused, not parsed as zero (which would freeze the group).
+    assert!(fs.write(cpu_max, 0, b"nonsense").is_none());
+    assert!(fs.write(io_max, 0, b"nonsense").is_none());
+    assert_eq!(read_str(&fs, cpu_max), "12345\n");
+    assert_eq!(read_str(&fs, io_max), "67890\n");
+
+    // `max` lifts the limit again.
+    assert!(fs.write(cpu_max, 0, b"max").is_some());
+    assert_eq!(read_str(&fs, cpu_max), "max\n");
 }

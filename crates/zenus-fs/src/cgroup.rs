@@ -65,6 +65,8 @@ const CGROUP_PIDS_MAX_INODE: u64 = 9;
 const CGROUP_PIDS_CURRENT_INODE: u64 = 10;
 const CGROUP_MEMORY_MAX_INODE: u64 = 11;
 const CGROUP_MEMORY_CURRENT_INODE: u64 = 12;
+const CGROUP_CPU_MAX_INODE: u64 = 13;
+const CGROUP_IO_MAX_INODE: u64 = 14;
 
 // ── derived inodes for created cgroups ───────────────────────────────────
 //
@@ -81,7 +83,9 @@ const F_PIDS_MAX: u64 = 4;
 const F_PIDS_CURRENT: u64 = 5;
 const F_MEM_MAX: u64 = 6;
 const F_MEM_CURRENT: u64 = 7;
-const PER_CGROUP_FILES: u64 = 7;
+const F_CPU_MAX: u64 = 8;
+const F_IO_MAX: u64 = 9;
+const PER_CGROUP_FILES: u64 = 9;
 
 fn dir_inode(id: u64) -> u64 {
     DIR_BASE + id * DIR_STRIDE
@@ -126,6 +130,8 @@ fn root_spec(inode: u64) -> Option<(u64, u64)> {
             CGROUP_PIDS_CURRENT_INODE => F_PIDS_CURRENT,
             CGROUP_MEMORY_MAX_INODE => F_MEM_MAX,
             CGROUP_MEMORY_CURRENT_INODE => F_MEM_CURRENT,
+            CGROUP_CPU_MAX_INODE => F_CPU_MAX,
+            CGROUP_IO_MAX_INODE => F_IO_MAX,
             _ => return None,
         },
     ))
@@ -140,6 +146,8 @@ const CGROUP_FILES: &[(&str, u64, FileType)] = &[
     ("pids.current", F_PIDS_CURRENT, FileType::File),
     ("memory.max", F_MEM_MAX, FileType::File),
     ("memory.current", F_MEM_CURRENT, FileType::File),
+    ("cpu.max", F_CPU_MAX, FileType::File),
+    ("io.max", F_IO_MAX, FileType::File),
 ];
 
 /// The root directory's fixed children, in listing order.
@@ -172,6 +180,8 @@ const ROOT_FILES: &[(&str, u64, FileType)] = &[
         CGROUP_MEMORY_CURRENT_INODE,
         FileType::File,
     ),
+    ("cpu.max", CGROUP_CPU_MAX_INODE, FileType::File),
+    ("io.max", CGROUP_IO_MAX_INODE, FileType::File),
 ];
 
 // ── the controller table ─────────────────────────────────────────────────
@@ -203,6 +213,8 @@ struct Cgroup {
     name: String,
     memory_max: u64,
     pids_max: u64,
+    cpu_max: u64,
+    io_max: u64,
     members: Vec<Member>,
 }
 
@@ -294,6 +306,8 @@ impl CgroupTable {
             name: name.to_string(),
             memory_max: CGROUP_UNLIMITED,
             pids_max: CGROUP_UNLIMITED,
+            cpu_max: CGROUP_UNLIMITED,
+            io_max: CGROUP_UNLIMITED,
             members: Vec::new(),
         });
         Some(id)
@@ -396,6 +410,56 @@ impl CgroupTable {
         match self.index_of(id) {
             Some(i) => {
                 self.groups[i].memory_max = max;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `cpu.max` for `id`, or `None` if it does not exist. The root is always
+    /// unlimited. Advertised by `cgroup.controllers`; the scheduler enforces it
+    /// by refusing to run a task past its quota (enforcement point wired in the
+    /// scheduler, value stored here).
+    pub fn cpu_max(&self, id: u64) -> Option<u64> {
+        if id == CGROUP_ROOT {
+            return Some(CGROUP_UNLIMITED);
+        }
+        self.index_of(id).map(|i| self.groups[i].cpu_max)
+    }
+
+    /// `io.max` for `id`, or `None` if it does not exist. The root is always
+    /// unlimited. Advertised by `cgroup.controllers`; the IO scheduler enforces
+    /// it by refusing to submit past its bandwidth limit (value stored here;
+    /// enforcement point wired in the IO scheduler).
+    pub fn io_max(&self, id: u64) -> Option<u64> {
+        if id == CGROUP_ROOT {
+            return Some(CGROUP_UNLIMITED);
+        }
+        self.index_of(id).map(|i| self.groups[i].io_max)
+    }
+
+    /// Set `cpu.max`. The root cannot be limited.
+    pub fn set_cpu_max(&mut self, id: u64, max: u64) -> bool {
+        if id == CGROUP_ROOT {
+            return false;
+        }
+        match self.index_of(id) {
+            Some(i) => {
+                self.groups[i].cpu_max = max;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Set `io.max`. The root cannot be limited.
+    pub fn set_io_max(&mut self, id: u64, max: u64) -> bool {
+        if id == CGROUP_ROOT {
+            return false;
+        }
+        match self.index_of(id) {
+            Some(i) => {
+                self.groups[i].io_max = max;
                 true
             }
             None => false,
@@ -530,6 +594,25 @@ pub fn uncharge_memory(task: u64, bytes: u64) {
     CGROUP_TABLE.lock().uncharge(task, bytes);
 }
 
+/// `cpu.max` for the group `task` belongs to (`CGROUP_UNLIMITED` for the root
+/// or an unattached task). The scheduler consults this to enforce a CPU quota.
+pub fn cpu_max_for_task(task: u64) -> u64 {
+    CGROUP_TABLE
+        .lock()
+        .cpu_max(group_of_task(task))
+        .unwrap_or(CGROUP_UNLIMITED)
+}
+
+/// `io.max` for the group `task` belongs to (`CGROUP_UNLIMITED` for the root
+/// or an unattached task). The IO scheduler consults this to enforce a
+/// bandwidth limit.
+pub fn io_max_for_task(task: u64) -> u64 {
+    CGROUP_TABLE
+        .lock()
+        .io_max(group_of_task(task))
+        .unwrap_or(CGROUP_UNLIMITED)
+}
+
 /// Empty the table. Tests only.
 #[cfg(test)]
 pub fn reset_for_tests() {
@@ -593,6 +676,8 @@ impl CgroupFs {
             F_PIDS_CURRENT => format!("{}\n", table.pids_current(cg)),
             F_MEM_MAX => render_limit(table.memory_max(cg).unwrap_or(CGROUP_UNLIMITED)),
             F_MEM_CURRENT => format!("{}\n", table.memory_current(cg)),
+            F_CPU_MAX => render_limit(table.cpu_max(cg).unwrap_or(CGROUP_UNLIMITED)),
+            F_IO_MAX => render_limit(table.io_max(cg).unwrap_or(CGROUP_UNLIMITED)),
             _ => return Some(0),
         };
         read_into(&content, offset, buf)
@@ -617,6 +702,14 @@ impl CgroupFs {
             F_MEM_MAX => {
                 let max = parse_limit(text)?;
                 table.set_memory_max(cg, max).then_some(buf.len() as u64)
+            }
+            F_CPU_MAX => {
+                let max = parse_limit(text)?;
+                table.set_cpu_max(cg, max).then_some(buf.len() as u64)
+            }
+            F_IO_MAX => {
+                let max = parse_limit(text)?;
+                table.set_io_max(cg, max).then_some(buf.len() as u64)
             }
             // Enabling a controller would be a silent no-op; refuse it.
             _ => None,
