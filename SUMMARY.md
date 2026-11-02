@@ -23,7 +23,7 @@ It is **pre-alpha**. The core is real; the security model is not finished.
 | Block cache | 512 sectors, 4-way, write-back |
 | Kernel heap | 8 MiB static arena |
 | Namespaces | 16 each: PID, UTS, mount, net, user, IPC |
-| Host unit tests | 277 |
+| Host unit tests | 282 |
 | In-kernel tests | 27 |
 | `unsafe` blocks | 465 in the kernel, 472 tree-wide, plus 11 `unsafe impl` |
 
@@ -31,8 +31,11 @@ It is **pre-alpha**. The core is real; the security model is not finished.
 
 1. **SMAP/SMEP are enabled at boot** (fixed, see DEVLOG BUG-033). Kernel code
    may no longer read or write user pages without `stac`/`clac`.
-2. **No privilege model.** No capabilities, `prctl` is a no-op, `root` bypasses
-   everything.
+2. **Privilege model is partial.** One capability set per task exists
+   (`CAP_SYS_ADMIN`, `CAP_KILL`, `CAP_SETUID`/`CAP_SETGID`, `CAP_DAC_OVERRIDE`,
+   `CAP_DAC_READ_SEARCH` enforced), but nothing can add a capability back, and
+   `root` (euid 0) still bypasses file checks unless the capability is dropped.
+   `prctl(PR_CAPBSET_READ/DROP)` works; `PR_SET_SECCOMP` still `-EINVAL`.
 3. **No cryptography.** No TLS, no disk encryption, no secure boot. The
    `ZENUS_SSH/1.0` service is a homegrown line protocol with a weak keystream
    and a default password.
@@ -40,8 +43,8 @@ It is **pre-alpha**. The core is real; the security model is not finished.
 ## Testing
 
 ```bash
-make test-host   # 158 host unit tests, no VM
-make test        # 25 in-kernel tests in QEMU
+make test-host   # 282 host unit tests, no VM
+make test        # 27 in-kernel tests in QEMU
 make fuzz-smoke  # in-kernel fuzzing campaign
 ```
 
