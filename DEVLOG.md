@@ -3580,3 +3580,15 @@ Sisa tahap 3 dan 4 (belum dikerjakan): stub entry untuk 256 vektor IDT (CPU meng
 ## Stabilitas toolchain
 
 `Makefile` dan `boot-smoke.sh`: QEMU 10.2 gagal menemukan ROM `efi-e1000.rom`/`efi-rtl8139.rom` pada direktori default. `make test`/`test-quiet` menambahkan `-net none`; perangkat RTL8139 menambahkan `rombar=0`. Ini membuat `make test` dan `make smoke` bisa dijalankan di lingkungan saat ini.
+
+---
+
+## BUG-064 / fitur — animasi spinner pada log fuzz
+
+**Status:** sudah di-implement
+**Keparahan:** rendah — UX, run panjang sulit dipantau
+**Test:** `make fuzz-smoke` (spinner terlihat di `progress` dan `waiting`)
+
+**Di mana:** `crates/zenus-fuzz/src/lib.rs` (heartbeat 500 kasus), `apps/src/fuzz_runner.rs` (watchdog `waiting`)
+
+**Yang diubah:** progress line kini menampilkan karakter spinner yang berputar (`|`, `/`, `-`, `\`) setiap 500 kasus dan setiap detik pada watchdog, sehingga run panjang tetap terlihat hidup di serial.

@@ -336,11 +336,16 @@ pub fn run_campaign(mode: Mode, cases: u64, seed: u64) -> FuzzStats {
         executed += 1;
 
         // Heartbeat: keeps the serial output alive if the campaign wedges and
-        // gives the Makefile targets a progress line to watch.
+        // gives the Makefile targets a progress line to watch. The rotating
+        // spinner makes a long run visibly alive even when the case counter
+        // moves slowly.
         if executed.is_multiple_of(500) {
+            const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
+            let spin = SPINNER[((executed / 500) as usize) % SPINNER.len()];
             let stats = *FUZZ_STATS.lock();
             zenus_console::kinfo!(
-                "[FUZZ] progress cases={} crashes={} edges={} corpus={}",
+                "[FUZZ] progress {} cases={} crashes={} edges={} corpus={}",
+                spin,
                 stats.total_cases,
                 stats.crashes,
                 stats.coverage_edges,

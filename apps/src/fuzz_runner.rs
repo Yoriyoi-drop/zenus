@@ -240,8 +240,11 @@ fn watchdog() -> bool {
     let ticks = elapsed / 100;
     if ticks != LAST_REPORT.load(Ordering::Relaxed) {
         LAST_REPORT.store(ticks, Ordering::Relaxed);
+        const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
+        let spin = SPINNER[(ticks as usize) % SPINNER.len()];
         zenus_console::kinfo!(
-            "[FUZZ] waiting cases={} stuck_in_case={} elapsed={}s",
+            "[FUZZ] waiting {} cases={} stuck_in_case={} elapsed={}s",
+            spin,
             zenus_fuzz::CASE_COUNTER.load(Ordering::Relaxed),
             zenus_fuzz::CURRENT_CASE.load(Ordering::Relaxed),
             ticks
