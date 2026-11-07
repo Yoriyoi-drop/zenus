@@ -54,6 +54,152 @@ core::arch::global_asm!(
     "  .quad 0",
 );
 
+// =========================================================================
+// IDT entry stubs for KPTI.
+//
+// Every IDT vector needs an entry point that lives in .text.kpti (mapped into
+// the user view) so the CPU can fetch it when a ring-3 task faults with the
+// user view loaded. Each stub switches CR3 to the kernel view, then jumps to
+// the real handler via an indirect jump through a data slot filled in at boot.
+//
+// Vectors 34..=255 (except reserved) share one stub that jumps to
+// interrupt_stray. Specific vectors get their own stub so they reach the
+// correct handler.
+// =========================================================================
+core::arch::global_asm!(
+    ".intel_syntax noprefix",
+    ".section .text.kpti, \"ax\"",
+    // --- Specific exception vectors (triggered from user mode) ---
+    ".globl kpti_idt_entry_0",
+    "kpti_idt_entry_0:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_0]",
+    ".globl kpti_idt_entry_6",
+    "kpti_idt_entry_6:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_6]",
+    ".globl kpti_idt_entry_13",
+    "kpti_idt_entry_13:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_13]",
+    ".globl kpti_idt_entry_14",
+    "kpti_idt_entry_14:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_14]",
+    // --- Hardware interrupt vectors ---
+    ".globl kpti_idt_entry_32",
+    "kpti_idt_entry_32:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_32]",
+    ".globl kpti_idt_entry_33",
+    "kpti_idt_entry_33:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_33]",
+    ".globl kpti_idt_entry_36",
+    "kpti_idt_entry_36:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_36]",
+    ".globl kpti_idt_entry_39",
+    "kpti_idt_entry_39:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_39]",
+    ".globl kpti_idt_entry_43",
+    "kpti_idt_entry_43:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_43]",
+    // --- Generic stub for all remaining vectors (stray handler) ---
+    ".globl kpti_idt_entry_stray",
+    "kpti_idt_entry_stray:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_stray]",
+    // --- Data slots holding handler addresses (filled at boot) ---
+    ".section .kpti_data, \"aw\"",
+    ".balign 8",
+    ".globl kpti_idt_target_0",
+    "kpti_idt_target_0:",
+    "  .quad 0",
+    ".balign 8",
+    ".globl kpti_idt_target_6",
+    "kpti_idt_target_6:",
+    "  .quad 0",
+    ".balign 8",
+    ".globl kpti_idt_target_13",
+    "kpti_idt_target_13:",
+    "  .quad 0",
+    ".balign 8",
+    ".globl kpti_idt_target_14",
+    "kpti_idt_target_14:",
+    "  .quad 0",
+    ".balign 8",
+    ".globl kpti_idt_target_32",
+    "kpti_idt_target_32:",
+    "  .quad 0",
+    ".balign 8",
+    ".globl kpti_idt_target_33",
+    "kpti_idt_target_33:",
+    "  .quad 0",
+    ".balign 8",
+    ".globl kpti_idt_target_36",
+    "kpti_idt_target_36:",
+    "  .quad 0",
+    ".balign 8",
+    ".globl kpti_idt_target_39",
+    "kpti_idt_target_39:",
+    "  .quad 0",
+    ".balign 8",
+    ".globl kpti_idt_target_43",
+    "kpti_idt_target_43:",
+    "  .quad 0",
+    ".balign 8",
+    ".globl kpti_idt_target_stray",
+    "kpti_idt_target_stray:",
+    "  .quad 0",
+);
+
+extern "C" {
+    static kpti_idt_target_0: u64;
+    static kpti_idt_target_6: u64;
+    static kpti_idt_target_13: u64;
+    static kpti_idt_target_14: u64;
+    static kpti_idt_target_32: u64;
+    static kpti_idt_target_33: u64;
+    static kpti_idt_target_36: u64;
+    static kpti_idt_target_39: u64;
+    static kpti_idt_target_43: u64;
+    static kpti_idt_target_stray: u64;
+}
+
+/// Publish handler addresses so the KPTI IDT entry stubs can jump to them.
+///
+/// Called once during `idt::init()` after every handler slot is known.
+pub fn init_idt_entry_targets(
+    div0: u64, inv_op: u64, gpf: u64, page_fault: u64,
+    timer: u64, keyboard: u64, serial: u64, spurious: u64, nic: u64, stray: u64,
+) {
+    unsafe {
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_0) as *mut u64, div0);
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_6) as *mut u64, inv_op);
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_13) as *mut u64, gpf);
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_14) as *mut u64, page_fault);
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_32) as *mut u64, timer);
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_33) as *mut u64, keyboard);
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_36) as *mut u64, serial);
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_39) as *mut u64, spurious);
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_43) as *mut u64, nic);
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_stray) as *mut u64, stray);
+    }
+}
+
 extern "C" {
     /// Run a few instructions under `user_cr3` and come back.
     ///

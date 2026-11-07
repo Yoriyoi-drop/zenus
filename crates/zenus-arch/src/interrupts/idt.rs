@@ -5,6 +5,21 @@ use zenus_console::serial::SerialPort;
 use crate::fuzz_guard;
 use crate::gdt;
 use crate::interrupts::faults;
+use crate::interrupts::handler;
+use zenus_mem::kpti;
+
+extern "C" {
+    static kpti_idt_entry_0: u8;
+    static kpti_idt_entry_6: u8;
+    static kpti_idt_entry_13: u8;
+    static kpti_idt_entry_14: u8;
+    static kpti_idt_entry_32: u8;
+    static kpti_idt_entry_33: u8;
+    static kpti_idt_entry_36: u8;
+    static kpti_idt_entry_39: u8;
+    static kpti_idt_entry_43: u8;
+    static kpti_idt_entry_stray: u8;
+}
 
 /// Fuzzing containment hook. Every CPU exception handler must call this
 /// *before* doing anything else: while a fuzz checkpoint is armed the fault is
@@ -112,86 +127,101 @@ static mut IDT: MaybeUninit<InterruptDescriptorTable> = MaybeUninit::uninit();
 pub fn init() {
     let idt = unsafe { &mut *IDT.as_mut_ptr() };
 
-    idt.divide_error.set_handler_fn(divide_error_handler);
-    idt.debug.set_handler_fn(debug_handler);
-    idt.non_maskable_interrupt.set_handler_fn(nmi_handler);
-    // BUG FIX: breakpoint DPL must be 3 for int3 to work at Ring 3.
-    // Default DPL is 0, which causes #GP when user-mode code executes int3.
-    // Zenus linker adds int3 padding after function bodies, so any code
-    // that falls through past a syscall (or other instruction) will hit
-    // int3 padding. Without DPL=3, this becomes a silent #GP instead of
-    // a debuggable breakpoint trap.
-    idt.breakpoint
-        .set_handler_fn(breakpoint_handler)
-        .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
-    idt.overflow.set_handler_fn(overflow_handler);
-    idt.bound_range_exceeded.set_handler_fn(bound_range_handler);
-    idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
-    idt.device_not_available
-        .set_handler_fn(device_not_available_handler);
+    // Register handler addresses for the KPTI entry stubs before installing
+    // them, so the stubs can jump to the real handlers after switching CR3.
+    kpti::init_idt_entry_targets(
+        divide_error_handler as *const () as u64,
+        invalid_opcode_handler as *const () as u64,
+        gpf_handler as *const () as u64,
+        page_fault_handler as *const () as u64,
+        handler::interrupt_timer as *const () as u64,
+        handler::interrupt_keyboard as *const () as u64,
+        handler::interrupt_serial as *const () as u64,
+        handler::interrupt_spurious as *const () as u64,
+        handler::interrupt_nic as *const () as u64,
+        handler::interrupt_stray as *const () as u64,
+    );
 
+    // KPTI entry stubs live in .text.kpti, mapped into both the kernel and
+    // user views, so the CPU can fetch them when a ring-3 task faults with
+    // the user view loaded. Each stub switches CR3 to the kernel view before
+    // entering the handler.
+    //
+    // SAFETY: the IDT is a `static mut` written only during single-threaded
+    // `init()`, and the entry-stub addresses are fixed at link time.
     unsafe {
+        idt.divide_error.set_handler_addr(x86_64::VirtAddr::new(
+            &kpti_idt_entry_0 as *const u8 as u64,
+        ));
+        idt.debug.set_handler_fn(debug_handler);
+        idt.non_maskable_interrupt.set_handler_fn(nmi_handler);
+        idt.breakpoint
+            .set_handler_fn(breakpoint_handler)
+            .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
+        idt.overflow.set_handler_fn(overflow_handler);
+        idt.bound_range_exceeded.set_handler_fn(bound_range_handler);
+        idt.invalid_opcode.set_handler_addr(x86_64::VirtAddr::new(
+            &kpti_idt_entry_6 as *const u8 as u64,
+        ));
+        idt.device_not_available
+            .set_handler_fn(device_not_available_handler);
+
         idt.double_fault
             .set_handler_fn(double_fault_handler)
             .set_stack_index((gdt::DF_IST_IDX + 1) as u16);
-    }
 
-    idt.invalid_tss.set_handler_fn(invalid_tss_handler);
-    idt.segment_not_present
-        .set_handler_fn(segment_not_present_handler);
-    idt.stack_segment_fault
-        .set_handler_fn(stack_segment_handler);
-    idt.general_protection_fault.set_handler_fn(gpf_handler);
-    idt.page_fault.set_handler_fn(page_fault_handler);
-    idt.x87_floating_point.set_handler_fn(x87_fp_handler);
-    idt.alignment_check.set_handler_fn(alignment_check_handler);
-    idt.machine_check.set_handler_fn(machine_check_handler);
-    idt.simd_floating_point.set_handler_fn(simd_fp_handler);
-    idt.virtualization.set_handler_fn(virtualization_handler);
+        idt.invalid_tss.set_handler_fn(invalid_tss_handler);
+        idt.segment_not_present
+            .set_handler_fn(segment_not_present_handler);
+        idt.stack_segment_fault
+            .set_handler_fn(stack_segment_handler);
+        idt.general_protection_fault
+            .set_handler_addr(x86_64::VirtAddr::new(
+                &kpti_idt_entry_13 as *const u8 as u64,
+            ));
+        idt.page_fault.set_handler_addr(x86_64::VirtAddr::new(
+            &kpti_idt_entry_14 as *const u8 as u64,
+        ));
+        idt.x87_floating_point.set_handler_fn(x87_fp_handler);
+        idt.alignment_check.set_handler_fn(alignment_check_handler);
+        idt.machine_check.set_handler_fn(machine_check_handler);
+        idt.simd_floating_point.set_handler_fn(simd_fp_handler);
+        idt.virtualization.set_handler_fn(virtualization_handler);
 
-    // IRQ 0-15 mapped to vectors 32-47
-    // Vector 32: preemption timer (LAPIC timer). Runs on the dedicated IST
-    // stack — see the comment on the entry below.
-    unsafe {
-        extern "C" {
-            static apic_timer_isr_stub: u8;
-        }
-        let addr = &apic_timer_isr_stub as *const u8 as u64;
+        // IRQ 0-15 mapped to vectors 32-47
         idt[32]
-            .set_handler_addr(x86_64::VirtAddr::new(addr))
+            .set_handler_addr(x86_64::VirtAddr::new(
+                &kpti_idt_entry_32 as *const u8 as u64,
+            ))
             .disable_interrupts(true)
             .set_privilege_level(x86_64::PrivilegeLevel::Ring0);
-        // NOTE: deliberately NO IST here. With an IST stack the CPU pushes
-        // the frame on the shared per-CPU IST stack, so every task's saved
-        // context would live at the same address and the next timer tick
-        // overwrote it (frame with a garbage CS, kernel dies). The TSS.RSP0
-        // design is what keeps each task's saved context on its own stack.
-    }
-    idt[33].set_handler_fn(super::handler::interrupt_keyboard);
-    idt[39].set_handler_fn(super::handler::interrupt_spurious);
+        idt[33].set_handler_addr(x86_64::VirtAddr::new(
+            &kpti_idt_entry_33 as *const u8 as u64,
+        ));
+        idt[39].set_handler_addr(x86_64::VirtAddr::new(
+            &kpti_idt_entry_39 as *const u8 as u64,
+        ));
 
-    // Every remaining vector gets an ack-and-return handler. A zeroed IDT
-    // slot makes the CPU jump to address 0 on the first stray interrupt
-    // (QEMU raises IRQ7 spuriously and a PIC EOI from the wrong CPU can
-    // re-aim a line), which showed up as APs executing garbage.
-    // SAFETY: the IDT is a `static mut` and this is the only place that writes
-    // the stray-vector slots, during single-threaded `init()`.
-    unsafe {
-        let stray = super::handler::interrupt_stray as *const () as u64;
+        // Every remaining vector gets the shared stray stub (KPTI-safe).
+        let stray = &kpti_idt_entry_stray as *const u8 as u64;
         for vec in 34u8..=255u8 {
             if super::RESERVED_VECTORS.contains(&vec) {
                 continue;
             }
             idt[vec].set_handler_addr(x86_64::VirtAddr::new(stray));
         }
+
+        idt[super::NIC_VECTOR].set_handler_addr(x86_64::VirtAddr::new(
+            &kpti_idt_entry_43 as *const u8 as u64,
+        ));
+
+        // Serial (UART) interrupt (IRQ 4 for COM1)
+        idt[super::SERIAL_VECTOR].set_handler_addr(x86_64::VirtAddr::new(
+            &kpti_idt_entry_36 as *const u8 as u64,
+        ));
+
+        idt.load();
     }
-
-    // NIC interrupt — vector is fixed (see `interrupts::NIC_VECTOR`), the
-    // driver routes whatever IRQ line the device reports onto it.
-    idt[super::NIC_VECTOR].set_handler_fn(super::handler::interrupt_nic);
-
-    // Serial (UART) interrupt (IRQ 4 for COM1)
-    idt[super::SERIAL_VECTOR].set_handler_fn(super::handler::interrupt_serial);
 
     idt.load();
 }
