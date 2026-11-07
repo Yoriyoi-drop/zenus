@@ -3717,3 +3717,47 @@ merekam postur keamanan kernel (relevan untuk klaim "1.0 stabil LTS").
 `make smoke` (prompt shell), `make test-quiet` (27/27), `make fuzz-coverage`
 (crashes=0). Tidak ada bug crash live yang ditemukan pada sesi ini; temuan
 nyata satu-satunya adalah cacat dokumentasi di atas.
+
+---
+
+## BUG-072 — rencana aktivasi KPTI (stage 3 + 4)
+
+**Status:** rencana, belum dikerjakan.
+**Keparahan:** tinggi (keamanan/stabilitas inti) — saat ini user CR3 masih
+memetakan seluruh kernel; KPTI adalah butir #2 di ROADMAP "Next".
+
+**Konteks:** `crates/zenus-mem/src/kpti.rs` sudah punya stage 1 (`build_user_view`
+membangun PML4 kedua dengan kernel half di-zero) dan stage 2 (`kpti_round_trip`
+trampoline CR3 swap, teruji via `tests::test_trampoline_round_trip` dan
+`tests::test_user_view_hides_the_kernel`). Yang belum: stage 3 (stub entry untuk
+`syscall` dan 256 vector IDT) dan stage 4 (aktivasi scheduler). KPTI tidak bisa
+diaktifkan sebagian: batas syscall/interrupt harus konsisten atau boot GPF.
+
+**Rencana konkret:**
+1. **Stub syscall** (`crates/zenus-arch/src/cpu.rs`, `syscall_entry`): ganti
+   pendekatan "kernel view selalu loaded" — pada entry, muat *user view* task
+   (CR3 user), kemudian stub beralih ke kernel CR3 sebelum menyentuh data kernel;
+   pada return (`iretq`), beralih balik ke user view. Trampoline `.text.kpti` +
+   `.kpti_data` sudah dipetakan supervisor di kedua view (`map_trampoline_into`).
+2. **256 stub IDT** (`zenus_arch::interrupts`): setiap handler harus punya
+   instruksi pertama yang berada di page terpetakan di kedua view, yang
+   beralih ke kernel CR3, jalankan handler asli, lalu beralih balik. Pendekatan
+   lazim: `push` + `swapgs`-free trampoline yang memuat kernel CR3 dari slot
+   (`kpti_kernel_cr3_slot`) lalu `jmp` ke handler kernel.
+3. **Per-task user view** (`zenus_mem::paging::create_address_space` /
+   `scheduler::create_user_task`): bangun user view per task dan simpan di
+   `Task` (CR3 user vs CR3 kernel). `build_user_view` memakai `alloc_frame`;
+   pastikan `destroy_user_view` dipanggil di jalur teardown (`reap_task` /
+   `kill_task`) agar frame tidak bocor.
+4. **Aktivasi scheduler** (`scheduler::yield_now` / `switch_to_user` /
+   `zenus-arch/src/user.rs`): saat context-switch ke task user, load user view;
+   saat masuk kernel (timer ISR, syscall), load kernel CR3. Pastikan AP (SMP)
+   juga konsisten.
+5. **Verifikasi:** `make test-quiet` (27/27, jalan `-cpu max` — SMEP/SMAP +
+   KPTI perlu model itu), `make smoke` (prompt shell), lalu `make fuzz-coverage`
+   (crashes=0). Tambah in-kernel test yang benar-benar switch ke user view dan
+   mencoba baca alamat kernel (harus `#PF`, bukan leak).
+
+**Risiko:** tinggi — salah di stub/CR3 switch memecahkan boot. Oleh karena itu
+diimplementasikan sebagai satu perubahan kohesif + diverifikasi via QEMU, bukan
+bertahap per-file.
