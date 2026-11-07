@@ -1201,6 +1201,17 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp_ptr: u64, _a4: u64, _a5: u64, 
 
     // Close user FDs (except 0,1,2) and destroy old address space
     fd_close_all_for_task(tid);
+
+    // Make the new image the *live* address space BEFORE tearing down the old
+    // one. `cr3` (captured at entry) is the address space this syscall has been
+    // running with, so it is the one currently loaded. `destroy_address_space`
+    // switches the live CR3 to the kernel's the moment it frees `cr3`; if we
+    // then return to ring 3 without reloading, the freshly exec'd process runs
+    // with the kernel's page tables (its user half does not contain the new
+    // image) and faults on its first instruction. `new_cr3` carries the same
+    // shared kernel half as every other address space, so the kernel keeps
+    // executing across the switch; only the user half — the new image — differs.
+    zenus_mem::paging::set_cr3(new_cr3);
     if cr3 != 0 && cr3 != zenus_mem::paging::kernel_cr3() {
         zenus_mem::paging::destroy_address_space(cr3);
     }
