@@ -1,7 +1,7 @@
 use super::task::{Task, TaskInfo, TaskState, MAX_TASKS};
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use zenus_mem::allocator::ALLOCATOR;
-use zenus_mem::kpti::{set_kernel_cr3_slot, set_user_cr3_slot};
+use zenus_mem::kpti::{build_user_view, destroy_user_view, set_kernel_cr3_slot, set_user_cr3_slot};
 use zenus_ns::{NsId, NS_ROOT};
 use zenus_sync::spinlock::SpinLock;
 
@@ -739,6 +739,11 @@ pub fn clone_task(
         task.cpu = cpu;
         task.cr3 = cr3;
         task.user_cr3 = cr3;
+        // Build the KPTI user view for the cloned task, inheriting the parent's
+        // user half. Falls back to the kernel CR3 if no frame is available.
+        if let Some(view) = build_user_view(cr3) {
+            task.user_cr3 = view;
+        }
         task.heap_brk = heap_brk;
         task.heap_floor = heap_brk;
         task.uid = parent.uid;
@@ -876,6 +881,13 @@ pub fn create_user_task(
         task.cpu = cpu;
         task.cr3 = cr3;
         task.user_cr3 = cr3;
+        // Build the KPTI user view for this task. The user view shares the
+        // user half of the address space but zeroes the kernel half, so a
+        // ring-3 task cannot reach kernel addresses. Falls back to the kernel
+        // CR3 (no isolation) if no frame is available.
+        if let Some(view) = build_user_view(cr3) {
+            task.user_cr3 = view;
+        }
         task.heap_brk = heap_brk;
         task.heap_floor = heap_brk;
         // Capture the parent BEFORE taking TASKS — `current_task_id()`
@@ -1674,8 +1686,33 @@ pub fn set_task_cr3(id: u64, cr3: u64) {
     for t in tasks.tasks.iter_mut() {
         if let Some(ref mut task) = t {
             if task.id == id {
+                // Destroy the old user view if it was a separate KPTI view.
+                let old_user = task.user_cr3;
+                if old_user != 0 && old_user != task.cr3 {
+                    drop(tasks);
+                    destroy_user_view(old_user);
+                    let mut tasks = TASKS.lock();
+                    for t2 in tasks.tasks.iter_mut() {
+                        if let Some(ref mut t2) = t2 {
+                            if t2.id == id {
+                                t2.cr3 = cr3;
+                                if let Some(view) = build_user_view(cr3) {
+                                    t2.user_cr3 = view;
+                                } else {
+                                    t2.user_cr3 = cr3;
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    return;
+                }
                 task.cr3 = cr3;
-                task.user_cr3 = cr3;
+                if let Some(view) = build_user_view(cr3) {
+                    task.user_cr3 = view;
+                } else {
+                    task.user_cr3 = cr3;
+                }
                 return;
             }
         }
@@ -2372,12 +2409,12 @@ pub fn reap_task(task_id: u64) {
             let t = &tasks.tasks[i];
             match t {
                 Some(tc) if tc.id == task_id && tc.state == TaskState::Terminated => {
-                    Some((tc.stack_alloc, tc.stack_size, tc.cpu, tc.cr3, tc.pid_ns))
+                    Some((tc.stack_alloc, tc.stack_size, tc.cpu, tc.cr3, tc.user_cr3, tc.pid_ns))
                 }
                 _ => None,
             }
         };
-        if let Some((stack_alloc, stack_size, task_cpu, cr3, pid_ns)) = task_info {
+        if let Some((stack_alloc, stack_size, task_cpu, cr3, task_user_cr3, pid_ns)) = task_info {
             // Free PID namespace registration
             if pid_ns != 0 {
                 zenus_ns::pid::unregister_task(pid_ns, task_id);
@@ -2392,6 +2429,12 @@ pub fn reap_task(task_id: u64) {
             // Update CPU task count
             CPU_TASK_COUNT[task_cpu as usize].fetch_sub(1, Ordering::SeqCst);
             TASK_COUNT.fetch_sub(1, Ordering::Release);
+            // Free the KPTI user view if it differs from the kernel view.
+            // The user view only owns its PML4 frame; the user half is shared
+            // with the kernel address space which is freed below.
+            if cr3 != 0 && task_user_cr3 != 0 && task_user_cr3 != cr3 {
+                destroy_user_view(task_user_cr3);
+            }
             // Free user address space (switches to kernel CR3 if currently active)
             if cr3 != 0 {
                 zenus_mem::paging::destroy_address_space(cr3);
@@ -2453,6 +2496,7 @@ pub fn kill_task(id: u64) -> bool {
                     tc.stack_alloc,
                     tc.stack_size,
                     tc.cr3,
+                    tc.user_cr3,
                     tc.state,
                     tc.pid_ns,
                     tc.id,
@@ -2460,7 +2504,7 @@ pub fn kill_task(id: u64) -> bool {
                 _ => None,
             }
         };
-        if let Some((task_cpu, stack_alloc, stack_size, cr3, state, pid_ns, tid)) = task_info {
+        if let Some((task_cpu, stack_alloc, stack_size, cr3, task_user_cr3, state, pid_ns, tid)) = task_info {
             if pid_ns != 0 {
                 zenus_ns::pid::unregister_task(pid_ns, tid);
             }
@@ -2478,6 +2522,10 @@ pub fn kill_task(id: u64) -> bool {
                         }
                     }
                 }
+                // Free the KPTI user view if it differs from the kernel view.
+                if cr3 != 0 && task_user_cr3 != 0 && task_user_cr3 != cr3 {
+                    destroy_user_view(task_user_cr3);
+                }
                 if cr3 != 0 {
                     zenus_mem::paging::destroy_address_space(cr3);
                 }
@@ -2494,6 +2542,10 @@ pub fn kill_task(id: u64) -> bool {
                         alloc::alloc::dealloc(stack_alloc as *mut u8, layout);
                     }
                 }
+            }
+            // Free the KPTI user view if it differs from the kernel view.
+            if cr3 != 0 && task_user_cr3 != 0 && task_user_cr3 != cr3 {
+                destroy_user_view(task_user_cr3);
             }
             // Free the task's address space (user pages, page tables)
             if cr3 != 0 {

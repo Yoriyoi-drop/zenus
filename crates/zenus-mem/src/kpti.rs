@@ -210,24 +210,46 @@ extern "C" {
     pub fn kpti_round_trip(user_cr3: u64);
     static kpti_kernel_cr3_slot: u64;
     static kpti_user_cr3_slot: u64;
-    static __kpti_text_start: u8;
-    static __kpti_text_end: u8;
-    static __kpti_data_start: u8;
-    static __kpti_data_end: u8;
 }
 
 /// The linked range of the entry text, page-aligned by the linker script.
+///
+/// Only available on the bare-metal target where `linker.ld` defines
+/// `__kpti_text_start`/`__kpti_text_end`. Host builds return (0, 0).
+#[cfg(target_os = "none")]
 pub fn trampoline_text_range() -> (u64, u64) {
+    extern "C" {
+        static __kpti_text_start: u8;
+        static __kpti_text_end: u8;
+    }
     let start = core::ptr::addr_of!(__kpti_text_start) as u64;
     let end = core::ptr::addr_of!(__kpti_text_end) as u64;
     (start, end)
 }
 
+#[cfg(not(target_os = "none"))]
+pub fn trampoline_text_range() -> (u64, u64) {
+    (0, 0)
+}
+
 /// The linked range of the entry data (the kernel-CR3 slot).
+///
+/// Only available on the bare-metal target where `linker.ld` defines
+/// `__kpti_data_start`/`__kpti_data_end`. Host builds return (0, 0).
+#[cfg(target_os = "none")]
 pub fn trampoline_data_range() -> (u64, u64) {
+    extern "C" {
+        static __kpti_data_start: u8;
+        static __kpti_data_end: u8;
+    }
     let start = core::ptr::addr_of!(__kpti_data_start) as u64;
     let end = core::ptr::addr_of!(__kpti_data_end) as u64;
     (start, end)
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn trampoline_data_range() -> (u64, u64) {
+    (0, 0)
 }
 
 /// Publish the kernel CR3 where the entry stub can read it.
