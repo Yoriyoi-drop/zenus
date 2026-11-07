@@ -3805,6 +3805,16 @@ pub const PR_GET_NO_NEW_PRIVS: u64 = 39;
 pub const PR_CAPBSET_READ: u64 = 23;
 pub const PR_CAPBSET_DROP: u64 = 24;
 
+/// `PR_SET_SECCOMP` operation: switch to filter mode.
+pub const SECCOMP_SET_MODE_FILTER: u64 = 1;
+/// `SECCOMP_SET_MODE_FILTER` flag: apply to all threads in the group.
+pub const SECCOMP_FILTER_FLAG_TSYNC: u64 = 1;
+/// seccomp return values
+pub const SECCOMP_RET_ALLOW: u64 = 0x7fff0000;
+pub const SECCOMP_RET_ERRNO: u64 = 0x00050000;
+pub const SECCOMP_RET_KILL: u64 = 0x00000000;
+pub const SECCOMP_RET_TRAP: u64 = 0x00030000;
+
 /// Whether the calling task holds `cap`.
 ///
 /// Privileged syscalls check this rather than `euid == 0`. Every task starts at
@@ -3826,7 +3836,7 @@ pub fn prctl_support(option: u64) -> PrctlSupport {
         // and Zenus does not do that. Accepting it would be the same silent
         // lie as the old blanket success, so it is unsupported.
         PR_SET_PDEATHSIG | PR_GET_PDEATHSIG => PrctlSupport::Unsupported,
-        PR_SET_SECCOMP => PrctlSupport::Unsupported,
+        PR_SET_SECCOMP => PrctlSupport::Implemented,
         PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => PrctlSupport::Implemented,
         PR_CAPBSET_READ | PR_CAPBSET_DROP => PrctlSupport::Implemented,
         _ => PrctlSupport::Unsupported,
@@ -3888,6 +3898,28 @@ fn sys_prctl(option: u64, arg2: u64, arg3: u64, _a4: u64, _a5: u64, _a6: u64) ->
                 } else {
                     0
                 }
+            }
+            PR_SET_SECCOMP => {
+                // arg2: operation (SECCOMP_SET_MODE_FILTER = 1)
+                // arg3: pointer to filter (4 u64s = 256-bit allow-list bitmap)
+                if arg2 != SECCOMP_SET_MODE_FILTER {
+                    return -22i64 as u64; // -EINVAL
+                }
+                if arg3 == 0 {
+                    return -22i64 as u64; // -EINVAL
+                }
+                // Validate user range for the 32-byte filter
+                if !validate_user_range(arg3, 32) {
+                    return -1i64 as u64;
+                }
+                let filter_ptr = arg3 as *const u64;
+                let mut allowed = [0u64; 4];
+                for i in 0..4 {
+                    allowed[i] = unsafe { core::ptr::read_volatile(filter_ptr.add(i)) };
+                }
+                let task_id = scheduler::current_task_id();
+                scheduler::set_seccomp(task_id, 1, allowed);
+                0
             }
             PR_CAPBSET_DROP => {
                 // Linux drops from the *bounding* set, which affects children
@@ -4272,6 +4304,22 @@ pub extern "C" fn syscall_dispatch6(
 ) -> u64 {
     if num >= 256 {
         return -1i64 as u64;
+    }
+    // Seccomp filter: if the current task is in filter mode, reject any
+    // syscall not in the allow-list. prctl itself is always allowed so a
+    // task cannot lock itself out of disabling the filter (Zenus has no
+    // SECCOMP_SET_MODE_DISABLE, so once enabled it stays enabled).
+        if num != crate::syscall::SYS_PRCTL {
+        let task_id = scheduler::current_task_id();
+        if let Some(task) = scheduler::get_task(task_id) {
+            if task.seccomp_mode == 1 {
+                let word = num / 64;
+                let bit = num % 64;
+                if word < 4 && task.seccomp_allowed[word as usize] & (1u64 << bit) == 0 {
+                    return (SECCOMP_RET_ERRNO | 1) as u64; // -EPERM
+                }
+            }
+        }
     }
     let result = match SYSCALL_TABLE[num as usize] {
         Some(f) => f(arg1, arg2, arg3, arg4, arg5, arg6),

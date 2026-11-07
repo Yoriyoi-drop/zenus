@@ -152,6 +152,13 @@ pub struct Task {
     /// gain privileges via `execve`. Zenus has no privilege-gaining execve
     /// yet, so the flag is recorded truthfully rather than silently dropped.
     pub no_new_privs: bool,
+    /// Seccomp filter mode: 0 = disabled, 1 = filter (BPF allow-list).
+    /// When filter mode is on, every syscall is checked against
+    /// `seccomp_allowed` before dispatch; blocked syscalls return -EPERM.
+    pub seccomp_mode: u8,
+    /// 256-bit allow-list bitmap: bit `n` set means syscall `n` is permitted.
+    /// Only meaningful when `seccomp_mode` is 1.
+    pub seccomp_allowed: [u64; 4],
     /// What this task is allowed to do beyond its uid.
     ///
     /// Every task the kernel creates starts with the full set; `clone_task`
@@ -206,6 +213,8 @@ impl Task {
             euid: 0,
             egid: 0,
             no_new_privs: false,
+            seccomp_mode: 0,
+            seccomp_allowed: [0; 4],
             caps: crate::caps::CapSet::all(),
             parent_pid: 0,
             exit_code: 0,

@@ -83,12 +83,13 @@ mod host_tests {
     fn prctl_does_not_claim_to_enforce_security() {
         use crate::syscall::{prctl_support, PrctlSupport};
 
-        // `PR_SET_SECCOMP` is genuinely unimplemented — the kernel must not
-        // claim to enforce it, so it stays `Unsupported` and fails with EINVAL.
+        // `PR_SET_SECCOMP` is now implemented: `PR_SET_SECCOMP` with
+        // `SECCOMP_SET_MODE_FILTER` installs a 256-bit syscall allow-list
+        // that `syscall_dispatch6` enforces on every subsequent call.
         assert_eq!(
             prctl_support(crate::syscall::PR_SET_SECCOMP),
-            PrctlSupport::Unsupported,
-            "seccomp must be reported as unsupported"
+            PrctlSupport::Implemented,
+            "seccomp filter mode is implemented"
         );
 
         // `PR_SET_NO_NEW_PRIVS` / `PR_GET_NO_NEW_PRIVS` are now honoured for

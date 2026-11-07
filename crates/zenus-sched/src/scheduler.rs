@@ -1550,6 +1550,21 @@ pub fn set_caps(task_id: u64, caps: crate::caps::CapSet) {
     }
 }
 
+/// Install a seccomp filter on a task. Replaces any existing filter.
+pub fn set_seccomp(task_id: u64, mode: u8, allowed: [u64; 4]) {
+    let mut tasks = TASKS.lock();
+    if let Some(slot) = tasks
+        .tasks
+        .iter_mut()
+        .find(|s| s.as_ref().map_or(false, |t| t.id == task_id))
+    {
+        if let Some(t) = slot.as_mut() {
+            t.seccomp_mode = mode;
+            t.seccomp_allowed = allowed;
+        }
+    }
+}
+
 pub fn set_current_uid(uid: u32) -> bool {
     let cpu = current_cpu();
     let idx = CURRENT_TASK[cpu as usize].load(Ordering::Acquire);
