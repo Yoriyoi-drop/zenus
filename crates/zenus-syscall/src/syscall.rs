@@ -2307,11 +2307,11 @@ fn sys_munmap(addr: u64, length: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) ->
         None => return -1i64 as u64,
     };
 
-    // Find and remove VMA
+    // Find and remove every VMA the range touches. `munmap` unmaps the whole
+    // span unconditionally, so removing only the first VMA (the old `find`)
+    // left the rest claiming freed frames — a double-free (BUG-074).
     scheduler::with_vma_mut(task_id, |vma| {
-        if let Some(idx) = vma.find(start_page) {
-            vma.remove(idx);
-        }
+        vma.remove_overlapping(start_page, end_page);
     });
 
     // Unmap pages
@@ -2418,10 +2418,20 @@ fn sys_mprotect(addr: u64, length: u64, prot: u64, _a4: u64, _a5: u64, _a6: u64)
         page += 0x1000;
     }
 
-    // Update VMA
+    // Update VMA prot for every region the range overlaps. The page loop above
+    // already applied the new protection across the whole span, so the table
+    // must track it uniformly; updating only `find(start_page)` left the second
+    // VMA stale (mismatched VMA vs. real page protection).
     scheduler::with_vma_mut(task_id, |vma| {
-        if let Some(idx) = vma.find(start_page) {
-            vma.regions[idx].prot = prot;
+        let mut i = 0;
+        while i < vma.count {
+            let overlaps = vma.regions[i].valid
+                && vma.regions[i].start < end_page
+                && vma.regions[i].end > start_page;
+            if overlaps {
+                vma.regions[i].prot = prot;
+            }
+            i += 1;
         }
     });
 

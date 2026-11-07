@@ -3803,3 +3803,49 @@ tertanam, plus batas end-eksklusif harus diterima) dan `insert_accepts_disjoint_
 oleh in-kernel test maupun fuzzer (tidak ada panic), hanya oleh audit `insert`
 + review jalur `MAP_FIXED`. Menjadi argumen untuk memperketat invariant VMA di
 konstrain level tipe / test properti pada tahap stabilisasi.
+
+## BUG-074 — `munmap` hanya menghapus VMA pertama → use-after-free / double-free
+
+**Status:** fixed.
+**Keparahan:** tinggi (use-after-free, double-free frame) — `munmap` melintasi
+beberapa VMA menceraikan page-table dari tabel VMA.
+
+**Lokasi:** `crates/zenus-syscall/src/syscall.rs` (`sys_munmap`,
+`sys_mprotect`) dan `crates/zenus-mem/src/vma.rs` (`VmaTable::remove_overlapping`).
+
+**Akar masalah:** `sys_munmap` menghapus VMA lewat `vma.find(start_page)` —
+hanya VMA *pertama* yang menutupi `start_page`. Tapi loop unmap di bawahnya
+memanggil `unmap_page_raw` + `free_frame` + `uncharge_memory` untuk **setiap**
+halaman di `[start_page, end_page)`. Bila range melintasi dua VMA (mis. A
+`0x1000..0x3000`, B `0x3000..0x5000`, lalu `munmap(0x1000, 0x4000)`):
+- A dihapus, tapi B tetap di tabel menuntut halaman `0x3000..0x4000` yang sudah
+  dibebaskan → VMA/page-table tidak konsisten.
+- Akses nanti ke `0x3000..0x4000` menemukan B (dianggap terpetakan) padahal
+  frame-nya sudah hilang → use-after-free.
+- `munmap(0x3000, 0x2000)` berikutnya menemukan B, menghapusnya, dan membebaskan
+  `0x3000..0x5000` lagi → **double-free** frame yang sama.
+
+`sym_mprotect` punya cacat mirip: hanya `find(start_page)` yang diperbarui
+prot-nya, sehingga VMA kedua (bila range melintasinya) menyimpan prot usang —
+tracking VMA tidak cocok dengan proteksi halaman nyata.
+
+**Perbaikan:**
+1. `vma.rs`: tambah `remove_overlapping(start, end)` yang menghapus *semua* VMA
+   yang overlap setengah-terbuka dengan `[start, end)`. `remove` memampatkan
+   array, jadi ia memindai ulang tiap penghapusan dan membatasi pass dengan
+   `MAX_VMAS`.
+2. `sys_munmap`: ganti blok `find`/`remove` dengan
+   `vma.remove_overlapping(start_page, end_page)`.
+3. `sys_mprotect`: perbarui `prot` untuk *setiap* VMA yang overlap range (loop
+   indeks, baca `valid`/`start`/`end` lalu tulis `prot`), mencocokkan loop
+   proteksi halaman yang sudah menerapkan proteksi ke seluruh span.
+
+**Verifikasi:** host test baru `remove_overlapping_drops_every_touched_vma`
+(span tepat A+B, partial-end C, dan range kosong = 0). `make test-host` →
+**289 passed** (288 + 1), 0 failed; bare-metal build OK; smoke OK (prompt
+shell).
+
+**Catatan stabilitas 1.0:** bug kelas "VMA vs page-table drift" yang kedua
+setelah BUG-073. Keduanya tidak memicu panic dan luput dari fuzzer; penguatan
+invariant VMA (satu sumber kebenaran antara `insert`/`remove`/`find` dan
+loop unmap) layak masuk daftar stabilisasi.

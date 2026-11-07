@@ -180,6 +180,39 @@ impl VmaTable {
         true
     }
 
+    /// Remove every VMA that overlaps `[start, end)` (half-open). `munmap` unmaps
+    /// the whole page span unconditionally, so leaving a partially-overlapped
+    /// VMA in the table would claim pages that are already gone — a
+    /// use-after-free, and a later `munmap` of that stale VMA re-frees the same
+    /// frames (a double-free). `remove` compacts, so we re-scan after each
+    /// deletion and bound the passes by the entry count (BUG-074).
+    pub fn remove_overlapping(&mut self, start: u64, end: u64) -> usize {
+        let mut removed = 0;
+        let mut guard = 0;
+        loop {
+            if guard > MAX_VMAS {
+                break;
+            }
+            guard += 1;
+            let mut hit: Option<usize> = None;
+            for i in 0..self.count {
+                let r = &self.regions[i];
+                if r.valid && r.start < end && r.end > start {
+                    hit = Some(i);
+                    break;
+                }
+            }
+            match hit {
+                Some(idx) => {
+                    self.remove(idx);
+                    removed += 1;
+                }
+                None => break,
+            }
+        }
+        removed
+    }
+
     /// Find a free page-aligned range of `size` bytes at or after `hint`.
     ///
     /// Three bugs lived here; all three are now pinned by tests:
@@ -279,5 +312,35 @@ mod host_tests {
         assert!(t.insert(0x1000, 0x2000, PROT_READ, 0).is_some());
         assert!(t.insert(0x5000, 0x6000, PROT_READ, 0).is_some());
         assert_eq!(t.count, 2);
+    }
+
+    /// BUG-074: `munmap` unmaps the whole page span, so `remove_overlapping`
+    /// must drop *every* VMA the range touches, not just the first. Leaving a
+    /// partially-overlapped VMA behind would claim freed frames (use-after-free
+    /// / double-free on a later munmap).
+    #[test]
+    fn remove_overlapping_drops_every_touched_vma() {
+        let mut t = VmaTable::new();
+        assert!(t.insert(0x1000, 0x3000, PROT_READ, 0).is_some()); // A
+        assert!(t.insert(0x3000, 0x5000, PROT_READ, 0).is_some()); // B (adjacent)
+        assert!(t.insert(0x6000, 0x8000, PROT_READ, 0).is_some()); // C
+
+        // Range 0x1000..0x5000 spans A and B exactly; C must survive.
+        let n = t.remove_overlapping(0x1000, 0x5000);
+        assert_eq!(n, 2, "should have removed both A and B");
+        assert_eq!(t.count, 1, "only C should remain");
+        assert!(t.find(0x1000).is_none());
+        assert!(t.find(0x3000).is_none());
+        assert!(t.find(0x6000).is_some());
+
+        // Partial overlap: 0x7000..0x9000 reaches into C from the end side.
+        let m = t.remove_overlapping(0x7000, 0x9000);
+        assert_eq!(m, 1);
+        assert_eq!(t.count, 0);
+
+        // A range touching nothing removes nothing.
+        let k = t.remove_overlapping(0x9000, 0xA000);
+        assert_eq!(k, 0);
+        assert_eq!(t.count, 0);
     }
 }
