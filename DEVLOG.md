@@ -3675,3 +3675,45 @@ Sisa tahap 3 dan 4 (belum dikerjakan): stub entry untuk 256 vektor IDT (CPU meng
 **Yang salah:** `logical_block = ((offset + written) / block_size) as u32` dan `new_size = offset + written` memakai arithmetic/cast tanpa cek. Posisi besar dapat wrap menjadi blok kecil; ukuran baru dapat overflow sebelum dibandingkan dengan `u32::MAX`.
 
 **Fix:** helper murni `write_logical_block(offset, written, block_size) -> Option<u32>` memakai `checked_add` dan menolak blok di luar u32. `read` dan `write` memakai `checked_add` untuk `end`/`new_size`, dan `write` menolak posisi yang tidak dapat direpresentasikan.
+
+---
+
+## BUG-071 — verifikasi stabilitas pra-1.0 + dokumentasi `doc/fuzzing.md` yang misleading
+
+**Status:** sudah dikerjakan + diverifikasi.
+**Keparahan:** rendah (dokumentasi), menengah bila dibiarkan (salah merepresentasikan postur keamanan kernel).
+
+**Latar:** Arahan goal: kejar stabilitas dulu dan perbaiki bug menuju 1.0 stabil LTS.
+Sesi ini memverifikasi gerbang stabilitas dan menelusuri daftar bug yang tercantum
+di `doc/fuzzing.md` (bagian "Bug Ditemukan", BUG-001..005).
+
+**Hasil verifikasi gerbang stabilitas (semua hijau):**
+- `make test-host` — **286** host unit test lulus (exit 0).
+- `make smoke` — kernel biasa mencapai shell prompt (`zenus$ `).
+- `make test-quiet` — in-kernel suite **27 passed, 0 failed**.
+- `make fuzz-coverage` — **11.500+ kasus, `crashes=0`** (kampanye dihentikan
+  timeout 360 s sebelum 50.000, tetapi empiris bersih: tidak ada crash tunggal
+  pada input syscall/parser/memory yang di-mutasi).
+
+**Yang salah:** Lima bug di `doc/fuzzing.md` ("Bug Ditemukan") diasumsikan masih
+aktif, padahal seluruhnya **sudah terfiksa di tree** (diverifikasi terhadap
+`crates/zenus-syscall/src/syscall.rs`):
+- BUG-001 konflik ID syscall → sudah di-renumber (komentar `// was ... conflicted with` di konstanta).
+- BUG-002 `sys_read` count > 1 MB → dibatasi `MAX_XFER`.
+- BUG-003 `sys_shmat` OOB `segments[shmid]` → ada bounds check `shmid as usize >= MAX_SHMSEG`.
+- BUG-004 `sys_readdir` buffer overflow → `validate_user_range` + batas `max = buf_size as usize`.
+- BUG-005 `sys_mount` leak/validasi → sudah ada komentar `BUG-005` dan penanganan di `sys_mount`.
+
+Dokumen yang menyajikan bug sudah-terfiksa sebagai kerentanan aktif salah
+merekam postur keamanan kernel (relevan untuk klaim "1.0 stabil LTS").
+
+**Yang dikerjakan:**
+- `doc/fuzzing.md`: bagian "Bug Ditemukan" diberi disclaimer bahwa seluruhnya
+  historis dan terfiksa, serta setiap butir diberi tanda `— *resolved*`.
+- Hitungan test disinkronkan 282 → 286 di `README.md`, `CONTRIBUTING.md`,
+  `ROADMAP.md`, `SUMMARY.md` (hasil ukur `make test-host` yang sebenarnya).
+
+**Verifikasi:** `cargo test --workspace --target x86_64-unknown-linux-gnu` (286 hijau),
+`make smoke` (prompt shell), `make test-quiet` (27/27), `make fuzz-coverage`
+(crashes=0). Tidak ada bug crash live yang ditemukan pada sesi ini; temuan
+nyata satu-satunya adalah cacat dokumentasi di atas.

@@ -259,7 +259,15 @@ make fuzz-regression
 
 ## Bug Ditemukan
 
-### BUG-001: Syscall Table Overflow
+> **Status: historis, seluruhnya sudah terfiksa di tree.** Bagian ini adalah
+> catatan temuan fuzzing awal. Tiap butir di bawah sudah ditangani di kode
+> saat ini (penomoran ulang syscall, batas `MAX_XFER`, bounds `segments[shmid]`,
+> `validate_user_range` di `sys_readdir`, dan perbaikan `BUG-005` di `sys_mount`).
+> Tidak ada satupun yang masih terbuka; lihat `DEVLOG.md` untuk pelacakan
+> perbaikannya. Bagian ini dipertahankan sebagai arsip apa yang pernah
+> ditemukan, bukan sebagai daftar kerentanan aktif.
+
+### BUG-001: Syscall Table Overflow — *resolved*
 
 **Lokasi**: `crates/zenus-syscall/src/syscall.rs:232`
 
@@ -278,7 +286,7 @@ make fuzz-regression
 
 **Fix**: Assign unique syscall IDs untuk setiap entry.
 
-### BUG-002: Integer Overflow di sys_read
+### BUG-002: Integer Overflow di sys_read — *resolved*
 
 **Lokasi**: `crates/zenus-syscall/src/syscall.rs:436-443`
 
@@ -288,7 +296,7 @@ make fuzz-regression
 
 **Fix**: Turunkan limit atau gunakan checked allocation.
 
-### BUG-003: Use-After-Free di sys_shmat
+### BUG-003: Use-After-Free di sys_shmat — *resolved*
 
 **Lokasi**: `crates/zenus-syscall/src/syscall.rs:2211-2244`
 
@@ -298,7 +306,7 @@ make fuzz-regression
 
 **Fix**: Tambah bounds check.
 
-### BUG-004: Buffer Overflow di sys_readdir
+### BUG-004: Buffer Overflow di sys_readdir — *resolved*
 
 **Lokasi**: `crates/zenus-syscall/src/syscall.rs:573-612`
 
@@ -308,7 +316,7 @@ make fuzz-regression
 
 **Fix**: Validasi `buf_size` sebelum loop.
 
-### BUG-005: Missing Validation di sys_mount
+### BUG-005: Missing Validation di sys_mount — *resolved*
 
 **Lokasi**: `crates/zenus-syscall/src/syscall.rs:2014-2086`
 
