@@ -3883,3 +3883,38 @@ karena detach menargetkan satu segmen utuh. Tidak ada drift.
 dari "nilai balik `insert`/penghapusan VMA diabaikan". Penguatan invariant VMA
 ke tingkat tipe (mis. `insert` mengembalikan `Result` yang wajib ditangani, atau
 VMA dijadikan satu sumber kebenaran pemetaan) layak masuk daftar stabilisasi 1.0.
+
+## BUG-076 — `fd_dup2` menimpa `newfd` tanpa menutup entri lama → kebocoran pipe/socket
+
+**Status:** fixed.
+**Keparahan:** sedang (kebocoran resource: endpoint pipe/socket tak dibersihkan)
+— `dup2` over fd terbuka meninggalkan state usang.
+
+**Lokasi:** `crates/zenus-syscall/src/syscall/fd.rs` (`fd_dup2`).
+
+**Akar masalah:** `fd_dup2` menulis langsung `table.entries[newfd] = Some(...)`,
+menimpa entri lama bila `newfd` sudah terbuka. `close` adalah satu-satunya
+tempat yang membersihkan state pipe (`read_open`/`write_open`) dan memicu
+cleanup socket; menimpa entri berarti state itu tidak pernah dibersihkan:
+- pipe: ujung lain menunggu selamanya (`read` mengembalikan `None` saat
+  `count == 0` padahal `write_open` masih `true`), atau buffer tak pernah
+  dianggap tertutup.
+- socket: cleanup tak dipanggil → socket bocor.
+
+**Perbaikan:** sebelum menulis, jika `entries[newfd]` sudah terisi, panggil
+`table.close(newfd)` (membersihkan pipe/socket). `entry` disalin ke luar sebelum
+pinjam mutable (`table.get(oldfd).copied()?`). `task_id` ditimpa dengan task
+pemanggil; field lain diwarisi via struct-update `..entry` (dup2 tak boleh
+mengubah read-only → `read_only` ikut terwarisi).
+
+**Verifikasi:** host test baru `dup2_closes_existing_pipe_before_overwrite`
+(fd 5 = pipe 0, dup2 pipe 1 ke fd 5 → `write_open` pipe 0 harus `false`).
+`make test-host` → **290 passed** (289 + 1), 0 failed; bare-metal build OK;
+smoke OK (prompt shell).
+
+**Catatan:** ditemukan juga celah isolasi terkait — `fd_close`/`fd_read`/
+`fd_write`/`fd_dup2` tidak memeriksa bahwa task pemanggil *memiliki* fd tersebut
+(tabel fd global, entri membawa `task_id` tapi tak divalidasi). Ini izin
+cross-task menutup/membaca fd task lain. Bukan korupsi memori, tapi pelanggaran
+isolasi; layak ditambal di tahap LTS (masuk daftar: cek `entry.task_id ==
+current_task_id()` di handler syscall terkait).

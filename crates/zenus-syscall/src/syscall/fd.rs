@@ -549,29 +549,27 @@ pub fn fd_get(fd: u64) -> Option<FdEntry> {
 }
 
 pub fn fd_dup2(task_id: u64, oldfd: u64, newfd: u64) -> Option<u64> {
-    let table = FD_TABLE.lock();
-    let entry = table.get(oldfd)?;
-    let entry_copy = *entry;
-    drop(table);
-
-    let mut table = FD_TABLE.lock();
-    if (newfd as usize) < 256 {
-        table.entries[newfd as usize] = Some(FdEntry {
-            task_id,
-            fs: entry_copy.fs,
-            inode: entry_copy.inode,
-            offset: entry_copy.offset,
-            file_type: entry_copy.file_type,
-            pipe_id: entry_copy.pipe_id,
-            socket_id: entry_copy.socket_id,
-            // dup2 must not launder a read-only descriptor into a writable one.
-            read_only: entry_copy.read_only,
-            path: entry_copy.path,
-        });
-        Some(newfd)
-    } else {
-        None
+    if newfd as usize >= 256 {
+        return None;
     }
+    let mut table = FD_TABLE.lock();
+    // Copy the source entry out before any mutable borrow (the close and the
+    // write below would otherwise borrow `table` mutably while `get` still
+    // holds it immutably).
+    let entry = table.get(oldfd).copied()?;
+    // dup2 must first close `newfd` if it is already open, so any pipe/socket
+    // state tied to it is released. Overwriting it in place (the old body) left
+    // the old endpoint's `read_open`/`write_open` set — the pipe's other end
+    // waited forever, and a socket was never cleaned up (BUG-076).
+    if table.entries[newfd as usize].is_some() {
+        table.close(newfd);
+    }
+    table.entries[newfd as usize] = Some(FdEntry {
+        task_id,
+        // dup2 must not launder a read-only descriptor into a writable one.
+        ..entry
+    });
+    Some(newfd)
 }
 
 pub fn current_task() -> u64 {
@@ -654,4 +652,90 @@ pub fn vfs_chown(path: &str, owner: u32, group: u32) -> bool {
 /// success for a mode-000 file.
 pub fn vfs_access(path: &str, mode: u32) -> bool {
     vfs::access_permitted(zenus_ns::NS_ROOT, path, mode, &cred())
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+    use zenus_sync::spinlock::SpinLock;
+
+    // FD_TABLE and PIPE_TABLE are module-global and shared with any other test
+    // that touches them; serialize so this does not race.
+    static SERIAL: SpinLock<()> = SpinLock::new(());
+
+    /// BUG-076: `dup2(newfd)` over an already-open fd must close the old
+    /// endpoint first. The old body overwrote the slot, leaving a pipe's
+    /// `read_open`/`write_open` set (the other end waits forever) and never
+    /// running socket cleanup.
+    #[test]
+    fn dup2_closes_existing_pipe_before_overwrite() {
+        let _g = SERIAL.lock();
+
+        // Two pipes, both endpoints open.
+        {
+            let mut pipes = PIPE_TABLE.lock();
+            pipes[0] = Some(PipeBuffer::new());
+            pipes[0].as_mut().unwrap().read_open = true;
+            pipes[0].as_mut().unwrap().write_open = true;
+            pipes[1] = Some(PipeBuffer::new());
+            pipes[1].as_mut().unwrap().read_open = true;
+            pipes[1].as_mut().unwrap().write_open = true;
+        }
+
+        // pipe 0's read end at fd 5, pipe 1's read end at fd 6.
+        let mut table = FD_TABLE.lock();
+        table.entries[5] = Some(FdEntry {
+            task_id: 1,
+            fs: None,
+            inode: 0,
+            offset: 0,
+            file_type: FileType::CharDevice,
+            pipe_id: 0,
+            socket_id: u64::MAX,
+            read_only: false,
+            path: [0u8; 256],
+        });
+        table.entries[6] = Some(FdEntry {
+            task_id: 1,
+            fs: None,
+            inode: 0,
+            offset: 0,
+            file_type: FileType::CharDevice,
+            pipe_id: 1,
+            socket_id: u64::MAX,
+            read_only: false,
+            path: [0u8; 256],
+        });
+        drop(table);
+
+        // dup2(fd6 -> fd5): fd5 already holds pipe 0, so the fix must close
+        // pipe 0's endpoint before installing pipe 1.
+        assert!(fd_dup2(1, 6, 5).is_some());
+
+        // fd5 now refers to pipe 1.
+        let t = FD_TABLE.lock();
+        let e = t.entries[5].as_ref().expect("fd5 still open");
+        assert_eq!(e.pipe_id, 1, "fd5 should now point at pipe 1");
+        drop(t);
+
+        // pipe 0's endpoint must have been closed by the pre-overwrite close.
+        // `close` keys off `fd % 2` (even = read end, odd = write end), and fd 5
+        // is odd, so it clears `write_open`. The unfixed body left both flags
+        // set — the read end would wait forever. That is the leak this catches.
+        let pipes = PIPE_TABLE.lock();
+        let p0 = pipes[0].as_ref().expect("pipe 0 still registered");
+        assert!(
+            !p0.write_open,
+            "dup2 over an open pipe fd must close the old endpoint (BUG-076)"
+        );
+
+        // Tidy the shared globals.
+        drop(pipes);
+        let mut table = FD_TABLE.lock();
+        table.entries[5] = None;
+        table.entries[6] = None;
+        let mut pipes = PIPE_TABLE.lock();
+        pipes[0] = None;
+        pipes[1] = None;
+    }
 }
