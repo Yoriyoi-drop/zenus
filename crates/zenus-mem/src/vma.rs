@@ -113,6 +113,18 @@ impl VmaTable {
         if end > MAX_MAPPING_SIZE {
             return None;
         }
+        // Reject a range that overlaps any existing mapping. Two live VMAs for
+        // the same pages make `find`/`munmap` ambiguous and leave the page
+        // tables inconsistent — a silent memory-corruption hazard. `MAP_FIXED`
+        // over an existing region (and any straddling `mmap`) is refused here
+        // at the source rather than layered on top; the non-fixed path is
+        // reached through `find_free`, which already returns a non-overlapping
+        // candidate, so this does not reject ordinary mappings.
+        for region in self.regions.iter().take(self.count) {
+            if region.valid && start < region.end && end > region.start {
+                return None;
+            }
+        }
         if self.count >= MAX_VMAS {
             return None;
         }
@@ -221,5 +233,51 @@ impl VmaTable {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    /// BUG-073: `insert` must refuse a range that overlaps an existing VMA.
+    /// Without this check a `MAP_FIXED` (or any straddling `mmap`) over a live
+    /// mapping produced two VMAs for the same pages, which made `find`/`munmap`
+    /// ambiguous and left the page tables inconsistent — a silent memory
+    /// corruption hazard.
+    #[test]
+    fn insert_refuses_overlapping_range() {
+        let mut t = VmaTable::new();
+
+        // First mapping succeeds.
+        let a = t.insert(0x1000, 0x3000, PROT_READ | PROT_WRITE, 0);
+        assert!(a.is_some(), "first mapping should be accepted");
+
+        // Overlapping from the start side: 0x2000..0x4000 sits on top of a.
+        let b = t.insert(0x2000, 0x4000, PROT_READ | PROT_WRITE, 0);
+        assert!(b.is_none(), "range overlapping an existing VMA must be refused");
+
+        // Overlapping from the end side: 0x0000..0x2000 straddles a's start.
+        let c = t.insert(0x0000, 0x2000, PROT_READ | PROT_WRITE, 0);
+        assert!(c.is_none(), "range overlapping an existing VMA must be refused");
+
+        // Fully contained overlap: 0x1500..0x2500 lives entirely inside a.
+        let d = t.insert(0x1500, 0x2500, PROT_READ | PROT_WRITE, 0);
+        assert!(d.is_none(), "range contained in an existing VMA must be refused");
+
+        // Adjacent (end-exclusive) ranges do NOT overlap and must be accepted.
+        let e = t.insert(0x3000, 0x5000, PROT_READ | PROT_WRITE, 0);
+        assert!(e.is_some(), "range that only touches the boundary must be accepted");
+
+        assert_eq!(t.count, 2, "exactly two VMAs should have been recorded");
+    }
+
+    /// A subsequent non-overlapping mapping after one exists must still go in.
+    #[test]
+    fn insert_accepts_disjoint_range() {
+        let mut t = VmaTable::new();
+        assert!(t.insert(0x1000, 0x2000, PROT_READ, 0).is_some());
+        assert!(t.insert(0x5000, 0x6000, PROT_READ, 0).is_some());
+        assert_eq!(t.count, 2);
     }
 }

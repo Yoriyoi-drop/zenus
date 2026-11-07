@@ -3761,3 +3761,45 @@ diaktifkan sebagian: batas syscall/interrupt harus konsisten atau boot GPF.
 **Risiko:** tinggi — salah di stub/CR3 switch memecahkan boot. Oleh karena itu
 diimplementasikan sebagai satu perubahan kohesif + diverifikasi via QEMU, bukan
 bertahap per-file.
+
+## BUG-073 — `VmaTable::insert` menerima range yang tumpang-tindih (overlap)
+
+**Status:** fixed.
+**Keparahan:** tinggi (korupsi memori sunyi) — `MAP_FIXED` di atas mapping yang
+sudah ada menciptakan dua VMA untuk halaman yang sama.
+
+**Lokasi:** `crates/zenus-mem/src/vma.rs` (`VmaTable::insert`) dan
+`crates/zenus-syscall/src/syscall.rs` (`sys_mmap`).
+
+**Akar masalah:** `insert` hanya mengecek `end <= start`, batas
+`MAX_MAPPING_SIZE`, dan `count >= MAX_VMAS`. Ia **tidak** menolak range yang
+tumpang-tindih dengan VMA yang sudah valid. Jalur `MAP_FIXED` di `sys_mmap`
+(`vma_start = addr & !0xFFF`) memetakan halaman lalu memanggil `insert` tanpa
+mempedulikan nilai baliknya, sehingga sebuah `mmap` dengan `MAP_FIXED` di atas
+region yang hidup mencatat VMA kedua untuk halaman yang sama. Akibatnya:
+
+- `find`/`munmap` menjadi ambigu (dua VMA bentrok),
+- page-table dan VMA saling tidak konsisten,
+- korupsi memori sunyi — tidak ada panic, gejala muncul jauh dari sumber.
+
+**Perbaikan:**
+1. `insert` sekarang membuang loop penolakan overlap setengah-terbuka sebelum
+   cek kapasitas tabel: `if region.valid && start < region.end && end > region.start`
+   → `None`. `find_free` (jalur non-fixed) sudah mengembalikan kandidat yang
+   tidak overlap, jadi ini tidak menolak `mmap` biasa; hanya `MAP_FIXED`/straddle
+   yang kena.
+2. `sys_mmap` menyimpan nilai balik `vma.insert(...)` ke `recorded` dan, bila
+   `recorded.flatten().is_none()`, memanggil `unwind_mapping(cr3, vma_start,
+   page_count, task_id)` (unmap + kembalikan frame + lepas `memory.max`) lalu
+   `return -1`. Halaman yang sudah dipetakan dan di-charge tidak dibiarkan
+   menggantung (leak) maupun tercatat dua kali (korupsi).
+
+**Verifikasi:** host test baru di `vma.rs` (`host_tests`):
+`insert_refuses_overlapping_range` (overlap dari sisi start, sisi end, sepenuhnya
+tertanam, plus batas end-eksklusif harus diterima) dan `insert_accepts_disjoint_range`.
+`make test-host` → **288 passed** (286 + 2 baru), 0 failed.
+
+**Catatan stabilitas 1.0:** ini adalah bentuk bug yang tidak pernah tertangkap
+oleh in-kernel test maupun fuzzer (tidak ada panic), hanya oleh audit `insert`
++ review jalur `MAP_FIXED`. Menjadi argumen untuk memperketat invariant VMA di
+konstrain level tipe / test properti pada tahap stabilisasi.

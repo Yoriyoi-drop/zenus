@@ -2263,10 +2263,15 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, _fd: u64, _offset: u6
         );
     }
 
-    // Track in VMA
-    scheduler::with_vma_mut(task_id, |vma| {
-        vma.insert(vma_start, vma_start + size, prot, flags);
-    });
+    // Track in VMA. `insert` refuses an overlap (BUG-073) and a full table; if
+    // it does, the pages were already mapped and charged, so unwind them rather
+    // than leave a mapping with no record (a leak) or two VMAs for the same
+    // pages (corruption).
+    let recorded = scheduler::with_vma_mut(task_id, |vma| vma.insert(vma_start, vma_start + size, prot, flags));
+    if recorded.flatten().is_none() {
+        unwind_mapping(cr3, vma_start, page_count, task_id);
+        return -1i64 as u64;
+    }
 
     vma_start
 }
