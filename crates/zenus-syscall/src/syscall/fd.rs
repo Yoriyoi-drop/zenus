@@ -251,6 +251,10 @@ impl FdTable {
         // the source entry would otherwise overlap the mutable borrow.
         let (pipe_id, socket_id, fs, inode, read_only, file_type, path) = {
             let entry = self.get(fd)?;
+            // Isolation (BUG-077): only duplicate a descriptor the caller owns.
+            if entry.task_id != task_id {
+                return None;
+            }
             (
                 entry.pipe_id,
                 entry.socket_id,
@@ -375,11 +379,24 @@ pub fn fd_open(task_id: u64, path: &str) -> Option<u64> {
 pub fn fd_path(fd: u64) -> Option<([u8; 256], FileType)> {
     let table = FD_TABLE.lock();
     let entry = table.get(fd)?;
+    // Isolation (BUG-077).
+    if entry.task_id != current_task() {
+        return None;
+    }
     Some((entry.path, entry.file_type))
 }
 
 pub fn fd_close(fd: u64) -> bool {
     let mut table = FD_TABLE.lock();
+    // Isolation (BUG-077): a task may only close its own descriptors. The fd
+    // table is global and keyed by `task_id`; without this check any task could
+    // close another's fd. Internal teardown callers (sys_pipe/sys_pipe2 rollback)
+    // always act on the current task's own just-allocated fds, so this does not
+    // break them.
+    match table.get(fd) {
+        Some(e) if e.task_id == current_task() => {}
+        _ => return false,
+    }
     table.close(fd)
 }
 
@@ -411,6 +428,11 @@ pub fn fd_read(fd: u64, buf: &mut [u8]) -> Option<u64> {
         Some(e) => e,
         None => return None,
     };
+
+    // Isolation (BUG-077): only the owning task may read its descriptor.
+    if entry.task_id != current_task() {
+        return None;
+    }
 
     // Pipe read
     if entry.pipe_id != u64::MAX {
@@ -450,6 +472,11 @@ pub fn fd_write(fd: u64, buf: &[u8]) -> Option<u64> {
         None => return None,
     };
 
+    // Isolation (BUG-077): only the owning task may write its descriptor.
+    if entry.task_id != current_task() {
+        return None;
+    }
+
     // Pipe write
     if entry.pipe_id != u64::MAX {
         let mut pipes = PIPE_TABLE.lock();
@@ -477,6 +504,10 @@ pub fn fd_write(fd: u64, buf: &[u8]) -> Option<u64> {
 pub fn fd_seek(fd: u64, offset: i64, whence: u64) -> Option<u64> {
     let mut table = FD_TABLE.lock();
     let entry = table.get_mut(fd)?;
+    // Isolation (BUG-077).
+    if entry.task_id != current_task() {
+        return None;
+    }
     if entry.pipe_id != u64::MAX {
         return None; // Pipes don't support seek
     }
@@ -502,6 +533,10 @@ pub fn fd_dup(task_id: u64, fd: u64) -> Option<u64> {
 pub fn fd_stat(fd: u64) -> Option<vfs::FileStat> {
     let table = FD_TABLE.lock();
     let entry = table.get(fd)?;
+    // Isolation (BUG-077).
+    if entry.task_id != current_task() {
+        return None;
+    }
     if entry.pipe_id != u64::MAX {
         return Some(vfs::FileStat {
             size: 0,
@@ -533,6 +568,10 @@ pub fn fd_readdir(fd: u64) -> alloc::vec::Vec<DirEntry> {
         Some(e) => e,
         None => return alloc::vec::Vec::new(),
     };
+    // Isolation (BUG-077).
+    if entry.task_id != current_task() {
+        return alloc::vec::Vec::new();
+    }
     let fs = match entry.fs {
         Some(f) => f,
         None => return alloc::vec::Vec::new(),
@@ -545,7 +584,12 @@ pub fn fd_readdir(fd: u64) -> alloc::vec::Vec<DirEntry> {
 
 pub fn fd_get(fd: u64) -> Option<FdEntry> {
     let table = FD_TABLE.lock();
-    table.get(fd).copied()
+    let entry = table.get(fd)?;
+    // Isolation (BUG-077): only the owning task may inspect its descriptor.
+    if entry.task_id != current_task() {
+        return None;
+    }
+    Some(*entry)
 }
 
 pub fn fd_dup2(task_id: u64, oldfd: u64, newfd: u64) -> Option<u64> {
@@ -557,6 +601,10 @@ pub fn fd_dup2(task_id: u64, oldfd: u64, newfd: u64) -> Option<u64> {
     // write below would otherwise borrow `table` mutably while `get` still
     // holds it immutably).
     let entry = table.get(oldfd).copied()?;
+    // Isolation (BUG-077): only duplicate a descriptor the caller owns.
+    if entry.task_id != task_id {
+        return None;
+    }
     // dup2 must first close `newfd` if it is already open, so any pipe/socket
     // state tied to it is released. Overwriting it in place (the old body) left
     // the old endpoint's `read_open`/`write_open` set — the pipe's other end

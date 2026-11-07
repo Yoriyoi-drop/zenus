@@ -3916,5 +3916,42 @@ smoke OK (prompt shell).
 `fd_write`/`fd_dup2` tidak memeriksa bahwa task pemanggil *memiliki* fd tersebut
 (tabel fd global, entri membawa `task_id` tapi tak divalidasi). Ini izin
 cross-task menutup/membaca fd task lain. Bukan korupsi memori, tapi pelanggaran
-isolasi; layak ditambal di tahap LTS (masuk daftar: cek `entry.task_id ==
+isolasi; layak ditambal di tahap LTS (sudah ditambal di BUG-077 (cek kepemilikan di seluruh API fd publik).
 current_task_id()` di handler syscall terkait).
+
+## BUG-077 — celah isolasi fd: task dapat tutup/baca fd task lain
+
+**Status:** fixed.
+**Keparahan:** sedang (pelanggaran isolasi antar-task) — tabel fd global
+berkunci `task_id` per entri, tapi handler `close`/`read`/`write`/`seek`/
+`stat`/`readdir`/`dup`/`dup2`/`get`/`path` tidak memvalidasi pemilik.
+
+**Lokasi:** `crates/zenus-syscall/src/syscall/fd.rs` (seluruh API fd publik).
+
+**Akar masalah:** `FD_TABLE` adalah array global 256 slot; tiap `FdEntry`
+membawa `task_id` tapi tak ada handler yang menolak aksi bila
+`entry.task_id != current_task()`. Maka task A bisa `close`/`read`/`write`/
+`dup` fd milik task B — pelanggaran isolasi (bukan korupsi memori, tapi
+kebocoran data & denial-of-service antar-task). Ditemukan saat audit BUG-076.
+
+**Perbaikan:** tiap fungsi API fd kini menolak akses bila `entry.task_id !=
+current_task()` (atau `!= task_id` untuk `dup`/`dup2` yang menerima task
+pemanggil):
+- `fd_close`: kembalikan `false` bila entri ada tapi bukan milik task saat ini.
+- `fd_read`/`fd_write`/`fd_seek`/`fd_stat`/`fd_readdir`/`fd_get`/`fd_path`:
+  kembalikan `None`/`kosong` bila bukan milik task saat ini.
+- `fd_dup`/`fd_dup2`: kembalikan `None` bila `oldfd` bukan milik `task_id`.
+
+**Keselamatan regresi:** semua pemanggil internal `fd::fd_close` (rollback
+`sys_pipe`/`sys_pipe2`) beroperasi pada fd milik task *saat ini*
+(`current_task`/`current_task_id`), dan `fd_clone_all_for_task` menyalin fd
+via `alloc` langsung (bukan `dup`), sehingga cek tak memecahkan fork/exec.
+Semua pemanggil `fd_get`/`fd_path` adalah handler syscall (`sys_poll`,
+`sys_select`, `sys_fstat`, `sys_fchdir`, …) dalam konteks task saat ini.
+
+**Verifikasi:** `make build` OK; `make test-host` 290 passed (0 baru,
+pengawetan count); `make smoke` OK (shell membuka/membaca fd sebagai task
+sendiri → lolos cek). Tidak ada test baru (perilaku penolakan cross-task
+sulit di-unit-test tanpa multi-task; diverifikasi via smoke + review).
+
+**Catatan:** ini melengkapi celah yang ditandai di BUG-076.
