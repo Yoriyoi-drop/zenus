@@ -483,6 +483,7 @@ mod host_tests {
     #[test]
     fn tmpfs_write_with_a_wrapping_offset_returns_none() {
         let _serial = crate::host_tests::serial();
+        TmpFs::reset();
         let fs = TmpFs;
         let root = fs.root_inode();
 
