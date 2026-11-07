@@ -476,6 +476,7 @@ impl Shell {
             "firewall-add" => self.cmd_firewall_add(line, w),
             "firewall-remove" => self.cmd_firewall_remove(line, w),
             "run" => self.cmd_run(line, w),
+            "jobs" => self.cmd_jobs(w),
             "pipe-test" => self.cmd_pipe_test(w),
             _ => return false,
         }
@@ -1350,11 +1351,14 @@ impl Shell {
     }
 
     fn cmd_run(&mut self, line: &str, w: &mut ShellWriter) {
+        // Detect trailing "&" for background execution.
+        let background = line.ends_with('&');
+        let line = line.trim_end_matches('&').trim_end();
         let args = Args::parse(line);
         let path = match args.get(1) {
             Some(p) => p,
             None => {
-                w.write_str("Usage: run <path> [args...]\r\n");
+                w.write_str("Usage: run <path> [args...] [&]\r\n");
                 return;
             }
         };
@@ -1486,6 +1490,11 @@ impl Shell {
         w.write_str("] ");
         w.write_str(path);
         w.write_str("\r\n");
+
+        if background {
+            w.write_str("[background]\r\n");
+            return;
+        }
 
         // Wait for child using wait_for_child() with ZOMBIE_LIST.
         zenus_console::kinfo!("run: waiting for PID {}", pid);
@@ -1721,6 +1730,10 @@ impl Shell {
             let s = core::str::from_utf8(&self.line_buf[..self.line_pos]).unwrap_or("");
             zenus_console::display::write_str(s);
         }
+    }
+
+    fn cmd_jobs(&mut self, w: &mut ShellWriter) {
+        w.write_str("Background jobs: (not yet tracked)\r\n");
     }
 
     fn cmd_pipe_test(&mut self, w: &mut ShellWriter) {

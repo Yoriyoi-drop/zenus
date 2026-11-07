@@ -12,6 +12,7 @@ members = [
     "crates/zenus-virtio",
     "crates/zenus-ns",
     "crates/zenus-fuzz",
+    "crates/zenus-libc",
     "zutils/crates/common",
     "zutils/crates/help",
     "zutils/crates/echo",
