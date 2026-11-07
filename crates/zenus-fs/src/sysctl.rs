@@ -102,12 +102,7 @@ impl SysctlTable {
     }
 
     fn find(&self, name: &str) -> Option<usize> {
-        for i in 0..self.count {
-            if self.entries[i].name == name {
-                return Some(i);
-            }
-        }
-        None
+        (0..self.count).find(|&i| self.entries[i].name == name)
     }
 }
 

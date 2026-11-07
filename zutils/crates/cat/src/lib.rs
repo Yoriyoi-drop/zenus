@@ -31,12 +31,12 @@ pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
                 match node.fs.read(node.inode, offset, &mut buf) {
                     Some(0) | None => break,
                     Some(n) => {
-                        for i in 0..n as usize {
-                            let b = buf[i];
+                        let n = n as usize;
+                        for &b in &buf[..n] {
                             w.write_byte(b);
                             last_byte = b;
                         }
-                        offset += n;
+                        offset += n as u64;
                     }
                 }
             }

@@ -676,6 +676,7 @@ static FREED_CR3_LIST: [AtomicU64; MAX_FREED_CR3] = [
 fn is_already_freed(cr3_phys: u64) -> bool {
     let count = FREED_CR3_COUNT.load(Ordering::Acquire) as usize;
     let count = count.min(MAX_FREED_CR3);
+    #[allow(clippy::needless_range_loop)]
     for i in 0..count {
         if FREED_CR3_LIST[i].load(Ordering::Acquire) == cr3_phys {
             return true;

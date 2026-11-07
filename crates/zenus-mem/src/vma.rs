@@ -1,5 +1,4 @@
 /// Virtual Memory Area tracking for mmap/munmap/mprotect.
-
 pub const MAX_VMAS: usize = 64;
 
 /// Highest user-space address a mapping may reach. `mmap` refuses anything
@@ -143,22 +142,13 @@ impl VmaTable {
     }
 
     pub fn find(&self, addr: u64) -> Option<usize> {
-        for i in 0..self.count {
-            if self.regions[i].contains(addr) {
-                return Some(i);
-            }
-        }
-        None
+        (0..self.count).find(|&i| self.regions[i].contains(addr))
     }
 
     pub fn find_exact(&self, start: u64, end: u64) -> Option<usize> {
-        for i in 0..self.count {
-            if self.regions[i].valid && self.regions[i].start == start && self.regions[i].end == end
-            {
-                return Some(i);
-            }
-        }
-        None
+        (0..self.count).find(|&i| {
+            self.regions[i].valid && self.regions[i].start == start && self.regions[i].end == end
+        })
     }
 
     pub fn remove(&mut self, idx: usize) -> bool {

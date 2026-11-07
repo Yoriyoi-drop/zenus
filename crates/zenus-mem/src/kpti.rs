@@ -179,6 +179,7 @@ extern "C" {
 /// Publish handler addresses so the KPTI IDT entry stubs can jump to them.
 ///
 /// Called once during `idt::init()` after every handler slot is known.
+#[allow(clippy::too_many_arguments)]
 pub fn init_idt_entry_targets(
     div0: u64, inv_op: u64, gpf: u64, page_fault: u64,
     timer: u64, keyboard: u64, serial: u64, spurious: u64, nic: u64, stray: u64,

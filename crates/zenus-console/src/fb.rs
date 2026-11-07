@@ -82,6 +82,7 @@ fn put_pixel(x: u64, y: u64, r: u8, g: u8, b: u8) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_char_glyph(
     c: u8,
     x: u64,
@@ -97,6 +98,7 @@ fn draw_char_glyph(
         0x20..=0x7E => FONT_DATA[(c - 0x20) as usize],
         _ => return,
     };
+    #[allow(clippy::needless_range_loop)]
     for row in 0..16 {
         let bits = glyph[row];
         for col in 0..8 {

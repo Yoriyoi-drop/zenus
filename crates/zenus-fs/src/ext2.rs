@@ -689,14 +689,8 @@ impl FileSystem for Ext2Fs {
         let len = buf.len();
 
         while written < len as u64 {
-            let pos = match offset.checked_add(written) {
-                Some(p) => p,
-                None => return None,
-            };
-            let logical_block = match write_logical_block(offset, written, self.block_size) {
-                Some(b) => b,
-                None => return None,
-            };
+            let pos = offset.checked_add(written)?;
+            let logical_block = write_logical_block(offset, written, self.block_size)?;
             let block_off = (pos % self.block_size) as usize;
             let to_copy = (block_size - block_off).min((len as u64 - written) as usize);
 
@@ -731,10 +725,7 @@ impl FileSystem for Ext2Fs {
             written += to_copy as u64;
         }
 
-        let new_size = match offset.checked_add(written) {
-            Some(n) => n,
-            None => return None,
-        };
+        let new_size = offset.checked_add(written)?;
         if new_size > raw.size_low as u64 {
             if new_size > u32::MAX as u64 {
                 return None;

@@ -52,6 +52,7 @@ pub fn init() {
     let info_ptrs_virt = info_ptrs_phys;
 
     let info_ptrs = info_ptrs_virt as *mut *mut LimineMpInfo;
+    #[allow(clippy::needless_range_loop)]
     unsafe {
         for i in 0..(count as usize).min(MAX_CPUS) {
             let info_ptr_phys = *info_ptrs.add(i);
@@ -99,6 +100,7 @@ pub fn wake_aps() {
         return;
     }
 
+    #[allow(clippy::needless_range_loop)]
     let info_ptrs = info_ptrs_virt as *mut *mut LimineMpInfo;
     let total = resp.cpu_count as usize;
 
@@ -116,7 +118,7 @@ pub fn wake_aps() {
         if info.lapic_id == bsp_lapic_id {
             continue;
         }
-        info.goto_address = ap_entry as extern "C" fn(&LimineMpInfo) -> ! as u64;
+        info.goto_address = ap_entry as *const () as u64;
     }
     // Ensure all APs see the updated goto_address
     core::sync::atomic::fence(Ordering::Release);
@@ -155,6 +157,7 @@ pub extern "C" fn ap_entry(info: &LimineMpInfo) -> ! {
     }
 }
 
+#[allow(clippy::needless_range_loop)]
 pub fn cpu_number_for_apic(lapic_id: u32) -> u32 {
     let count = CPU_COUNT.load(Ordering::Relaxed) as usize;
     if count == 0 || count > MAX_CPUS {
@@ -174,6 +177,7 @@ pub fn cpu_count() -> u32 {
     CPU_COUNT.load(Ordering::Relaxed)
 }
 
+#[allow(clippy::needless_range_loop)]
 pub fn current_cpu() -> u32 {
     let count = CPU_COUNT.load(Ordering::Relaxed) as usize;
     if count == 0 {

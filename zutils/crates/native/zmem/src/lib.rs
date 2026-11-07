@@ -26,6 +26,7 @@ pub fn execute<W: Writer + ?Sized>(_args: &Args, w: &mut W) {
     w.write_u64(free as u64 / 1024);
     w.write_str(" KB)\r\n");
 
+    #[allow(clippy::manual_checked_ops)]
     if total > 0 {
         let pct = used * 100 / total;
         w.write_str("Usage:         ");

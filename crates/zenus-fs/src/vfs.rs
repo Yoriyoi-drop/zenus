@@ -547,7 +547,7 @@ pub(crate) fn parent_dir(path: &str) -> Option<&str> {
         return None;
     }
     match trimmed.rfind('/') {
-        Some(pos) if pos == 0 => Some("/"),
+        Some(0) => Some("/"),
         Some(pos) => Some(&trimmed[..pos]),
         None => Some("/"),
     }
@@ -609,8 +609,7 @@ fn read_dir_root_in_ns(ns_id: zenus_ns::NsId) -> alloc::vec::Vec<DirEntry> {
         }
     };
 
-    for i in 1..mount_count {
-        let m = &mounts_copy[i];
+    for m in mounts_copy.iter().take(mount_count).skip(1) {
         let dir_name = m.path.trim_start_matches('/');
         if !dir_name.is_empty() {
             let dup = entries.iter().any(|e| e.name == dir_name);
@@ -719,10 +718,7 @@ fn open_in_ns_depth(
 
     for i in 0..seg_count {
         let part = path_segments[i];
-        let inode = match current.fs.lookup(current.inode, part) {
-            Some(inode) => inode,
-            None => return None,
-        };
+        let inode = current.fs.lookup(current.inode, part)?;
 
         // A symlink in the middle of a path is always followed; the final one
         // only when the caller wants it (`open`, not `readlink`).
@@ -943,6 +939,7 @@ pub fn owns(uid: u32, euid: u32, stat: &FileStat) -> bool {
 /// bare `X_OK`, and it could not express "read without write" — which is
 /// exactly what `access(2)` asks for. This is the general form; `access_check`
 /// stays as the two-argument shorthand `fd_open` uses.
+#[allow(clippy::too_many_arguments)]
 pub fn access_check_bits(
     uid: u32,
     gid: u32,

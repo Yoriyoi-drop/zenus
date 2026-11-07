@@ -122,6 +122,10 @@ impl<'a> OutputBuf<'a> {
     pub fn len(&self) -> usize {
         self.pos
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.pos == 0
+    }
 }
 
 impl Writer for OutputBuf<'_> {

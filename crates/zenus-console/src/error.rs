@@ -380,6 +380,7 @@ impl ErrorBuf {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         cpu: u32,
@@ -535,6 +536,7 @@ static TIMESTAMP_WRITER: core::sync::atomic::AtomicU64 = core::sync::atomic::Ato
 pub type TimestampWriter = fn(s: &mut SerialPort);
 
 pub fn register_timestamp_writer(f: TimestampWriter) {
+    #[allow(clippy::fn_to_numeric_cast)]
     TIMESTAMP_WRITER.store(f as u64, Ordering::Release);
 }
 

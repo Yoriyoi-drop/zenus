@@ -39,8 +39,8 @@ pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
                 match node.fs.read(node.inode, offset, &mut buf) {
                     Some(0) | None => break,
                     Some(n) => {
-                        for i in 0..n as usize {
-                            let b = buf[i];
+                        let n = n as usize;
+                        for &b in &buf[..n] {
                             if b == b'\n' {
                                 let line =
                                     core::str::from_utf8(&line_buf[..line_pos]).unwrap_or("");
@@ -54,7 +54,7 @@ pub fn execute<W: Writer + ?Sized>(args: &Args, w: &mut W) {
                                 line_pos += 1;
                             }
                         }
-                        offset += n;
+                        offset += n as u64;
                     }
                 }
             }
