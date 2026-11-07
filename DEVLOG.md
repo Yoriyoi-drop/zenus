@@ -3849,3 +3849,37 @@ shell).
 setelah BUG-073. Keduanya tidak memicu panic dan luput dari fuzzer; penguatan
 invariant VMA (satu sumber kebenaran antara `insert`/`remove`/`find` dan
 loop unmap) layak masuk daftar stabilisasi.
+
+## BUG-075 — `sys_shmat` membuang nilai balik `vma.insert`
+
+**Status:** fixed.
+**Keparahan:** sedang (leak pemetaan tak tercatat bila tabel VMA penuh) — kelas
+sama dengan BUG-073, di jalur shared-memory.
+
+**Lokasi:** `crates/zenus-syscall/src/syscall.rs` (`sys_shmat`).
+
+**Akar masalah:** `sys_shmat` memetakan `page_count` halaman (`map_user_page_raw`)
+lalu memanggil `vma.insert(vma_start, mapping_end, 3, 1)` tanpa menyimpan nilai
+baliknya. `insert` menolak tabel penuh (`count >= MAX_VMAS`) maupun overlap;
+bila itu terjadi, halaman sudah terpetakan tapi tidak ada VMA yang mencatatnya
+→ pemetaan "hantu" (leak; `shmdt` nanti tidak menemukannya lewat `find(start)`,
+jadi PTE tetap present menunjuk ke frame segmen setelah dilepas). Sama persis
+dengan kelas BUG-073, hanya di jalur SHM.
+
+**Perbaikan:** simpan nilai balik `insert`; bila `None`, lepas pemetaan dengan
+`unmap_page_raw_keep_frame` (hanya bersihkan PTE — frame tetap milik segmen SHM,
+tidak dibebaskan) lalu `return -1`. Jalur gagal kembali sebelum menaikkan
+`attached`/`mapped_at`, jadi tidak ada referensi gantung.
+
+**Verifikasi:** penolakan `insert` (tabel penuh/overlap) sudah tertutup test
+`vma.rs` (`insert_refuses_overlapping_range` + test lib.rs untuk `MAX_VMAS`).
+`make test-host` → 289 passed; bare-metal build OK; smoke OK (prompt shell).
+
+**Catatan:** `sys_shmdt` di sini aman — satu `shmat` = satu VMA, dan ia menghapus
+tepat VMA yang berisi `shmaddr` (`find`+`remove`), bukan `remove_overlapping`,
+karena detach menargetkan satu segmen utuh. Tidak ada drift.
+
+**Catatan stabilitas 1.0:** ini drift-VMA ketiga (073/074/075). Semua berasal
+dari "nilai balik `insert`/penghapusan VMA diabaikan". Penguatan invariant VMA
+ke tingkat tipe (mis. `insert` mengembalikan `Result` yang wajib ditangani, atau
+VMA dijadikan satu sumber kebenaran pemetaan) layak masuk daftar stabilisasi 1.0.

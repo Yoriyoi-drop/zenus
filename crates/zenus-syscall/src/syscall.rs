@@ -2978,9 +2978,17 @@ fn sys_shmat(shmid: u64, _shmaddr: u64, _shmflg: u64, _a4: u64, _a5: u64, _a6: u
         zenus_mem::paging::map_user_page_raw(cr3, vma_start + i * 0x1000, page_phys, true, false);
     }
 
-    scheduler::with_vma_mut(task_id, |vma| {
-        vma.insert(vma_start, mapping_end, 3, 1);
-    });
+    // Track in VMA. `insert` refuses an overlap (BUG-073) and a full table; if
+    // it fails, the pages are already mapped but would have no record (a leak)
+    // or no slot. The frames belong to the SHM segment, so unwind with
+    // `unmap_page_raw_keep_frame` (clear PTEs only) rather than freeing them.
+    let recorded = scheduler::with_vma_mut(task_id, |vma| vma.insert(vma_start, mapping_end, 3, 1));
+    if recorded.flatten().is_none() {
+        for i in 0..page_count {
+            zenus_mem::paging::unmap_page_raw_keep_frame(cr3, vma_start + i * 0x1000);
+        }
+        return -1i64 as u64;
+    }
 
     // Remember where this task mapped the segment so `shmdt` can find it again.
     let mut table = SHM_TABLE.lock();
