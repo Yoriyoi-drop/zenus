@@ -149,6 +149,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zenus-libc"
+version = "0.1.0"
+
+[[package]]
 name = "zenus-mem"
 version = "0.1.0"
 dependencies = [
