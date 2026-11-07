@@ -117,8 +117,8 @@ Do not build on these without reading the code:
 | Capabilities | A per-task set exists and gates `mount`/`umount2`/`sethostname`; it is one set, not the Linux three, and file access still keys off uid. No `capset`-style way to add a capability back. |
 | Container runtime / OCI | Does not exist |
 | Cryptography | No library at all |
-| Userspace | Ring-3 programs are built from this workspace by hand; no libc |
-| Drivers | Monolithic, PIO-only, no hotplug, no AHCI/NVMe/USB |
+| Userspace | `zenus-libc` provides syscall wrappers and errno constants. Shell `run` supports `&` for background execution. Ring-3 programs are built from `zutils/` by hand. |
+| Drivers | AHCI SATA driver added alongside PIO ATA and virtio-blk. NVMe and USB not yet implemented. |
 
 ## Next, in order
 
@@ -132,7 +132,9 @@ Do not build on these without reading the code:
 checked against a pure, host-tested controller table. `cpu`/`io` remain
 advertised but unenforced, and the hierarchy is flat. Next:
 
-2. **A driver model** so storage stops being PIO-only: AHCI first.
+2. **Userspace, next step.** `zenus-libc` exists with syscall wrappers.
+   What is missing: a full libc port (printf, string, memory functions),
+   ELF userspace loading from initrd, and shell pipelines (`|`).
 3. **Capabilities, next step.** The set exists and is consulted by six syscalls
    and by every file-permission check. What is missing is a way to *gain*
    privilege deliberately (no `capset`, no file capabilities on an ELF).
