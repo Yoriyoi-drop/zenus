@@ -100,9 +100,17 @@ pub unsafe fn percpu_ptr() -> u64 {
 // ---------------------------------------------------------------------------
 core::arch::global_asm!(
     ".intel_syntax noprefix",
+    // KPTI: syscall_entry must be reachable through the user view, so it lives
+    // in .text.kpti which is mapped into both the kernel and user PML4s.
+    ".section .text.kpti, \"ax\"",
     ".globl syscall_entry",
     "syscall_entry:",
     "  cli",
+    // CR3 is still the user view here. Switch to the kernel view before
+    // touching any kernel memory (including gs). The slot lives in .kpti_data
+    // which is mapped in both views.
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
     "  swapgs",
     "  mov gs:[0], rsp",
     "  mov rsp, gs:[8]",
@@ -169,6 +177,10 @@ core::arch::global_asm!(
     // KERNEL_GS_BASE=PerCpu (next SYSCALL SWAPGS will restore GS_BASE=PerCpu).
     // Critical: do NOT use wrmsr to zero GS_BASE directly, because that
     // would leave KERNEL_GS_BASE=0, causing gs:[0] to be NULL on next SYSCALL.
+    // KPTI: switch back to the user view before dropping to ring 3. The user
+    // CR3 slot lives in .kpti_data, mapped in both views.
+    "  mov rax, [rip + kpti_user_cr3_slot]",
+    "  mov cr3, rax",
     "  swapgs",
     "  iretq",
     // Label 9: corrupted RCX (kernel-space or NULL). Normal path falls

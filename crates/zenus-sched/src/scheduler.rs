@@ -1,6 +1,7 @@
 use super::task::{Task, TaskInfo, TaskState, MAX_TASKS};
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use zenus_mem::allocator::ALLOCATOR;
+use zenus_mem::kpti::{set_kernel_cr3_slot, set_user_cr3_slot};
 use zenus_ns::{NsId, NS_ROOT};
 use zenus_sync::spinlock::SpinLock;
 
@@ -737,6 +738,7 @@ pub fn clone_task(
         task.user_rsp = user_rsp;
         task.cpu = cpu;
         task.cr3 = cr3;
+        task.user_cr3 = cr3;
         task.heap_brk = heap_brk;
         task.heap_floor = heap_brk;
         task.uid = parent.uid;
@@ -873,6 +875,7 @@ pub fn create_user_task(
         task.user_rsp = aslr_user_rsp;
         task.cpu = cpu;
         task.cr3 = cr3;
+        task.user_cr3 = cr3;
         task.heap_brk = heap_brk;
         task.heap_floor = heap_brk;
         // Capture the parent BEFORE taking TASKS — `current_task_id()`
@@ -1125,13 +1128,13 @@ pub fn yield_now() {
         drop(tasks);
         return;
     }
-    let (next_rsp, next_cr3, do_switch) = match tasks.tasks[next as usize].as_mut() {
+    let (next_rsp, next_cr3, next_user_cr3, do_switch) = match tasks.tasks[next as usize].as_mut() {
         Some(next_task) => {
             next_task.state = TaskState::Running;
             next_task.ticks_left = TIME_SLICE;
-            (next_task.rsp, next_task.cr3, true)
+            (next_task.rsp, next_task.cr3, next_task.user_cr3, true)
         }
-        None => (0, 0, false),
+        None => (0, 0, 0, false),
     };
     if !do_switch {
         drop(tasks);
@@ -1179,6 +1182,11 @@ pub fn yield_now() {
     if next_cr3 != 0 && next_cr3 != current_cr3_raw {
         zenus_mem::paging::set_cr3(next_cr3);
     }
+
+    // Publish KPTI CR3 slots so syscall_entry can switch between user and
+    // kernel views for the next task.
+    set_kernel_cr3_slot(next_cr3);
+    set_user_cr3_slot(next_user_cr3);
 
     if next_kernel_rsp != 0 {
         zenus_arch::cpu::set_percpu_kernel_rsp(cpu, next_kernel_rsp);
@@ -1652,6 +1660,7 @@ pub fn set_task_cr3(id: u64, cr3: u64) {
         if let Some(ref mut task) = t {
             if task.id == id {
                 task.cr3 = cr3;
+                task.user_cr3 = cr3;
                 return;
             }
         }
@@ -1878,6 +1887,10 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
         .as_ref()
         .map(|t| t.user_rsp)
         .unwrap_or(0);
+    let next_user_cr3 = tasks.tasks[next as usize]
+        .as_ref()
+        .map(|t| t.user_cr3)
+        .unwrap_or(0);
 
     // Close IRQ window before releasing lock
     x86_64::instructions::interrupts::disable();
@@ -1894,6 +1907,11 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     if next_cr3 != 0 && next_cr3 != current_cr3_raw {
         zenus_mem::paging::set_cr3(next_cr3);
     }
+
+    // Publish KPTI CR3 slots so syscall_entry can switch between user and
+    // kernel views for the next task.
+    set_kernel_cr3_slot(next_cr3);
+    set_user_cr3_slot(next_user_cr3);
 
     if next_kernel_rsp != 0 {
         zenus_arch::cpu::set_percpu_kernel_rsp(cpu, next_kernel_rsp);

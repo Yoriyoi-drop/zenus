@@ -133,6 +133,10 @@ pub struct Task {
     pub user_rsp: u64,
     pub cpu: u32,
     pub cr3: u64,
+    /// The user view's PML4 (KPTI). Zero while KPTI is not active for this task.
+    /// When set, the task runs with this CR3 in ring 3 and switches to `cr3`
+    /// (the kernel view) on every entry to the kernel.
+    pub user_cr3: u64,
     pub heap_brk: u64,
     /// The lowest address `brk` may shrink to: where the loader put the heap.
     ///
@@ -194,6 +198,7 @@ impl Task {
             user_rsp: 0,
             cpu: 0,
             cr3: 0,
+            user_cr3: 0,
             heap_brk: 0,
             heap_floor: 0,
             uid: 0,

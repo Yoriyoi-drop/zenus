@@ -48,6 +48,10 @@ core::arch::global_asm!(
     ".globl kpti_kernel_cr3_slot",
     "kpti_kernel_cr3_slot:",
     "  .quad 0",
+    ".balign 8",
+    ".globl kpti_user_cr3_slot",
+    "kpti_user_cr3_slot:",
+    "  .quad 0",
 );
 
 extern "C" {
@@ -59,6 +63,7 @@ extern "C" {
     /// `syscall` and IDT stubs.
     pub fn kpti_round_trip(user_cr3: u64);
     static kpti_kernel_cr3_slot: u64;
+    static kpti_user_cr3_slot: u64;
     static __kpti_text_start: u8;
     static __kpti_text_end: u8;
     static __kpti_data_start: u8;
@@ -85,12 +90,38 @@ pub fn trampoline_data_range() -> (u64, u64) {
 /// runs, the slot holds 0 and the stub would load CR3 = 0 if it were reached —
 /// which is why nothing calls the stub until this has run.
 pub fn init_trampoline() {
-    let slot = core::ptr::addr_of!(kpti_kernel_cr3_slot) as *mut u64;
-    // SAFETY: the slot is a plain `.quad` in a writable section, and this is
-    // the only writer. The write is volatile so it is not elided as a dead
-    // store to a location nothing in Rust reads.
+    let kernel_slot = core::ptr::addr_of!(kpti_kernel_cr3_slot) as *mut u64;
+    let user_slot = core::ptr::addr_of!(kpti_user_cr3_slot) as *mut u64;
+    let kernel_cr3 = paging::kernel_cr3();
+    // SAFETY: both slots are plain `.quad`s in writable sections, and this is
+    // the only writer at boot time. The writes are volatile so they are not
+    // elided as dead stores.
     unsafe {
-        core::ptr::write_volatile(slot, paging::kernel_cr3());
+        core::ptr::write_volatile(kernel_slot, kernel_cr3);
+        core::ptr::write_volatile(user_slot, kernel_cr3);
+    }
+}
+
+/// Publish the kernel CR3 that entry stubs switch to on syscall/interrupt.
+///
+/// Called on every context switch so the slot always holds the running
+/// task's kernel view.
+pub fn set_kernel_cr3_slot(cr3: u64) {
+    let slot = core::ptr::addr_of!(kpti_kernel_cr3_slot) as *mut u64;
+    unsafe {
+        core::ptr::write_volatile(slot, cr3);
+    }
+}
+
+/// Publish the user CR3 that entry stubs switch back to before returning
+/// to ring 3.
+///
+/// Called on every context switch so the slot always holds the running
+/// task's user view.
+pub fn set_user_cr3_slot(cr3: u64) {
+    let slot = core::ptr::addr_of!(kpti_user_cr3_slot) as *mut u64;
+    unsafe {
+        core::ptr::write_volatile(slot, cr3);
     }
 }
 
