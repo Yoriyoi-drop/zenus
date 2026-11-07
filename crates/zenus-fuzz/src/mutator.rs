@@ -89,7 +89,7 @@ fn bit_flip(data: &mut [u8]) {
         return;
     }
     let idx = (data[0] as usize) % data.len();
-    let bit = (data.get(1).copied().unwrap_or(0) % 8);
+    let bit = data.get(1).copied().unwrap_or(0) % 8;
     data[idx] ^= 1 << bit;
 }
 

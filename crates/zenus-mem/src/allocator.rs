@@ -458,12 +458,12 @@ impl FreeListAllocator {
                     let mut cur = self.free_head.load(Ordering::Acquire);
                     while cur != 0 {
                         let b = cur as *mut BlockHeader;
-                        let sz = unsafe { (*b).size };
+                        let sz = (*b).size;
                         if p >= cur && p < cur + HEADER_SIZE + sz {
                             enclosing = cur;
                             break;
                         }
-                        cur = unsafe { (*b).next } as usize;
+                        cur = (*b).next as usize;
                     }
                 }
                 zenus_console::kerror_code!(
@@ -494,11 +494,11 @@ impl FreeListAllocator {
                             zenus_console::error::codes::MEM_PROTECTION,
                             "  [{n}] at {:#x} size={:#x} magic={:#x} next={:#x}",
                             cur2,
-                            unsafe { (*b2).size },
-                            unsafe { (*b2).magic },
-                            unsafe { (*b2).next } as usize
+                            (*b2).size,
+                            (*b2).magic,
+                            (*b2).next as usize
                         );
-                        let nx = unsafe { (*b2).next } as usize;
+                        let nx = (*b2).next as usize;
                         if nx <= cur2 {
                             zenus_console::kerror_code!(
                                 zenus_console::error::codes::MEM_PROTECTION,

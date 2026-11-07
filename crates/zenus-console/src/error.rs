@@ -553,7 +553,7 @@ fn write_timestamp(s: &mut SerialPort) {
     let ms = (frac / 1000) % 1000;
     let sec = frac / 1_000_000;
     if sec < 10 {
-        s.write_str("0");
+        let _ = s.write_str("0");
     }
     s.write_u64(sec as u64);
     let _ = s.write_str(".");
@@ -590,28 +590,28 @@ pub fn write_compact(
         level_name(level),
         color::RESET
     );
-    s.write_str(" [");
+    let _ = s.write_str(" [");
     let _ = s.write_str(module);
     let _ = s.write_str("]");
     if let Some(c) = code {
-        s.write_str(" ");
+        let _ = s.write_str(" ");
         let _ = write!(s, "{}{}{}", color::BOLD, c, color::RESET);
     }
-    s.write_str(" ");
+    let _ = s.write_str(" ");
     let _ = s.write_str(msg);
-    s.write_str("\n");
+    let _ = s.write_str("\n");
 }
 
 /// Full detail error output (like error code reference card)
 pub fn write_detailed(s: &mut SerialPort, def: &ErrorDef, extra: &str, file: &str, line: u32) {
     let _ = write!(s, "{}", color::BOLD);
-    s.write_str("  ╔══════════════════════════════════════════════════════════╗\n");
+    let _ = s.write_str("  ╔══════════════════════════════════════════════════════════╗\n");
     let _ = write!(s, "{}", color::RESET);
     write_code_banner(s, def);
-    s.write_str("  ╠══════════════════════════════════════════════════════════╣\n");
+    let _ = s.write_str("  ╠══════════════════════════════════════════════════════════╣\n");
     write_field(s, "Time", "");
     write_timestamp(s);
-    s.write_str("\n");
+    let _ = s.write_str("\n");
     write_field(s, "Level", "");
     let _ = write!(
         s,
@@ -620,37 +620,37 @@ pub fn write_detailed(s: &mut SerialPort, def: &ErrorDef, extra: &str, file: &st
         level_name(def.severity),
         color::RESET
     );
-    s.write_str("\n");
+    let _ = s.write_str("\n");
     write_field(s, "Module", def.module.name());
-    s.write_str("\n");
+    let _ = s.write_str("\n");
     write_field(s, "Code", def.code);
-    s.write_str("\n");
+    let _ = s.write_str("\n");
     if !extra.is_empty() {
         write_field(s, "Detail", extra);
-        s.write_str("\n");
+        let _ = s.write_str("\n");
     }
     write_field(s, "File", file);
-    s.write_str("\n");
+    let _ = s.write_str("\n");
     write_field(s, "Line", "");
     s.write_u64(line as u64);
-    s.write_str("\n");
-    s.write_str("  ╠══════════════════════════════════════════════════════════╣\n");
+    let _ = s.write_str("\n");
+    let _ = s.write_str("  ╠══════════════════════════════════════════════════════════╣\n");
     write_field(s, "Description", def.desc);
-    s.write_str("\n");
+    let _ = s.write_str("\n");
     write_field(s, "Reason", def.reason);
-    s.write_str("\n");
-    s.write_str("  ╠══════════════════════════════════════════════════════════╣\n");
-    s.write_str("   Actions:\n");
+    let _ = s.write_str("\n");
+    let _ = s.write_str("  ╠══════════════════════════════════════════════════════════╣\n");
+    let _ = s.write_str("   Actions:\n");
     for a in def.actions {
-        s.write_str("     • ");
-        s.write_str(a);
-        s.write_str("\n");
+        let _ = s.write_str("     • ");
+        let _ = s.write_str(a);
+        let _ = s.write_str("\n");
     }
-    s.write_str("  ╠══════════════════════════════════════════════════════════╣\n");
+    let _ = s.write_str("  ╠══════════════════════════════════════════════════════════╣\n");
     write_field(s, "Suggestion", def.suggestion);
-    s.write_str("\n");
+    let _ = s.write_str("\n");
     let _ = write!(s, "{}", color::BOLD);
-    s.write_str("  ╚══════════════════════════════════════════════════════════╝\n");
+    let _ = s.write_str("  ╚══════════════════════════════════════════════════════════╝\n");
     let _ = write!(s, "{}", color::RESET);
 }
 
@@ -663,18 +663,18 @@ fn write_code_banner(s: &mut SerialPort, def: &ErrorDef) {
         color::RESET,
         color::BOLD,
     );
-    s.write_str(def.code);
+    let _ = s.write_str(def.code);
     let _ = writeln!(s, "{} ║", color::RESET);
 }
 
 fn write_field(s: &mut SerialPort, label: &str, value: &str) {
-    s.write_str(color::DIM);
-    s.write_str("   ");
-    s.write_str(label);
-    s.write_str(": ");
-    s.write_str(color::RESET);
+    let _ = s.write_str(color::DIM);
+    let _ = s.write_str("   ");
+    let _ = s.write_str(label);
+    let _ = s.write_str(": ");
+    let _ = s.write_str(color::RESET);
     if !value.is_empty() {
-        s.write_str(value);
+        let _ = s.write_str(value);
     }
 }
 
@@ -712,23 +712,23 @@ pub fn catalog() -> &'static [&'static ErrorDef] {
 /// Write error code reference: list all known error codes
 pub fn dump_error_catalog(s: &mut SerialPort) {
     let all: &[&ErrorDef] = catalog();
-    s.write_str("\n");
-    s.write_str("  ╔══════════════════════════════════════════════╗\n");
-    s.write_str("  ║        Zenus$ Error Code Reference           ║\n");
-    s.write_str("  ╚══════════════════════════════════════════════╝\n\n");
+    let _ = s.write_str("\n");
+    let _ = s.write_str("  ╔══════════════════════════════════════════════╗\n");
+    let _ = s.write_str("  ║        Zenus$ Error Code Reference           ║\n");
+    let _ = s.write_str("  ╚══════════════════════════════════════════════╝\n\n");
     let mut cur_module: Option<ErrorModule> = None;
     for def in all {
         if cur_module.map(|m| m != def.module).unwrap_or(true) {
             let _ = s.write_str(" ");
-            s.write_str(color::BOLD);
-            s.write_str(def.module.name());
+            let _ = s.write_str(color::BOLD);
+            let _ = s.write_str(def.module.name());
             let _ = write!(s, "{}", color::RESET);
-            s.write_str("\n");
-            s.write_str("  ");
+            let _ = s.write_str("\n");
+            let _ = s.write_str("  ");
             for _ in 0..def.module.name().len() {
-                s.write_str("─");
+                let _ = s.write_str("─");
             }
-            s.write_str("\n");
+            let _ = s.write_str("\n");
             cur_module = Some(def.module);
         }
         let _ = write!(
@@ -739,13 +739,13 @@ pub fn dump_error_catalog(s: &mut SerialPort) {
             color::RESET,
             def.desc
         );
-        s.write_str("\n");
+        let _ = s.write_str("\n");
         let count = get_error_count(def.code);
         if count > 0 {
-            s.write_str("       ");
+            let _ = s.write_str("       ");
             let _ = write!(s, "{}freq: {}{}", color::DIM, count, color::RESET);
-            s.write_str("\n");
+            let _ = s.write_str("\n");
         }
     }
-    s.write_str("\n");
+    let _ = s.write_str("\n");
 }

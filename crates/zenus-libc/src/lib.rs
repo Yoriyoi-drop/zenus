@@ -5,9 +5,8 @@
 //! Provides thin wrappers around Zenus syscalls so userspace programs can be
 //! written in Rust without making raw syscall instructions directly.
 
-use core::ffi::c_void;
 
-// ── Syscall numbers (must match krnl/src/syscall) ──────────────────────────
+// ── Syscall numbers
 
 pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
@@ -235,12 +234,6 @@ unsafe fn syscall6(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u6
     ret
 }
 
-#[cfg(not(target_os = "none"))]
-#[inline(always)]
-unsafe fn syscall6(_num: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> i64 {
-    -1
-}
-
 #[cfg(target_os = "none")]
 #[inline(always)]
 unsafe fn syscall0(num: u64) -> i64 {
@@ -295,12 +288,6 @@ unsafe fn syscall4(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     syscall6(num, a1, a2, a3, a4, 0, 0)
 }
 
-#[cfg(not(target_os = "none"))]
-#[inline(always)]
-unsafe fn syscall4(_num: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64) -> i64 {
-    -1
-}
-
 // ── Result type ────────────────────────────────────────────────────────────
 
 type LibcResult<T> = core::result::Result<T, i32>;
@@ -320,49 +307,49 @@ pub fn exit(status: i32) -> ! {
     unreachable!()
 }
 
-pub fn fork() -> LibcResult<pid_t> {
-    unsafe { ret_result(syscall0(SYS_FORK)).map(|r| r as pid_t) }
+pub fn fork() -> LibcResult<PidT> {
+    unsafe { ret_result(syscall0(SYS_FORK)).map(|r| r as PidT) }
 }
 
 pub fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> LibcResult<isize> {
     unsafe { ret_result(syscall3(SYS_EXECVE, path as u64, argv as u64, envp as u64)).map(|r| r as isize) }
 }
 
-pub fn waitpid(pid: pid_t, stat_loc: *mut i32, options: i32) -> LibcResult<pid_t> {
-    unsafe { ret_result(syscall3(SYS_WAIT4, pid as u64, stat_loc as u64, options as u64)).map(|r| r as pid_t) }
+pub fn waitpid(pid: PidT, stat_loc: *mut i32, options: i32) -> LibcResult<PidT> {
+    unsafe { ret_result(syscall3(SYS_WAIT4, pid as u64, stat_loc as u64, options as u64)).map(|r| r as PidT) }
 }
 
-pub fn kill(pid: pid_t, sig: i32) -> LibcResult<isize> {
+pub fn kill(pid: PidT, sig: i32) -> LibcResult<isize> {
     unsafe { ret_result(syscall2(SYS_KILL, pid as u64, sig as u64)).map(|r| r as isize) }
 }
 
-pub fn getpid() -> pid_t {
-    unsafe { syscall0(SYS_GETPID) as pid_t }
+pub fn getpid() -> PidT {
+    unsafe { syscall0(SYS_GETPID) as PidT }
 }
 
-pub fn getppid() -> pid_t {
-    unsafe { syscall0(SYS_GETPPID) as pid_t }
+pub fn getppid() -> PidT {
+    unsafe { syscall0(SYS_GETPPID) as PidT }
 }
 
 // ── File operations ────────────────────────────────────────────────────────
 
-pub fn open(path: *const u8, flags: i32, mode: i32) -> LibcResult<fd_t> {
-    unsafe { ret_result(syscall3(SYS_OPEN, path as u64, flags as u64, mode as u64)).map(|r| r as fd_t) }
+pub fn open(path: *const u8, flags: i32, mode: i32) -> LibcResult<FdT> {
+    unsafe { ret_result(syscall3(SYS_OPEN, path as u64, flags as u64, mode as u64)).map(|r| r as FdT) }
 }
 
-pub fn close(fd: fd_t) -> LibcResult<isize> {
+pub fn close(fd: FdT) -> LibcResult<isize> {
     unsafe { ret_result(syscall1(SYS_CLOSE, fd as u64)).map(|r| r as isize) }
 }
 
-pub fn read(fd: fd_t, buf: *mut u8, count: usize) -> LibcResult<isize> {
+pub fn read(fd: FdT, buf: *mut u8, count: usize) -> LibcResult<isize> {
     unsafe { ret_result(syscall3(SYS_READ, fd as u64, buf as u64, count as u64)).map(|r| r as isize) }
 }
 
-pub fn write(fd: fd_t, buf: *const u8, count: usize) -> LibcResult<isize> {
+pub fn write(fd: FdT, buf: *const u8, count: usize) -> LibcResult<isize> {
     unsafe { ret_result(syscall3(SYS_WRITE, fd as u64, buf as u64, count as u64)).map(|r| r as isize) }
 }
 
-pub fn lseek(fd: fd_t, offset: i64, whence: i32) -> LibcResult<isize> {
+pub fn lseek(fd: FdT, offset: i64, whence: i32) -> LibcResult<isize> {
     unsafe { ret_result(syscall3(SYS_LSEEK, fd as u64, offset as u64, whence as u64)).map(|r| r as isize) }
 }
 
@@ -370,23 +357,23 @@ pub fn pipe(pipefd: *mut i32) -> LibcResult<isize> {
     unsafe { ret_result(syscall1(SYS_PIPE, pipefd as u64)).map(|r| r as isize) }
 }
 
-pub fn dup(oldfd: fd_t) -> LibcResult<fd_t> {
-    unsafe { ret_result(syscall1(SYS_DUP, oldfd as u64)).map(|r| r as fd_t) }
+pub fn dup(oldfd: FdT) -> LibcResult<FdT> {
+    unsafe { ret_result(syscall1(SYS_DUP, oldfd as u64)).map(|r| r as FdT) }
 }
 
-pub fn dup2(oldfd: fd_t, newfd: fd_t) -> LibcResult<fd_t> {
-    unsafe { ret_result(syscall2(SYS_DUP2, oldfd as u64, newfd as u64)).map(|r| r as fd_t) }
+pub fn dup2(oldfd: FdT, newfd: FdT) -> LibcResult<FdT> {
+    unsafe { ret_result(syscall2(SYS_DUP2, oldfd as u64, newfd as u64)).map(|r| r as FdT) }
 }
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-pub type pid_t = i32;
-pub type fd_t = i32;
-pub type ssize_t = isize;
-pub type size_t = usize;
-pub type off_t = i64;
-pub type mode_t = u32;
-pub type dev_t = u64;
+pub type PidT = i32;
+pub type FdT = i32;
+pub type SsizeT = isize;
+pub type SizeT = usize;
+pub type OffT = i64;
+pub type ModeT = u32;
+pub type DevT = u64;
 
 pub const O_RDONLY: i32 = 0;
 pub const O_WRONLY: i32 = 1;
@@ -397,9 +384,9 @@ pub const O_NOCTTY: i32 = 256;
 pub const O_TRUNC: i32 = 512;
 pub const O_APPEND: i32 = 1024;
 
-pub const STDIN: fd_t = 0;
-pub const STDOUT: fd_t = 1;
-pub const STDERR: fd_t = 2;
+pub const STDIN: FdT = 0;
+pub const STDOUT: FdT = 1;
+pub const STDERR: FdT = 2;
 
 #[cfg(test)]
 mod tests {

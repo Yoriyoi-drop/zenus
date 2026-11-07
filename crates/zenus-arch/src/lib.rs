@@ -2,6 +2,7 @@
 #![feature(abi_x86_interrupt)]
 #![allow(static_mut_refs)]
 #![allow(bad_asm_style)]
+#![allow(clippy::missing_safety_doc)]
 // The host test harness needs std; the bare-metal build must not pull it in.
 #[cfg(test)]
 extern crate std;

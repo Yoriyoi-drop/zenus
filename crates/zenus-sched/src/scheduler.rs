@@ -2226,8 +2226,6 @@ static UNTIL_FINISHED: AtomicUsize = AtomicUsize::new(0);
 pub fn idle_until(cond: fn() -> bool, finished: fn() -> !) -> ! {
     UNTIL_CHECK.store(cond as usize, Ordering::Release);
     UNTIL_FINISHED.store(finished as usize, Ordering::Release);
-    let mut check: usize = 0;
-    let mut done: usize = 0;
     unsafe {
         core::arch::asm!(
             "cli",
@@ -2254,8 +2252,8 @@ pub fn idle_until(cond: fn() -> bool, finished: fn() -> !) -> ! {
             idle_rsp = sym IDLE_RSP,
             check_slot = sym UNTIL_CHECK,
             done_slot = sym UNTIL_FINISHED,
-            check = inout(reg) check,
-            done = inout(reg) done,
+            check = out(reg) _,
+            done = out(reg) _,
             // The predicates are ordinary Rust `fn` pointers; the `call`s above
             // go through them, so nothing else needs to know it is Rust-ABI.
         );

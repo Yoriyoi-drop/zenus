@@ -24,7 +24,6 @@ use crate::paging;
 pub const USER_HALF_ENTRIES: usize = 256;
 
 core::arch::global_asm!(
-    ".intel_syntax noprefix",
     // The entry text. It is mapped into the user view at the same virtual
     // address as in the kernel view, so the CPU can fetch the first
     // instructions of an entry before the kernel is reachable again.
@@ -67,8 +66,6 @@ core::arch::global_asm!(
 // correct handler.
 // =========================================================================
 core::arch::global_asm!(
-    ".intel_syntax noprefix",
-    ".section .text.kpti, \"ax\"",
     // --- Specific exception vectors (triggered from user mode) ---
     ".globl kpti_idt_entry_0",
     "kpti_idt_entry_0:",

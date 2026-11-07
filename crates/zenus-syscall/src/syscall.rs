@@ -1233,13 +1233,11 @@ fn sys_uname(buf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u64 
         Some(p) => unsafe { &mut *p },
         None => return -1i64 as u64,
     };
-    unsafe {
-        copy_str_to_fixed(&mut (*uts).sysname, "Zenus");
-        copy_str_to_fixed(&mut (*uts).nodename, "zenus");
-        copy_str_to_fixed(&mut (*uts).release, "0.1.0");
-        copy_str_to_fixed(&mut (*uts).version, "#1 Tue Jun 9 2026");
-        copy_str_to_fixed(&mut (*uts).machine, "x86_64");
-    }
+    copy_str_to_fixed(&mut uts.sysname, "Zenus");
+    copy_str_to_fixed(&mut uts.nodename, "zenus");
+    copy_str_to_fixed(&mut uts.release, "0.1.0");
+    copy_str_to_fixed(&mut uts.version, "#1 Tue Jun 9 2026");
+    copy_str_to_fixed(&mut uts.machine, "x86_64");
     0
 }
 
@@ -1309,21 +1307,19 @@ fn sys_uname_ns(buf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> u
     let domainname = zenus_ns::uts::get_domainname(uts_ns);
     let hlen = hostname.iter().position(|&b| b == 0).unwrap_or(64);
     let _dlen = domainname.iter().position(|&b| b == 0).unwrap_or(64);
-    unsafe {
-        (*uts).sysname = [0; 65];
-        copy_str_to_fixed(&mut (*uts).sysname, "Zenus");
-        (*uts).nodename = [0; 65];
-        if hlen > 0 {
-            let dst = &mut (*uts).nodename;
-            dst[..hlen.min(64)].copy_from_slice(&hostname[..hlen.min(64)]);
-        }
-        (*uts).release = [0; 65];
-        copy_str_to_fixed(&mut (*uts).release, "0.1.0");
-        (*uts).version = [0; 65];
-        copy_str_to_fixed(&mut (*uts).version, "#1 Tue Jun 9 2026");
-        (*uts).machine = [0; 65];
-        copy_str_to_fixed(&mut (*uts).machine, "x86_64");
+    uts.sysname = [0; 65];
+    copy_str_to_fixed(&mut uts.sysname, "Zenus");
+    uts.nodename = [0; 65];
+    if hlen > 0 {
+        let dst = &mut uts.nodename;
+        dst[..hlen.min(64)].copy_from_slice(&hostname[..hlen.min(64)]);
     }
+    uts.release = [0; 65];
+    copy_str_to_fixed(&mut uts.release, "0.1.0");
+    uts.version = [0; 65];
+    copy_str_to_fixed(&mut uts.version, "#1 Tue Jun 9 2026");
+    uts.machine = [0; 65];
+    copy_str_to_fixed(&mut uts.machine, "x86_64");
     0
 }
 
@@ -1902,14 +1898,12 @@ fn sys_rt_sigaction(
             Some(p) => unsafe { &*p },
             None => return -1i64 as u64,
         };
-        let new_action = unsafe {
-            zenus_sched::task::SignalAction {
+        let new_action = zenus_sched::task::SignalAction {
                 handler_fn: act.handler_fn,
                 flags: act.flags,
                 restorer: act.restorer,
                 mask: act.mask,
-            }
-        };
+            };
         scheduler::set_signal_action(task_id, sig_num, new_action);
     }
 

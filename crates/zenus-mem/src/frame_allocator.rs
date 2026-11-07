@@ -522,6 +522,7 @@ pub fn reserve_boot_stack(hhdm_offset: u64) {
     fa.reserve_region(stack_page_base, 524288 + PAGE_SIZE as u64);
 }
 
+#[allow(unused_doc_comments)]
 /// Excluded from the frame allocator so it can never hand out a page the kernel
 /// is still using. `__kernel_start`/`__kernel_end` come from `linker.ld` and
 /// cover `.text`, `.rodata`, `.data` **and** `.bss`.
@@ -543,8 +544,8 @@ extern "C" {
 /// died exactly that way — a write to `0xffffffff8054a9e8`, about a kilobyte past
 /// `console::error::ERR_BUF`, with the boot stack unreadable at the same time.
 pub fn reserve_kernel_image() {
-    let start = unsafe { core::ptr::addr_of!(__kernel_start) as u64 } & !PAGE_SIZE_U64;
-    let end = unsafe { core::ptr::addr_of!(__kernel_end) as u64 };
+    let start = core::ptr::addr_of!(__kernel_start) as u64 & !PAGE_SIZE_U64;
+    let end = core::ptr::addr_of!(__kernel_end) as u64;
     if end <= start {
         return;
     }
@@ -698,8 +699,8 @@ pub fn global_init(memory_map: &[MemoryRegion], hhdm_offset: u64) {
     }
     let input = AllocPlanInput {
         memory_map,
-        kernel_image_base: unsafe { core::ptr::addr_of!(__kernel_start) as u64 } & !PAGE_SIZE_U64,
-        kernel_image_end: unsafe { core::ptr::addr_of!(__kernel_end) as u64 },
+        kernel_image_base: core::ptr::addr_of!(__kernel_start) as u64 & !PAGE_SIZE_U64,
+        kernel_image_end: core::ptr::addr_of!(__kernel_end) as u64,
         boot_stack_phys: rsp_phys.wrapping_sub(hhdm_offset),
     };
 

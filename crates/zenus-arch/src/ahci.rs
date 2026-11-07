@@ -6,19 +6,15 @@
 //! via `device_count()`/`get_device()`; callers (apps/src/lib.rs) register
 //! block devices through devfs.
 
+#![allow(clippy::missing_safety_doc)]
+
 use core::sync::atomic::{AtomicU32, Ordering};
-use x86_64::instructions::port::Port;
 use zenus_sync::spinlock::SpinLock;
 use alloc::vec::Vec;
 
 // Store ABAR per port index so read/write can find the controller.
 static AHCI_ABAR: SpinLock<[Option<u32>; MAX_PORTS]> =
     SpinLock::new([None; MAX_PORTS]);
-
-fn controller_abar_for_port(port: usize) -> u32 {
-    let state = AHCI_ABAR.lock();
-    state[port].unwrap_or(0)
-}
 
 // ── AHCI constants ──────────────────────────────────────────────────────────
 
@@ -27,8 +23,9 @@ const HBA_PORT_IPM_ACTIVE: u32 = 0x1;
 const HBA_P0CMD_ST: u32 = 0x0001;  // start
 const HBA_P0CMD_FRE: u32 = 0x0010;  // enable FIS receive
 const HBA_P0CMD_FR: u32 = 0x4000;  // FIS reset
-const HBA_P0CMD_CLO: u32 = 0x8000;  // command list override
+#[allow(dead_code)]
 const HBA_P0IS_TFES: u32 = 1 << 30; // task file error
+#[allow(dead_code)]
 const HBA_P0IS_PCS: u32 = 1 << 27;  // port connect change status
 
 const SECTOR_SIZE: usize = 512;
@@ -136,6 +133,7 @@ unsafe fn port_start(abar: u32, port: usize) {
     (*p).cmd |= HBA_P0CMD_ST;
 }
 
+#[allow(clippy::while_immutable_condition)]
 unsafe fn port_stop(abar: u32, port: usize) {
     let p = hba_port(abar, port);
     (*p).cmd &= !HBA_P0CMD_ST;
@@ -221,6 +219,7 @@ unsafe fn init_port(abar: u32, port: usize) -> bool {
     true
 }
 
+#[allow(clippy::while_immutable_condition)]
 unsafe fn ata_identify(abar: u32, port: usize, buf: &mut [u8]) -> bool {
     let p = hba_port(abar, port);
 
@@ -259,6 +258,7 @@ unsafe fn ata_identify(abar: u32, port: usize, buf: &mut [u8]) -> bool {
     (*p).tfd & 0x01 == 0
 }
 
+#[allow(clippy::while_immutable_condition)]
 unsafe fn read_sectors(abar: u32, port: usize, lba: u64, count: u32, buf: &mut [u8]) -> bool {
     let p = hba_port(abar, port);
 
@@ -289,7 +289,7 @@ unsafe fn read_sectors(abar: u32, port: usize, lba: u64, count: u32, buf: &mut [
     prdt.dba = buf.as_ptr() as u32;
     prdt.dbau = 0;
     prdt._reserved = 0;
-    prdt.dw3 = (count as u32 * SECTOR_SIZE as u32) | (1 << 31);
+    prdt.dw3 = (count * SECTOR_SIZE as u32) | (1 << 31);
 
     (*p).ci = 1 << port;
 
@@ -305,6 +305,7 @@ unsafe fn read_sectors(abar: u32, port: usize, lba: u64, count: u32, buf: &mut [
     (*p).tfd & 0x01 == 0
 }
 
+#[allow(clippy::while_immutable_condition)]
 unsafe fn write_sectors(abar: u32, port: usize, lba: u64, count: u32, buf: &[u8]) -> bool {
     let p = hba_port(abar, port);
 
@@ -335,7 +336,7 @@ unsafe fn write_sectors(abar: u32, port: usize, lba: u64, count: u32, buf: &[u8]
     prdt.dba = buf.as_ptr() as u32;
     prdt.dbau = 0;
     prdt._reserved = 0;
-    prdt.dw3 = (count as u32 * SECTOR_SIZE as u32) | (1 << 31);
+    prdt.dw3 = (count * SECTOR_SIZE as u32) | (1 << 31);
 
     (*p).ci = 1 << port;
 
@@ -362,7 +363,7 @@ pub fn init() {
 
     zenus_console::kwarn!("[AHCI] {} controller(s) found", controllers.len());
 
-    for (abar, irq) in controllers {
+    for (abar, _irq) in controllers {
         let found = unsafe { probe_ports(abar) };
         if found > 0 {
             zenus_console::kwarn!("[AHCI] {} device(s) on controller ABAR={:#x}", found, abar);
@@ -381,7 +382,7 @@ pub fn device_count() -> u8 {
 /// Get device info by index.
 pub fn get_device(idx: usize) -> Option<AhciDevice> {
     let state = AHCI_DEVICES.lock();
-    state[idx].clone()
+    state[idx]
 }
 
 /// Read one sector from an AHCI device by index.
@@ -455,14 +456,12 @@ fn register_ahci_devices(abar: u32) {
             AHCI_ABAR.lock()[port] = Some(abar);
 
             let mut buf = [0u8; SECTOR_SIZE];
-            let identified = unsafe { ata_identify(abar, port, &mut buf) };
+            let identified = ata_identify(abar, port, &mut buf);
             let mut model = [0u8; 40];
             let mut lba_sectors: u64 = 0;
 
             if identified {
-                for i in 0..40 {
-                    model[i] = buf[54 + i];
-                }
+                model.copy_from_slice(&buf[54..94]);
                 let word83 = u16::from_le_bytes([buf[166], buf[167]]);
                 if word83 & 0x0400 != 0 {
                     lba_sectors = u32::from_le_bytes([buf[200], buf[201], buf[202], buf[203]]) as u64
