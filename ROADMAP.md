@@ -40,23 +40,27 @@ RTL8139, virtio-net.
 **Namespaces** — PID, UTS, mount, net, user, IPC.
 
 **Security** — SMEP and SMAP enabled at boot, per-process address spaces,
-`STACK_GUARD`, `USER_SPACE_LIMIT`, NX on user mappings.
+`STACK_GUARD`, `USER_SPACE_LIMIT`, NX on user mappings, KPTI (user view,
+syscall/IDT entry stubs in `.text.kpti`, CR3 switching on every
+user/kernel transition), seccomp filter mode (`PR_SET_SECCOMP` with
+256-bit syscall allow-list).
 
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 291 host unit tests (`make test-host`), 27 in-kernel tests
+**Testing** — 294 host unit tests (`make test-host`), 27 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), a headless boot
 smoke test that requires the *ordinary* kernel to reach the shell prompt
 (`make smoke`), CI running all of them.
 
 ## Partially done
 
-- **User-mode hardening** — SMAP/SMEP are **enabled**. KPTI has its first two
-  stages: `zenus_mem::kpti` builds a user view with the kernel half zeroed, and
-  a page-aligned trampoline (`.text.kpti`/`.kpti_data`) is mapped into it with
-  a stub that switches CR3. It is still not active: a user CR3 has the whole
-  kernel mapped until the 256 IDT vectors get entry stubs.
+- **User-mode hardening** — SMAP/SMEP are **enabled**. KPTI is active: a user
+  view is built for every task (`zenus_mem::kpti::build_user_view`), the
+  trampoline (`.text.kpti`/`.kpti_data`) is mapped into it, syscall_entry and
+  all 256 IDT entry stubs live in `.text.kpti`, and CR3 switches between user
+  and kernel views on every syscall/exception. User views are created on task
+  creation (clone/exec) and destroyed on task exit (reap/kill).
 - **Container story** — the six namespace types exist and work, and cgroup
   `pids` and `memory` limits are now enforced; there is still no OCI runtime, no
   `cpu`/`io` enforcement, and no overlayfs.
@@ -67,8 +71,11 @@ smoke test that requires the *ordinary* kernel to reach the shell prompt
   and can be dropped with `PR_CAPBSET_DROP`; `mount`/`umount2`/`sethostname`
   gate on `CAP_SYS_ADMIN`, `setuid`/`setgid` on `CAP_SETUID`/`CAP_SETGID`,
   `kill` on `CAP_KILL`, and file permission checks on `CAP_DAC_OVERRIDE`/
-  `CAP_DAC_READ_SEARCH`. There is one set, not Linux's permitted/effective/
-  inheritable split, and no `capset`-style way to add a capability back.
+  `CAP_DAC_READ_SEARCH`. Seccomp filter mode (`PR_SET_SECCOMP`) is implemented:
+  `SECCOMP_SET_MODE_FILTER` installs a 256-bit syscall allow-list enforced by
+  `syscall_dispatch6` (blocked syscalls return -EPERM). There is one set, not
+  Linux's permitted/effective/inheritable split, and no `capset`-style way to
+  add a capability back.
 - **Shell** — ~90 builtins, no job control, no pipelines, no redirection.
 
 ## Known broken
@@ -107,7 +114,7 @@ Do not build on these without reading the code:
 | Thing | Reality |
 |---|---|
 | SSH | `ZENUS_SSH/1.0`, a homegrown line protocol with a weak keystream and a default password |
-| Capabilities / seccomp | A per-task set exists and gates `mount`/`umount2`/`sethostname`; it is one set, not the Linux three, and file access still keys off uid. `PR_SET_SECCOMP` fails with `-EINVAL` |
+| Capabilities | A per-task set exists and gates `mount`/`umount2`/`sethostname`; it is one set, not the Linux three, and file access still keys off uid. No `capset`-style way to add a capability back. |
 | Container runtime / OCI | Does not exist |
 | Cryptography | No library at all |
 | Userspace | Ring-3 programs are built from this workspace by hand; no libc |
@@ -125,15 +132,10 @@ Do not build on these without reading the code:
 checked against a pure, host-tested controller table. `cpu`/`io` remain
 advertised but unenforced, and the hierarchy is flat. Next:
 
-2. **KPTI**, so a user CR3 does not have the kernel half mapped. SMEP/SMAP
-   being on (done) is not the same thing. Stage 1 (the user view) is done;
-   what remains is the trampoline for `syscall`, the return path, and entry
-   stubs for the 256 IDT vectors. `DEVLOG.md` BUG-060 has the plan.
-3. **A driver model** so storage stops being PIO-only: AHCI first.
-4. **Capabilities, next step.** The set exists and is consulted by six syscalls
+2. **A driver model** so storage stops being PIO-only: AHCI first.
+3. **Capabilities, next step.** The set exists and is consulted by six syscalls
    and by every file-permission check. What is missing is a way to *gain*
-   privilege deliberately (no `capset`, no file capabilities on an ELF) and
-   seccomp: `PR_SET_SECCOMP` is still absent.
+   privilege deliberately (no `capset`, no file capabilities on an ELF).
 
 Boot testing is done: `make smoke` boots the ordinary kernel headless and fails
 unless the shell prompt appears, and `make test-quiet` now fails when the
