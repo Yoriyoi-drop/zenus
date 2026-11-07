@@ -599,6 +599,9 @@ pub extern "C" fn entry() -> ! {
         }
         zenus_console::serial::flush_output_blocking();
 
+        // 14. AHCI (SATA)
+        zenus_arch::ahci::init();
+
         // 15. Ext2 mount
         if zenus_arch::ata::device_count() > 0 {
             zenus_fs::vfs::create_dir("/mnt");

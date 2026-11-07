@@ -9,6 +9,7 @@ extern crate std;
 extern crate alloc;
 
 pub mod acpi;
+pub mod ahci;
 pub mod ata;
 pub mod cpu;
 pub mod crash;
