@@ -958,6 +958,15 @@ pub fn poll_retransmit(iface_idx: usize) {
             Some(t) => t,
             None => continue,
         };
+        // BUG-078: a connection that reached TCP_CLOSED — completed close
+        // handshake, RST, or keepalive timeout — never had its slot freed
+        // (close_conn is defined but never called). Without this, every closed
+        // connection leaks a TCB and, after MAX_CONNS, new connections fail.
+        // Free the slot here so alloc_conn can reuse it.
+        if tcb.state == TCP_CLOSED {
+            state.conns[i] = None;
+            continue;
+        }
         if tcb.listening {
             continue;
         }
@@ -1377,8 +1386,58 @@ pub fn connection_count() -> usize {
 mod host_tests {
     use super::{
         advertised_window, keepalive_action, keepalive_idle_deadline, keepalive_probe_deadline,
-        rx_free, seq_advance, Keepalive, KEEPALIVE_PROBES, RX_BUF_LEN,
+        poll_retransmit, rx_free, seq_advance, Keepalive, KEEPALIVE_PROBES, RX_BUF_LEN,
+        TCP_CLOSED, TCP_STATE, Tcb,
     };
+    use zenus_sync::spinlock::SpinLock;
+
+    // TCP_STATE is a module-global pool shared with any other test that touches
+    // it; serialize so this does not race.
+    static SERIAL: SpinLock<()> = SpinLock::new(());
+
+    /// BUG-078: a TCB that reached TCP_CLOSED never had its slot freed
+    /// (`close_conn` is defined but never called), so every closed connection
+    /// leaked a slot and new connections failed after MAX_CONNS. `poll_retransmit`
+    /// now frees CLOSED TCBs.
+    #[test]
+    fn closed_tcb_is_freed_by_poll_retransmit() {
+        let _g = SERIAL.lock();
+        {
+            let mut st = TCP_STATE.lock();
+            st.conns[0] = Some(Tcb {
+                state: TCP_CLOSED,
+                local_ip: [0; 4],
+                local_port: 0,
+                remote_ip: [0; 4],
+                remote_port: 0,
+                send_una: 0,
+                send_nxt: 0,
+                recv_nxt: 0,
+                peer_window: 0,
+                listening: false,
+                rx_data: [0; RX_BUF_LEN],
+                rx_data_len: 0,
+                tx_data: [0; 4096],
+                tx_data_len: 0,
+                retry_count: 0,
+                retry_ticks: 0,
+                time_wait_ticks: 0,
+                cwnd: 0,
+                ssthresh: 0,
+                dupack_count: 0,
+                last_ack_seq: 0,
+                keepalive_probes: 0,
+                keepalive_due: 0,
+                sack_blocks: [(0, 0); 4],
+            });
+        }
+        poll_retransmit(0);
+        let st = TCP_STATE.lock();
+        assert!(
+            st.conns[0].is_none(),
+            "a CLOSED TCB must be returned to the pool (BUG-078)"
+        );
+    }
 
     /// Regression: the advertised window was computed in the 65535 space of the
     /// 16-bit field rather than the 4096-byte space of the receive buffer. A

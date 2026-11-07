@@ -3955,3 +3955,38 @@ sendiri → lolos cek). Tidak ada test baru (perilaku penolakan cross-task
 sulit di-unit-test tanpa multi-task; diverifikasi via smoke + review).
 
 **Catatan:** ini melengkapi celah yang ditandai di BUG-076.
+
+## BUG-078 — TCB (slot koneksi TCP) bocor setelah koneksi ditutup
+
+**Status:** fixed.
+**Keparahan:** sedang (kebocoran resource jangka panjang) — setelah
+`MAX_CONNS` koneksi ditutup, koneksi baru gagal (instabilitas progresif).
+
+**Lokasi:** `crates/zenus-net/src/tcp.rs` (`poll_retransmit`), fungsi
+`close_conn` (tak pernah dipanggil).
+
+**Akar masalah:** `socket::close` membebaskan slot socket (tabel fd) tapi
+tidak membebaskan TCB (`TCP_STATE.conns[conn]`). `tcp::close` hanya
+mengirim FIN dan mengubah state ke `FIN_WAIT1`/`LAST_ACK`; saat handshake
+tutup selesai (atau RST/keepalive-timeout), state menjadi `TCP_CLOSED`,
+tapi slot `conns[i]` **tidak pernah di-set `None`**. Satu-satunya fungsi
+pembebas TCB, `close_conn`, didefinisikan namun tak pernah dipanggil di
+manapun. `alloc_conn` hanya memakai slot `None`, sehingga TCB `CLOSED`
+tetap menempati slot → bocor. Setelah `MAX_CONNS` koneksi, `alloc_conn`
+gagal dan koneksi baru tak bisa dibuat.
+
+**Perbaikan:** di `poll_retransmit`, bebaskan TCB yang mencapai `TCP_CLOSED`
+(`state.conns[i] = None`) sebelum logika lain. Ini terpusat dan aman
+(berjalan di bawah `TCP_STATE.lock()` yang sama); menangkap semua jalur ke
+`CLOSED` (FIN handshake, RST, keepalive timeout). Socket/fd sudah bebas;
+TCB kini kembali ke pool agar `alloc_conn` bisa pakai ulang.
+
+**Verifikasi:** host test baru `closed_tcb_is_freed_by_poll_retransmit`
+(TCB `CLOSED` di slot 0 → setelah `poll_retransmit`, slot `None`).
+`make test-host` → **291 passed** (290 + 1), 0 failed; bare-metal build OK;
+smoke OK (prompt shell).
+
+**Catatan:** `close_conn` tetap tak terpakai (pub, tak memicu warning);
+pembebasan kini ditangani `poll_retransmit`. Opsinya: hapus `close_conn`
+atau pakai sebagai API eksplisit — biarkan untuk kini guna minimalkan
+perubahan.
