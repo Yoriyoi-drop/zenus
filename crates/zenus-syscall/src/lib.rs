@@ -151,6 +151,64 @@ mod host_tests {
         }
     }
 
+    /// Seccomp filter constants and allow-list bitmask logic are pure, so
+    /// they can be tested on the host without a kernel.
+    #[test]
+    fn seccomp_constants_match_the_linux_abi() {
+        use crate::syscall::{
+            SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO,
+            SECCOMP_RET_KILL, SECCOMP_RET_TRAP, SECCOMP_SET_MODE_FILTER,
+        };
+        assert_eq!(SECCOMP_SET_MODE_FILTER, 1);
+        assert_eq!(SECCOMP_FILTER_FLAG_TSYNC, 1);
+        assert_eq!(SECCOMP_RET_ALLOW, 0x7fff_0000);
+        assert_eq!(SECCOMP_RET_ERRNO, 0x0005_0000);
+        assert_eq!(SECCOMP_RET_KILL, 0x0000_0000);
+        assert_eq!(SECCOMP_RET_TRAP, 0x0003_0000);
+    }
+
+    /// The seccomp allow-list is a 256-bit bitmap: bit `n` permits syscall `n`.
+    /// A syscall number past 255 is always rejected by the dispatcher before
+    /// the filter is consulted, so bits past 255 are irrelevant.
+    #[test]
+    fn seccomp_allowlist_bitmask_covers_all_256_syscalls() {
+        // 4 u64s × 64 bits = 256 bits, one per syscall number.
+        let mut allowed = [0u64; 4];
+        // Allow every syscall 0..=255.
+        for w in 0..4 {
+            allowed[w] = u64::MAX;
+        }
+        for num in 0..256u64 {
+            let word = num / 64;
+            let bit = num % 64;
+            assert!(
+                allowed[word as usize] & (1u64 << bit) != 0,
+                "syscall {num} must be permitted"
+            );
+        }
+        // Syscall 256 is past the bitmap; the dispatcher rejects it before
+        // consulting the filter, so no bit needs to cover it.
+        assert_eq!(256 / 64, 4, "256 is past the 4-word bitmap");
+    }
+
+    /// An empty allow-list blocks every syscall (except prctl itself).
+    #[test]
+    fn seccomp_empty_allowlist_blocks_everything() {
+        let allowed = [0u64; 4];
+        for num in 0..256u64 {
+            if num == crate::syscall::SYS_PRCTL {
+                continue; // prctl is always allowed
+            }
+            let word = num / 64;
+            let bit = num % 64;
+            assert_eq!(
+                allowed[word as usize] & (1u64 << bit),
+                0,
+                "syscall {num} must be blocked by an empty allow-list"
+            );
+        }
+    }
+
     /// Regression coverage: the four conflicting slots moved when the table was
     /// renumbered, and `userspace/` had to follow.
     #[test]

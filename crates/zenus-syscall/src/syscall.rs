@@ -221,7 +221,7 @@ const SYS_CHDIR: u64 = 246; // was 80, within range but moved for consistency
 const SYS_FCHDIR: u64 = 248; // was 81, within range but moved for consistency
 
 // Process control
-const SYS_PRCTL: u64 = 244; // was 157, within range but moved for consistency
+pub(crate) const SYS_PRCTL: u64 = 244; // was 157, within range but moved for consistency
 
 // Additional filesystem (custom slots for Linux numbers > 256)
 const SYS_FACCESSAT: u64 = 217; // was 35, conflicted with nanosleep
