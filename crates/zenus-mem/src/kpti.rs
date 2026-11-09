@@ -24,6 +24,15 @@ use crate::paging;
 pub const USER_HALF_ENTRIES: usize = 256;
 
 core::arch::global_asm!(
+    // Both directives are load-bearing. `global_asm!` blocks in a linked
+    // kernel share one assembler stream, so the syntax mode and the current
+    // section are inherited from whatever block came before; stating them here
+    // keeps this file correct on its own. Without `.section .text.kpti` the
+    // stubs below are emitted into the *previous* section (the `.kpti_data`
+    // page), and the IDT then points at non-executable data: the first fault
+    // jumps there, the fetch faults again, and the kernel double-faults before
+    // the shell starts.
+    ".intel_syntax noprefix",
     // The entry text. It is mapped into the user view at the same virtual
     // address as in the kernel view, so the CPU can fetch the first
     // instructions of an entry before the kernel is reachable again.
@@ -66,6 +75,10 @@ core::arch::global_asm!(
 // correct handler.
 // =========================================================================
 core::arch::global_asm!(
+    ".intel_syntax noprefix",
+    // The stubs must be code in `.text.kpti` (the page the user view keeps
+    // mapped), not data in the section the previous block left selected.
+    ".section .text.kpti, \"ax\"",
     // --- Specific exception vectors (triggered from user mode) ---
     ".globl kpti_idt_entry_0",
     "kpti_idt_entry_0:",

@@ -108,11 +108,12 @@ fn fuzz_disk(operation: u8, data: &[u8]) -> FuzzResult {
         1 => {
             // Write sector
         }
-        2
+        2 => {
             // DMA transfer
-            if data.len() < 16 => {
+            if data.len() < 16 {
                 return FuzzResult::Normal;
             }
+        }
         3 => {
             // Invalid sector
         }
@@ -180,11 +181,12 @@ fn fuzz_pci(operation: u8, data: &[u8]) -> FuzzResult {
 
 fn fuzz_serial(operation: u8, data: &[u8]) -> FuzzResult {
     match operation % 4 {
-        0
+        0 => {
             // Write byte
-            if data.is_empty() => {
+            if data.is_empty() {
                 return FuzzResult::Normal;
             }
+        }
         1 => {
             // Read byte
         }

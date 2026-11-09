@@ -129,15 +129,29 @@ fn new_record(input: &[u8], subsystem: u8, crash_type: CrashType) -> CrashRecord
 }
 
 pub fn record_crash(input: &[u8]) {
-    if let Some(id) = store(new_record(input, SUBSYS_SYSCALL, CrashType::Unknown)) {
-        zenus_console::kerror!("[FUZZ] CRASH ZENUS-FUZZ-{:06} subsystem=syscall", id);
+    record_crash_dedup(input, SUBSYS_SYSCALL, CrashType::Unknown);
+}
+
+/// Record a crash, but only if no identical input is already in the log.
+/// Returns the assigned crash id when stored, `None` when it is a duplicate
+/// or the log is full.
+pub fn record_crash_dedup(input: &[u8], subsystem: u8, crash_type: CrashType) -> Option<u64> {
+    // Dedup: scan existing records for an identical input before storing.
+    let log = CRASH_LOG.lock();
+    for i in 0..log.count {
+        if let Some(ref existing) = log.crashes[i] {
+            if existing.input == input {
+                drop(log);
+                return None;
+            }
+        }
     }
+    drop(log);
+    store(new_record(input, subsystem, crash_type))
 }
 
 pub fn record_hang(input: &[u8]) {
-    if let Some(id) = store(new_record(input, SUBSYS_SYSCALL, CrashType::Unknown)) {
-        zenus_console::kerror!("[FUZZ] HANG ZENUS-FUZZ-{:06}", id);
-    }
+    record_crash_dedup(input, SUBSYS_SYSCALL, CrashType::Unknown);
 }
 
 /// Record a fault that the guard contained during a test case.
@@ -153,8 +167,19 @@ pub fn record_fault(subsystem: u8, args: &[u8]) {
     let err = zenus_arch::fuzz_guard::LAST_ERR.load(Ordering::Relaxed);
     let crash_type = crash_type_from_vector(vector);
 
-    // The case descriptor is the corpus input verbatim, so a contained fault
-    // is reproducible from the log alone.
+    // Dedup: scan existing records for an identical input before storing.
+    let dup = {
+        let log = CRASH_LOG.lock();
+        let found = log.crashes[..log.count].iter().any(|r| {
+            r.as_ref().map_or(false, |existing| existing.input == args)
+        });
+        drop(log);
+        found
+    };
+    if dup {
+        return;
+    }
+
     let mut record = new_record(args, subsystem, crash_type);
     record.rip = rip;
     // The checkpoint stack is gone by now, so the trace is reported as the
@@ -231,4 +256,58 @@ pub fn clear() {
     }
     log.count = 0;
     drop(log);
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+    use zenus_sync::spinlock::SpinLock;
+
+    /// CRASH_LOG is process-global and `cargo test` runs tests on parallel
+    /// threads: without this the cases reset each other's state mid-assertion.
+    static SERIAL: SpinLock<()> = SpinLock::new(());
+
+    fn serial() -> zenus_sync::spinlock::SpinLockGuard<'static, ()> {
+        SERIAL.lock()
+    }
+
+    #[test]
+    fn record_crash_dedup_rejects_duplicate_input() {
+        let _s = serial();
+        crate::crash::clear();
+        let input = b"\xAA\xBB\xCC";
+        assert!(record_crash_dedup(input, SUBSYS_SYSCALL, CrashType::PageFault).is_some());
+        assert!(record_crash_dedup(input, SUBSYS_SYSCALL, CrashType::PageFault).is_none());
+        assert_eq!(get_crash_count(), 1);
+    }
+
+    #[test]
+    fn record_crash_dedup_accepts_different_input() {
+        let _s = serial();
+        crate::crash::clear();
+        assert!(record_crash_dedup(b"\xAA", SUBSYS_SYSCALL, CrashType::PageFault).is_some());
+        assert!(record_crash_dedup(b"\xBB", SUBSYS_SYSCALL, CrashType::PageFault).is_some());
+        assert_eq!(get_crash_count(), 2);
+    }
+
+    #[test]
+    fn record_crash_dedup_ignores_subsystem_and_type() {
+        let _s = serial();
+        crate::crash::clear();
+        let input = b"\xDD\xEE";
+        assert!(record_crash_dedup(input, SUBSYS_SYSCALL, CrashType::PageFault).is_some());
+        // Same input, different subsystem/type: still a duplicate.
+        assert!(record_crash_dedup(input, SUBSYS_MEMORY, CrashType::NullPointerDeref).is_none());
+        assert_eq!(get_crash_count(), 1);
+    }
+
+    #[test]
+    fn clear_empties_the_log() {
+        let _s = serial();
+        crate::crash::clear();
+        record_crash_dedup(b"\xAA", SUBSYS_SYSCALL, CrashType::PageFault);
+        assert_eq!(get_crash_count(), 1);
+        clear();
+        assert_eq!(get_crash_count(), 0);
+    }
 }

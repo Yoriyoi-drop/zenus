@@ -988,6 +988,15 @@ pub fn create_task_named(entry: fn(), stack_size: usize, name: &str) -> u64 {
         task.stack_size = stack_size as u64;
         task.kernel_rsp_top = stack_top;
         task.cpu = cpu;
+        // A kernel task runs in the kernel address space, so its CR3 is the
+        // current kernel view — the same value `init()` gives the idle task.
+        // Leaving it 0 made the switch path publish 0 into the KPTI CR3 slot
+        // (`set_kernel_cr3_slot(next_cr3)`), and the IDT entry stub then did
+        // `mov cr3, 0` on the first timer tick: the fetch of the next
+        // instruction faulted, the #PF entry faulted too (same CR3), and the
+        // shell died in a triple fault before printing its prompt.
+        task.cr3 = zenus_mem::paging::get_level4_addr().as_u64();
+        task.user_cr3 = task.cr3;
         // A kernel task has no user address space, but `sys_brk` still reaches
         // it: the fuzzing campaign calls `brk(0x61706e69)` like any other task.
         // With `heap_floor` left at 0 the floor check in `sys_brk` was inert for
@@ -1196,8 +1205,12 @@ pub fn yield_now() {
     }
 
     // Publish KPTI CR3 slots so syscall_entry can switch between user and
-    // kernel views for the next task.
-    set_kernel_cr3_slot(next_cr3);
+    // kernel views for the next task. A task with no CR3 of its own (a kernel
+    // task created before this was filled in) must publish the view the CPU is
+    // already running on: the entry stubs load this slot unconditionally, and a
+    // slot of 0 means the next interrupt executes with CR3 = 0.
+    let kernel_slot = if next_cr3 != 0 { next_cr3 } else { current_cr3_raw };
+    set_kernel_cr3_slot(kernel_slot);
     set_user_cr3_slot(next_user_cr3);
 
     if next_kernel_rsp != 0 {
@@ -1961,8 +1974,12 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     }
 
     // Publish KPTI CR3 slots so syscall_entry can switch between user and
-    // kernel views for the next task.
-    set_kernel_cr3_slot(next_cr3);
+    // kernel views for the next task. A task with no CR3 of its own (a kernel
+    // task created before this was filled in) must publish the view the CPU is
+    // already running on: the entry stubs load this slot unconditionally, and a
+    // slot of 0 means the next interrupt executes with CR3 = 0.
+    let kernel_slot = if next_cr3 != 0 { next_cr3 } else { current_cr3_raw };
+    set_kernel_cr3_slot(kernel_slot);
     set_user_cr3_slot(next_user_cr3);
 
     if next_kernel_rsp != 0 {

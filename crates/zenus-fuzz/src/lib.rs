@@ -569,6 +569,60 @@ mod host_tests {
         }
     }
 
+    #[test]
+    fn insert_byte_grows_by_one() {
+        let seed = b"hello";
+        let out = mutate(seed, MutationStrategy::InsertByte);
+        assert_eq!(out.len(), seed.len() + 1);
+        assert_ne!(out, seed);
+    }
+
+    #[test]
+    fn delete_byte_shrinks_by_one() {
+        let seed = b"hello";
+        let out = mutate(seed, MutationStrategy::DeleteByte);
+        assert_eq!(out.len(), seed.len() - 1);
+        assert_ne!(out, seed);
+    }
+
+    #[test]
+    fn multiple_bit_flip_changes_input() {
+        let seed = b"\x00\x00\x00\x00\x00";
+        let out = mutate(seed, MutationStrategy::MultipleBitFlip);
+        assert_eq!(out.len(), seed.len());
+        assert_ne!(out, seed);
+    }
+
+    #[test]
+    fn new_strategies_handle_empty_input() {
+        for strategy in [
+            MutationStrategy::InsertByte,
+            MutationStrategy::DeleteByte,
+            MutationStrategy::MultipleBitFlip,
+        ] {
+            let out = mutate(b"", strategy);
+            assert!(out.is_empty(), "{strategy:?} must not grow empty input");
+        }
+    }
+
+    #[test]
+    fn new_strategies_handle_single_byte() {
+        for strategy in [
+            MutationStrategy::InsertByte,
+            MutationStrategy::DeleteByte,
+            MutationStrategy::MultipleBitFlip,
+        ] {
+            let out = mutate(b"\x05", strategy);
+            // InsertByte may grow a single byte to two; DeleteByte and
+            // MultipleBitFlip keep the length unchanged.
+            if strategy == MutationStrategy::InsertByte {
+                assert_eq!(out.len(), 2, "{strategy:?} must grow single byte by one");
+            } else {
+                assert_eq!(out.len(), 1, "{strategy:?} must keep single-byte length");
+            }
+        }
+    }
+
     // ── minimisation ──────────────────────────────────────────────────────
 
     #[test]

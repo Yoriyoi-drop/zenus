@@ -332,7 +332,7 @@ FUZZ_TIMEOUT ?= 300
 # $(1) cargo feature selecting the campaign mode, $(2) mode name
 define fuzz_build
 	@mkdir -p $(FUZZ_BUILD_DIR)
-	$(CARGO) build --package zenus --target $(TARGET) --no-default-features \
+	$(CARGO) build --release --package zenus --target $(TARGET) --no-default-features \
 		--features $(1) $(CARGO_FLAGS)
 	$(LD) -T apps/src/linker.ld -o $(call FUZZ_KERNEL,$(2)) \
 		--nmagic -n --gc-sections \

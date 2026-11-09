@@ -10,9 +10,12 @@ pub enum MutationStrategy {
     Dictionary,
     Splice,
     Shrink,
+    InsertByte,
+    DeleteByte,
+    MultipleBitFlip,
 }
 
-pub const STRATEGIES: [MutationStrategy; 7] = [
+pub const STRATEGIES: [MutationStrategy; 10] = [
     MutationStrategy::BitFlip,
     MutationStrategy::ByteFlip,
     MutationStrategy::Arithmetic,
@@ -20,6 +23,9 @@ pub const STRATEGIES: [MutationStrategy; 7] = [
     MutationStrategy::Dictionary,
     MutationStrategy::Splice,
     MutationStrategy::Shrink,
+    MutationStrategy::InsertByte,
+    MutationStrategy::DeleteByte,
+    MutationStrategy::MultipleBitFlip,
 ];
 
 const INTERESTING_VALUES: &[u64] = &[
@@ -76,6 +82,9 @@ pub fn mutate(input: &[u8], strategy: MutationStrategy) -> Vec<u8> {
         MutationStrategy::Dictionary => dictionary(&mut output),
         MutationStrategy::Splice => splice(&mut output),
         MutationStrategy::Shrink => shrink(&mut output),
+        MutationStrategy::InsertByte => insert_byte(&mut output),
+        MutationStrategy::DeleteByte => delete_byte(&mut output),
+        MutationStrategy::MultipleBitFlip => multiple_bit_flip(&mut output),
     }
 
     if output.len() > MAX_MUTATED_SIZE {
@@ -183,13 +192,45 @@ fn shrink(data: &mut Vec<u8>) {
     }
     let start = (data[0] as usize) % data.len();
     let remaining = data.len() - start;
-    // `end` must be strictly inside the remaining range, otherwise a shrink of
-    // 0 bytes would report success without changing anything (and the loop in
-    // the caller would never terminate).
     let remove = 1 + ((data[1] as usize) % remaining);
     let end = start + remove;
     data.copy_within(end.., start);
     data.truncate(data.len() - remove);
+}
+
+/// Insert a random interesting byte at a random position.
+fn insert_byte(data: &mut Vec<u8>) {
+    if data.is_empty() {
+        return;
+    }
+    let pos = (data[0] as usize) % (data.len() + 1);
+    let byte = data.get(1).copied().unwrap_or(0).wrapping_add(1);
+    if data.len() >= MAX_MUTATED_SIZE {
+        return;
+    }
+    data.insert(pos, byte);
+}
+
+/// Delete a single byte at a random position.
+fn delete_byte(data: &mut Vec<u8>) {
+    if data.len() <= 1 {
+        return;
+    }
+    let pos = (data[0] as usize) % data.len();
+    data.remove(pos);
+}
+
+/// Flip multiple bits at once: up to 4 distinct byte positions.
+fn multiple_bit_flip(data: &mut [u8]) {
+    if data.is_empty() {
+        return;
+    }
+    let n = 1 + ((data[0] as usize) % 4);
+    for i in 0..n {
+        let idx = (data.get(i + 1).copied().unwrap_or(0) as usize) % data.len();
+        let bit = (data.get(i + 2).copied().unwrap_or(0) % 8) as u8;
+        data[idx] ^= 1 << bit;
+    }
 }
 
 /// Generate a sequence of mutations
