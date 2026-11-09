@@ -3990,3 +3990,23 @@ smoke OK (prompt shell).
 pembebasan kini ditangani `poll_retransmit`. Opsinya: hapus `close_conn`
 atau pakai sebagai API eksplisit — biarkan untuk kini guna minimalkan
 perubahan.
+
+---
+
+### BUG-079 — campaign fuzz tidak mengeksekusi satupun case (`cases=0`), task tak di-schedule
+
+**Status:** RESOLVED + diverifikasi (`make fuzz-smoke` 2000 case, `crashes=0`, `EXIT code=0`). Catatan: bug ini *juga* memperbaiki preemption timer untuk build normal, karena `crates/zenus-arch/src/interrupts/idt.rs` adalah kode bersama.
+**Keparahan:** tinggi untuk CI — `make fuzz-smoke` boot framework tapi campaign task (pid=1) tidak pernah dijalankan badannya, sehingga `CASE_COUNTER` tetap 0 dan watchdog membatalkan setelah 120 dtk (EXIT code=3). Campaign tidak menemukan apa pun.
+
+**Diagnosa (bertahap):**
+1. **Makefile (SUDAH DIPERBAIKI).** `fuzz_build` memakai `target/` default yang *sama* dengan `make build`, dan `libzenus.a` statik punya nama berkas tunggal tanpa peduli fitur. Setelah `make build` (tanpa fuzzing) meninggalkan `libzenus.a` non-fuzzing di sana, `make fuzz-smoke` meng-link *itu* → campaign tidak pernah jalan dan shell yang boot. Selain itu profil release membuang entry point `pub(crate)` fuzz (`run_fuzz_campaign`, `fuzz_runner::*`) dari staticlib sebagai unreachable. Perbaikan: fuzz build kini punya `CARGO_TARGET_DIR` sendiri (`build/target-fuzz`, menyamai kernel testing) dan di-build sebagai debug agar simbol fuzz tetap ada.
+2. **`--no-default-features` memicu boot gagal total (SUDAH DIPERBAIKI).** Setelah (1), `fuzz_build` masih memakai `--no-default-features`, yang mematikan fitur default `smp` dan — lebih penting — fitur lain yang dibutuhkan jalur boot. Hasilnya: kernel *tidak boot sama sekali* (hanya `limine: Loading executable`, tidak ada banner `Z`). Dibuktikan dengan membangun fuzz TANPA `--no-default-features` → kernel boot normal. Baris tersebut dihapus dari `fuzz_build`.
+3. **Akar sebenarnya: timer ISR tidak pernah di-wiring ke `schedule_tick` (SUDAH DIPERBAIKI).** Di `crates/zenus-arch/src/interrupts/idt.rs`, argumen timer pada `init_idt_entry_targets(...)` mengarahkan vector 32 (`TIMER_VECTOR`) ke `handler::interrupt_timer` — sebuah handler yang hanya memanggil `pit::tick()` + flush serial dan **tidak menjadwalkan**. Satu-satunya pemanggil `schedule_tick` (fungsi preemption) adalah `apic_timer_isr_stub` (assembly di `zenus-sched`, di-declare via `extern "C"` link-time karena `zenus-arch` berada di bawah `zenus-sched`). Stub itu **tidak pernah didaftarkan** ke IDT, jadi timer berdetak tetapi tidak pernah melakukan context switch → campaign task (pid=1) diciptakan tapi tidak pernah dipilih, `cases=0`. Fix: ganti target timer di `idt.rs` dari `handler::interrupt_timer as *const () as u64` menjadi `apic_timer_isr_stub as *const () as u64`. Sekarang vector 32 → stub → `schedule_tick`, dan penjadwalan berfungsi untuk build fuzz maupun normal.
+
+**Bukti (`make fuzz-smoke` setelah fix):**
+- `[FUZZ] campaign task entered, tid=1`
+- `[FUZZ] campaign start mode=smoke cases=2000`
+- `[FUZZ] SUMMARY cases=2000 crashes=0 hangs=0 new_paths=135 corpus=1219 edges=203 faults=0 unrecovered=0`
+- `[FUZZ] EXIT code=0`
+
+**Test:** tidak ada test host yang menutupi (butuh VM — pengecualian yang diizinkan per AGENTS.md untuk hardware/scheduler). Verifikasi manual via `make fuzz-smoke` dan membaca log serial.

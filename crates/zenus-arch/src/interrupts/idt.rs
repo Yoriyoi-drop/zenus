@@ -19,6 +19,14 @@ extern "C" {
     static kpti_idt_entry_39: u8;
     static kpti_idt_entry_43: u8;
     static kpti_idt_entry_stray: u8;
+    // Timer interrupt service routine that performs the actual context switch
+    // (`schedule_tick`). Defined in `zenus-sched` (the scheduler owns the
+    // switch machinery) and resolved at link time — `zenus-arch` sits *below*
+    // `zenus-sched` in the crate graph, so this is a link-time symbol
+    // reference rather than a crate dependency. The KPTI entry stub switches
+    // CR3 to the kernel view and then `jmp`s here, so this runs with the
+    // kernel address space already loaded.
+    fn apic_timer_isr_stub();
 }
 
 /// Fuzzing containment hook. Every CPU exception handler must call this
@@ -129,18 +137,18 @@ pub fn init() {
 
     // Register handler addresses for the KPTI entry stubs before installing
     // them, so the stubs can jump to the real handlers after switching CR3.
-    kpti::init_idt_entry_targets(
-        divide_error_handler as *const () as u64,
-        invalid_opcode_handler as *const () as u64,
-        gpf_handler as *const () as u64,
-        page_fault_handler as *const () as u64,
-        handler::interrupt_timer as *const () as u64,
-        handler::interrupt_keyboard as *const () as u64,
-        handler::interrupt_serial as *const () as u64,
-        handler::interrupt_spurious as *const () as u64,
-        handler::interrupt_nic as *const () as u64,
-        handler::interrupt_stray as *const () as u64,
-    );
+        kpti::init_idt_entry_targets(
+            divide_error_handler as *const () as u64,
+            invalid_opcode_handler as *const () as u64,
+            gpf_handler as *const () as u64,
+            page_fault_handler as *const () as u64,
+            apic_timer_isr_stub as *const () as u64,
+            handler::interrupt_keyboard as *const () as u64,
+            handler::interrupt_serial as *const () as u64,
+            handler::interrupt_spurious as *const () as u64,
+            handler::interrupt_nic as *const () as u64,
+            handler::interrupt_stray as *const () as u64,
+        );
 
     // KPTI entry stubs live in .text.kpti, mapped into both the kernel and
     // user views, so the CPU can fetch them when a ring-3 task faults with

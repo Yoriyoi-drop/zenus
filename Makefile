@@ -328,16 +328,30 @@ FUZZ_MEM ?= 2G
 # Hard wall-clock cap per campaign so a wedged fuzz case cannot hang the target.
 FUZZ_TIMEOUT ?= 300
 
-# $(1) cargo feature selecting the campaign mode
 # $(1) cargo feature selecting the campaign mode, $(2) mode name
+#
+# The fuzz kernel must be built in its OWN target directory. The default
+# `target/` is shared with `make build`, and the `zenus` staticlib
+# (`libzenus.a`) is a single filename regardless of features: a plain
+# `make build` leaves a non-fuzzing `libzenus.a` there, and the next
+# `make fuzz-smoke` would link *that* instead of a fuzzing one — so the
+# campaign never ran and the kernel booted the shell. This mirrors the
+# separate target dir already used for the testing kernel.
+#
+# It is also built as a debug profile on purpose: in a release staticlib the
+# compiler drops the `pub(crate)` fuzz entry points (`run_fuzz_campaign`,
+# `fuzz_runner::*`) as unreachable, so the campaign cannot be entered even
+# though the feature was compiled in. Debug keeps them.
+FUZZ_TARGET_DIR := $(BUILD_DIR)/target-fuzz
 define fuzz_build
 	@mkdir -p $(FUZZ_BUILD_DIR)
-	$(CARGO) build --release --package zenus --target $(TARGET) --no-default-features \
+	CARGO_TARGET_DIR=$(FUZZ_TARGET_DIR) $(CARGO) build --package zenus \
+		--target $(TARGET) \
 		--features $(1) $(CARGO_FLAGS)
 	$(LD) -T apps/src/linker.ld -o $(call FUZZ_KERNEL,$(2)) \
 		--nmagic -n --gc-sections \
 		--whole-archive \
-		target/$(TARGET)/$(PROFILE_DIR)/libzenus.a \
+		$(FUZZ_TARGET_DIR)/$(TARGET)/debug/libzenus.a \
 		--no-whole-archive
 	rm -rf $(ISO_DIR)
 	mkdir -p $(ISO_DIR)/boot/limine
