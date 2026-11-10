@@ -132,13 +132,17 @@ Do not build on these without reading the code:
 checked against a pure, host-tested controller table. `cpu`/`io` remain
 advertised but unenforced, and the hierarchy is flat. Next:
 
-2. **Userspace, next step.** `zenus-libc` exists with syscall wrappers.
-   What is missing: a full libc port (printf, string, memory functions),
-   ELF userspace loading from initrd, and shell job control. Shell pipelines
-   (`|`) and redirection (`>`/`>>`/`<`) between builtins now work: stages are
-   buffered in memory, the final stage (or any single command) can write to a
-   file via `>`/`>>` and read from a file via `<`, and stages that read stdin
-   (`cat`, `grep`) consume the previous stage's output or the redirected file.
+2. **Userspace, next step.** `zenus-libc` exists with syscall wrappers, and ELF
+   userspace programs are already loaded and run from the VFS/initrd via the
+   shell `run <path> [&]` builtin (`cmd_run` → `load_elf`/`load_elf_raw`,
+   with `&` for background execution). What is still missing: a full libc port
+   (printf, string, memory functions) and shell job control (foreground/background
+   management of those external tasks — `run … &` starts them but there is no
+   `jobs`/`fg`/`wait`). Shell pipelines (`|`) and redirection (`>`/`>>`/`<`)
+   between builtins now work: stages are buffered in memory, the final stage (or
+   any single command) can write to a file via `>`/`>>` and read from a file via
+   `<`, and stages that read stdin (`cat`, `grep`) consume the previous stage's
+   output or the redirected file.
 3. **Capabilities, next step.** The set exists and is consulted by six syscalls
    and by every file-permission check. What is missing is a way to *gain*
    privilege deliberately (no `capset`, no file capabilities on an ELF).
