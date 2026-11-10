@@ -188,36 +188,123 @@ impl Writer for ShellWriter {
     }
 }
 
-/// Captures everything written to it into a `Vec<u8>`. Used by the pipeline
-/// engine to hold each stage's stdout before feeding it to the next stage.
-struct VecWriter<'a> {
-    buf: &'a mut alloc::vec::Vec<u8>,
+/// Like `VecWriter` but owns its buffer, so it can be returned and drained
+/// after a command runs. Used for pipeline stages and output redirection.
+struct OwnedVecWriter {
+    buf: alloc::vec::Vec<u8>,
 }
 
-impl Writer for VecWriter<'_> {
+impl OwnedVecWriter {
+    fn new() -> Self {
+        OwnedVecWriter {
+            buf: alloc::vec::Vec::new(),
+        }
+    }
+
+    fn into_vec(self) -> alloc::vec::Vec<u8> {
+        self.buf
+    }
+}
+
+impl Writer for OwnedVecWriter {
     fn write_str(&mut self, s: &str) {
         self.buf.extend_from_slice(s.as_bytes());
     }
-
     fn write_byte(&mut self, b: u8) {
         self.buf.push(b);
     }
-
     fn write_u64(&mut self, v: u64) {
         zutils_common::write_u64(self, v);
     }
-
     fn write_i64(&mut self, v: i64) {
         zutils_common::write_i64(self, v);
     }
-
     fn write_hex(&mut self, v: u64) {
         zutils_common::write_hex(self, v);
     }
-
     fn write_ip(&mut self, ip: [u8; 4]) {
         zutils_common::write_ip(self, ip);
     }
+}
+
+/// Reads an entire file into a Vec. Returns `None` if the path does not exist.
+fn read_file_to_vec(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    let node = zenus_fs::vfs::open(path)?;
+    let size = node.fs.stat(node.inode).size as usize;
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(size);
+    let mut offset: u64 = 0;
+    let mut buf = [0u8; 512];
+    loop {
+        match node.fs.read(node.inode, offset, &mut buf) {
+            Some(0) | None => break,
+            Some(n) => {
+                let n = n as usize;
+                out.extend_from_slice(&buf[..n]);
+                offset += n as u64;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Writes `data` to `path`. When `append` is false the file is truncated
+/// (recreated); when true, bytes are appended after the existing contents.
+/// Returns false if the file cannot be created or opened.
+fn write_file(path: &str, append: bool, data: &[u8]) -> bool {
+    if !append {
+        if zenus_fs::vfs::open(path).is_some() {
+            zenus_fs::vfs::remove(path);
+        }
+        if !zenus_fs::vfs::create_file(path) {
+            return false;
+        }
+    } else if zenus_fs::vfs::open(path).is_none() {
+        if !zenus_fs::vfs::create_file(path) {
+            return false;
+        }
+    }
+    match zenus_fs::vfs::open(path) {
+        Some(node) => {
+            let off = if append {
+                node.fs.stat(node.inode).size as u64
+            } else {
+                0
+            };
+            node.fs.write(node.inode, off, data).is_some()
+        }
+        None => false,
+    }
+}
+
+/// Splits a command line into the command portion plus any `>`/`>>`/`<`
+/// redirections. Redirection operators and their operands are removed from the
+/// returned command string; there is no quoting, matching the rest of the shell.
+fn parse_redir(
+    line: &str,
+) -> (
+    alloc::string::String,
+    Option<(alloc::string::String, bool)>,
+    Option<alloc::string::String>,
+) {
+    let mut cmd = alloc::string::String::new();
+    let mut out: Option<(alloc::string::String, bool)> = None;
+    let mut inp: Option<alloc::string::String> = None;
+    let mut tokens = line.split(' ').filter(|t| !t.is_empty());
+    while let Some(t) = tokens.next() {
+        if t == ">" {
+            out = Some((alloc::string::String::from(tokens.next().unwrap_or("")), false));
+        } else if t == ">>" {
+            out = Some((alloc::string::String::from(tokens.next().unwrap_or("")), true));
+        } else if t == "<" {
+            inp = Some(alloc::string::String::from(tokens.next().unwrap_or("")));
+        } else {
+            if !cmd.is_empty() {
+                cmd.push(' ');
+            }
+            cmd.push_str(t);
+        }
+    }
+    (cmd, out, inp)
 }
 
 fn parse_ip(s: &str) -> Option<[u8; 4]> {
@@ -292,12 +379,43 @@ impl Shell {
                 continue;
             }
 
-            if trimmed.contains('|') {
-                self.run_pipeline(&trimmed);
+            let (cmd, out, inp) = parse_redir(&trimmed);
+            if cmd.contains('|') {
+                self.run_pipeline(&cmd, out, inp);
             } else {
                 let mut w = self.writer();
-                let mut empty = SliceReader::empty();
-                self.execute(&trimmed, &mut empty, &mut w);
+                let mut empty_sr = SliceReader::empty();
+                let file_in: alloc::vec::Vec<u8>;
+                let mut sr_file: SliceReader<'_>;
+                let reader: &mut dyn Reader = if let Some(p) = &inp {
+                    match read_file_to_vec(p) {
+                        Some(v) => {
+                            file_in = v;
+                            sr_file = SliceReader::new(&file_in);
+                            &mut sr_file
+                        }
+                        None => {
+                            w.write_str("shell: ");
+                            w.write_str(p);
+                            w.write_str(": not found\r\n");
+                            continue;
+                        }
+                    }
+                } else {
+                    &mut empty_sr
+                };
+                if let Some((p, append)) = &out {
+                    let mut vw = OwnedVecWriter::new();
+                    self.execute(&cmd, reader, &mut vw);
+                    let data = vw.into_vec();
+                    if !write_file(p, *append, &data) {
+                        w.write_str("shell: ");
+                        w.write_str(p);
+                        w.write_str(": write failed\r\n");
+                    }
+                } else {
+                    self.execute(&cmd, reader, &mut w);
+                }
             }
             zenus_console::serial::flush_output_blocking();
 
@@ -454,34 +572,72 @@ impl Shell {
         }
     }
 
-    /// Runs a pipeline: `a | b | c`. Each stage's stdout is captured into a
-    /// buffer and fed as stdin to the next stage. Only commands that read stdin
-    /// (`cat`, `grep`) actually consume the previous stage's output; the rest
-    /// just pass their own output through. The final stage's stdout is printed
-    /// to the console.
-    fn run_pipeline(&mut self, line: &str) {
+    /// Runs a pipeline: `a | b | c`, with optional `>`/`>>` output redirection
+    /// on the final stage and optional `<` input redirection feeding the first
+    /// stage. Each stage's stdout is captured into a buffer and fed as stdin to
+    /// the next stage. Only commands that read stdin (`cat`, `grep`) actually
+    /// consume the previous stage's output; the rest pass their own output
+    /// through. The final stage's stdout goes to the console unless redirected.
+    fn run_pipeline(
+        &mut self,
+        line: &str,
+        out: Option<(alloc::string::String, bool)>,
+        inp: Option<alloc::string::String>,
+    ) {
         let mut segments = alloc::vec::Vec::new();
         for seg in line.split('|') {
             segments.push(seg.trim());
         }
+        let n = segments.len();
         let mut input: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        for seg in segments.iter() {
+        if let Some(p) = &inp {
+            match read_file_to_vec(p) {
+                Some(v) => input = v,
+                None => {
+                    let mut w = self.writer();
+                    w.write_str("shell: ");
+                    w.write_str(p);
+                    w.write_str(": not found\r\n");
+                    return;
+                }
+            }
+        }
+        let mut empty_sr = SliceReader::empty();
+        for (i, seg) in segments.iter().enumerate() {
             if seg.is_empty() {
                 continue;
             }
-            let mut output: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-            let mut reader = SliceReader::new(&input);
-            let mut writer = VecWriter { buf: &mut output };
-            self.execute(seg, &mut reader, &mut writer);
-            input = output;
-        }
-        // Emit the final stage's output to the console.
-        let mut w = self.writer();
-        for &b in &input {
-            w.write_byte(b);
-        }
-        if !input.is_empty() && input[input.len() - 1] != b'\n' {
-            w.write_byte(b'\n');
+            let is_last = i + 1 == n;
+            let mut sr;
+            let reader: &mut dyn Reader = if i == 0 && inp.is_some() {
+                sr = SliceReader::new(&input);
+                &mut sr
+            } else if i == 0 {
+                &mut empty_sr
+            } else {
+                sr = SliceReader::new(&input);
+                &mut sr
+            };
+            if is_last {
+                if let Some((p, append)) = &out {
+                    let mut vw = OwnedVecWriter::new();
+                    self.execute(seg, reader, &mut vw);
+                    let data = vw.into_vec();
+                    if !write_file(p, *append, &data) {
+                        let mut w = self.writer();
+                        w.write_str("shell: ");
+                        w.write_str(p);
+                        w.write_str(": write failed\r\n");
+                    }
+                } else {
+                    let mut w = self.writer();
+                    self.execute(seg, reader, &mut w);
+                }
+            } else {
+                let mut vw = OwnedVecWriter::new();
+                self.execute(seg, reader, &mut vw);
+                input = vw.into_vec();
+            }
         }
     }
 

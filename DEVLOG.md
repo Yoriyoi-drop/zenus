@@ -4046,3 +4046,34 @@ abstraksi `stdin`. Pipeline butuh dua hal: (a) trait `Reader`/stdin, dan
 **Test:** host tests baru di `common` (SliceReader), `cat` (stdin), `grep` (stdin +
 missing pattern). `make test-host` hijau; `make test` 27/27; boot + pipeline
 terverifikasi manual via `make iso` + QEMU serial TCP.
+
+## BUG-081 / fitur — shell redirection (`>`/`>>`/`<`)
+
+**Status:** RESOLVED + diverifikasi end-to-end (boot QEMU serial TCP; `echo … > f`,
+`echo … >> f`, `cat < f`, `cat f | grep x > g` semua menghasilkan isi file yang
+benar; target tidak ada → `write failed`/`not found` ditangani tanpa hang).
+**Keparahan:** roadmap gap — ROADMAP "Next" mencantumkan shell redirection sebagai
+*mising* setelah pipelines.
+
+**Akar:** shell Zenus sepenuhnya builtin dan hanya punya abstraksi `Writer`
+(tidak ada target file). Redirection butuh (a) `Reader` dari file untuk `<`, dan
+(b) `Writer` ke file VFS untuk `>`/`>>`.
+
+**Perubahan (`apps/src/shell.rs`):**
+- `OwnedVecWriter` (sebelumnya `VecWriter` borrow) — writer yang memilik buffer,
+  bisa di-drain setelah perintah jalan; dipakai untuk stage pipeline dan
+  redirection output.
+- `read_file_to_vec(path)` — baca file VFS seluruhnya ke `Vec<u8>`.
+- `write_file(path, append, data)` — `>` menghapus lalu `create_file` (truncate),
+  `>>` membuka/append di `size`; menulis via `node.fs.write(inode, off, data)`
+  (ext2 mengalokasi blok dan memperbarui `size`).
+- `parse_redir(line)` — ekstrak `>`/`>>`/`<` (tanpa quoting, serupa shell).
+- `run_pipeline` sekarang menerima `(out, inp)`: stage pertama membaca dari file
+  bila `<` ada, stage terakhir menulis ke file bila `>`/`>>` ada; intermediate
+  tetap buffering antar-stage.
+- `run()` mem-parse redirection sebelum dispatch; perintah tunggal dengan `<`
+  membaca dari file, dengan `>`/`>>` menangkap output lalu `write_file`.
+
+**Test:** tidak ada host test VFS-write (butuh VM); verifikasi manual via
+`make iso` + QEMU serial TCP (harness kirim perintah, strip echo, assert isi
+file). `make build`, `make test-host`, `make test` (27/27) tetap hijau.
