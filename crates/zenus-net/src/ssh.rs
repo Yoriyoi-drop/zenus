@@ -2,7 +2,7 @@ use crate::nic;
 use crate::socket;
 
 use zenus_sync::spinlock::SpinLock;
-use zutils_common::{Args, OutputBuf, Writer};
+use zutils_common::{Args, OutputBuf, SliceReader, Writer};
 
 const MAX_SSH_CLIENTS: usize = 4;
 const MAX_LINE: usize = 256;
@@ -521,7 +521,7 @@ fn execute_command(line: &str, output: &mut [u8; MAX_OUTPUT], out_len: &mut usiz
         "help" => zutils_help::execute(&mut out),
         "echo" => zutils_echo::execute(&args, &mut out),
         "ls" => zutils_ls::execute(&args, &mut out),
-        "cat" => zutils_cat::execute(&args, &mut out),
+        "cat" => zutils_cat::execute(&args, &mut SliceReader::empty(), &mut out),
         "uname" | "version" => zutils_uname::execute(&args, &mut out),
         "id" => zutils_id::execute(&args, &mut out),
         "whoami" => zutils_whoami::execute(&args, &mut out),

@@ -1,7 +1,7 @@
 use alloc::borrow::ToOwned;
 use alloc::format;
 use zenus_console::serial::SerialPort;
-use zutils_common::{Args, Writer};
+use zutils_common::{Args, Reader, SliceReader, Writer};
 
 const MAX_LINE: usize = 256;
 const PROMPT: &str = "zenus$ ";
@@ -188,6 +188,38 @@ impl Writer for ShellWriter {
     }
 }
 
+/// Captures everything written to it into a `Vec<u8>`. Used by the pipeline
+/// engine to hold each stage's stdout before feeding it to the next stage.
+struct VecWriter<'a> {
+    buf: &'a mut alloc::vec::Vec<u8>,
+}
+
+impl Writer for VecWriter<'_> {
+    fn write_str(&mut self, s: &str) {
+        self.buf.extend_from_slice(s.as_bytes());
+    }
+
+    fn write_byte(&mut self, b: u8) {
+        self.buf.push(b);
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        zutils_common::write_u64(self, v);
+    }
+
+    fn write_i64(&mut self, v: i64) {
+        zutils_common::write_i64(self, v);
+    }
+
+    fn write_hex(&mut self, v: u64) {
+        zutils_common::write_hex(self, v);
+    }
+
+    fn write_ip(&mut self, ip: [u8; 4]) {
+        zutils_common::write_ip(self, ip);
+    }
+}
+
 fn parse_ip(s: &str) -> Option<[u8; 4]> {
     let mut parts = [0u8; 4];
     let mut i = 0;
@@ -260,7 +292,13 @@ impl Shell {
                 continue;
             }
 
-            self.execute(&trimmed);
+            if trimmed.contains('|') {
+                self.run_pipeline(&trimmed);
+            } else {
+                let mut w = self.writer();
+                let mut empty = SliceReader::empty();
+                self.execute(&trimmed, &mut empty, &mut w);
+            }
             zenus_console::serial::flush_output_blocking();
 
             // housekeeping after command
@@ -372,43 +410,42 @@ impl Shell {
         }
     }
 
-    fn execute(&mut self, line: &str) {
+    fn execute(&mut self, line: &str, r: &mut dyn Reader, w: &mut dyn Writer) {
         let args = Args::parse(line);
-        let mut w = self.writer();
 
         match args.cmd {
-            "help" => zutils_help::execute(&mut w),
-            "echo" => zutils_echo::execute(&args, &mut w),
-            "ls" => zutils_ls::execute(&args, &mut w),
-            "cat" => zutils_cat::execute(&args, &mut w),
-            "clear" => zutils_clear::execute(&args, &mut w),
-            "timer" => zutils_timer::execute(&args, &mut w),
-            "ps" => zutils_ps::execute(&args, &mut w),
-            "kill" => zutils_kill::execute(&args, &mut w),
-            "mkdir" => zutils_mkdir::execute(&args, &mut w),
-            "rm" => zutils_rm::execute(&args, &mut w),
-            "touch" => zutils_touch::execute(&args, &mut w),
-            "ifconfig" => zutils_ifconfig::execute(&args, &mut w),
-            "meminfo" => zutils_meminfo::execute(&args, &mut w),
-            "reboot" => zutils_reboot::execute(&args, &mut w),
-            "shutdown" => zutils_shutdown::execute(&args, &mut w),
-            "uname" | "version" => zutils_uname::execute(&args, &mut w),
-            "dmesg" => zutils_dmesg::execute(&args, &mut w),
-            "id" => zutils_id::execute(&args, &mut w),
-            "whoami" => zutils_whoami::execute(&args, &mut w),
-            "chmod" => zutils_chmod::execute(&args, &mut w),
-            "cp" => zutils_cp::execute(&args, &mut w),
-            "mv" => zutils_mv::execute(&args, &mut w),
-            "mount" => zutils_mount::execute(&args, &mut w),
-            "pwd" => zutils_pwd::execute(&args, &mut w),
-            "df" => zutils_df::execute(&args, &mut w),
+            "help" => zutils_help::execute(&mut *w),
+            "echo" => zutils_echo::execute(&args, &mut *w),
+            "ls" => zutils_ls::execute(&args, &mut *w),
+            "cat" => zutils_cat::execute(&args, r, &mut *w),
+            "clear" => zutils_clear::execute(&args, &mut *w),
+            "timer" => zutils_timer::execute(&args, &mut *w),
+            "ps" => zutils_ps::execute(&args, &mut *w),
+            "kill" => zutils_kill::execute(&args, &mut *w),
+            "mkdir" => zutils_mkdir::execute(&args, &mut *w),
+            "rm" => zutils_rm::execute(&args, &mut *w),
+            "touch" => zutils_touch::execute(&args, &mut *w),
+            "ifconfig" => zutils_ifconfig::execute(&args, &mut *w),
+            "meminfo" => zutils_meminfo::execute(&args, &mut *w),
+            "reboot" => zutils_reboot::execute(&args, &mut *w),
+            "shutdown" => zutils_shutdown::execute(&args, &mut *w),
+            "uname" | "version" => zutils_uname::execute(&args, &mut *w),
+            "dmesg" => zutils_dmesg::execute(&args, &mut *w),
+            "id" => zutils_id::execute(&args, &mut *w),
+            "whoami" => zutils_whoami::execute(&args, &mut *w),
+            "chmod" => zutils_chmod::execute(&args, &mut *w),
+            "cp" => zutils_cp::execute(&args, &mut *w),
+            "mv" => zutils_mv::execute(&args, &mut *w),
+            "mount" => zutils_mount::execute(&args, &mut *w),
+            "pwd" => zutils_pwd::execute(&args, &mut *w),
+            "df" => zutils_df::execute(&args, &mut *w),
             "zerrors" => {
                 let mut s = SerialPort::new(0x3F8);
                 zenus_console::error::dump_error_catalog(&mut s);
                 zenus_console::serial::flush_output();
             }
             _ => {
-                if !self.execute_zenus_specific(line, &args, &mut w) {
+                if !self.execute_zenus_specific(line, &args, r, &mut *w) {
                     w.write_str("Unknown command: ");
                     w.write_str(args.cmd);
                     w.write_str("\r\n");
@@ -417,7 +454,44 @@ impl Shell {
         }
     }
 
-    fn execute_zenus_specific(&mut self, line: &str, args: &Args, w: &mut ShellWriter) -> bool {
+    /// Runs a pipeline: `a | b | c`. Each stage's stdout is captured into a
+    /// buffer and fed as stdin to the next stage. Only commands that read stdin
+    /// (`cat`, `grep`) actually consume the previous stage's output; the rest
+    /// just pass their own output through. The final stage's stdout is printed
+    /// to the console.
+    fn run_pipeline(&mut self, line: &str) {
+        let mut segments = alloc::vec::Vec::new();
+        for seg in line.split('|') {
+            segments.push(seg.trim());
+        }
+        let mut input: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        for seg in segments.iter() {
+            if seg.is_empty() {
+                continue;
+            }
+            let mut output: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            let mut reader = SliceReader::new(&input);
+            let mut writer = VecWriter { buf: &mut output };
+            self.execute(seg, &mut reader, &mut writer);
+            input = output;
+        }
+        // Emit the final stage's output to the console.
+        let mut w = self.writer();
+        for &b in &input {
+            w.write_byte(b);
+        }
+        if !input.is_empty() && input[input.len() - 1] != b'\n' {
+            w.write_byte(b'\n');
+        }
+    }
+
+    fn execute_zenus_specific(
+        &mut self,
+        line: &str,
+        args: &Args,
+        r: &mut dyn Reader,
+        w: &mut dyn Writer,
+    ) -> bool {
         match args.cmd {
             "bcache" => self.cmd_bcache(w),
             "fsck" => self.cmd_fsck(w),
@@ -456,7 +530,7 @@ impl Shell {
             "ns-info" => self.cmd_ns_info(w),
             "ns-sethost" => self.cmd_ns_sethost(line, w),
             "ns-clone" => self.cmd_ns_clone(line, w),
-            "grep" => zutils_grep::execute(args, w),
+            "grep" => zutils_grep::execute(args, r, &mut *w),
             "find" => zutils_find::execute(args, w),
             "du" => zutils_du::execute(args, w),
             "chown" => zutils_chown::execute(args, w),
@@ -485,7 +559,7 @@ impl Shell {
 
     // ── Zenus-specific commands (remain inline) ──
 
-    fn cmd_bcache(&mut self, w: &mut ShellWriter) {
+    fn cmd_bcache(&mut self, w: &mut dyn Writer) {
         let (hits, misses) = zenus_fs::block_cache::bc_stats();
         w.write_str("Block cache stats:\r\n");
         w.write_str("  Hits:   ");
@@ -502,7 +576,7 @@ impl Shell {
         }
     }
 
-    fn cmd_fsck(&mut self, w: &mut ShellWriter) {
+    fn cmd_fsck(&mut self, w: &mut dyn Writer) {
         let result = zenus_fs::ext2_fsck::fsck(0);
         w.write_str("fsck results:\r\n");
         if result.passed() {
@@ -531,7 +605,7 @@ impl Shell {
         }
     }
 
-    fn cmd_journal_init(&mut self, w: &mut ShellWriter) {
+    fn cmd_journal_init(&mut self, w: &mut dyn Writer) {
         let dev_id = 0;
         let start_block = 3000u64;
         let num_blocks = 16u64;
@@ -548,7 +622,7 @@ impl Shell {
         }
     }
 
-    fn cmd_journal_test(&mut self, w: &mut ShellWriter) {
+    fn cmd_journal_test(&mut self, w: &mut dyn Writer) {
         w.write_str("Journal test:\r\n");
         if !zenus_fs::journal::journal_begin() {
             w.write_str("  [FAIL] journal_begin\r\n");
@@ -620,11 +694,11 @@ impl Shell {
         }
     }
 
-    fn cmd_tcp_listen(&mut self, _line: &str, w: &mut ShellWriter) {
+    fn cmd_tcp_listen(&mut self, _line: &str, w: &mut dyn Writer) {
         w.write_str("tcp-listen: not available via serial shell\r\n");
     }
 
-    fn cmd_tcp_status(&mut self, w: &mut ShellWriter) {
+    fn cmd_tcp_status(&mut self, w: &mut dyn Writer) {
         w.write_str("TCP connections:\r\n");
         let status = zenus_net::tcp::tcp_status();
         for (i, conn) in status.iter().enumerate() {
@@ -644,31 +718,31 @@ impl Shell {
         }
     }
 
-    fn cmd_tcp_send(&mut self, _line: &str, w: &mut ShellWriter) {
+    fn cmd_tcp_send(&mut self, _line: &str, w: &mut dyn Writer) {
         w.write_str("tcp-send: not available via serial shell\r\n");
     }
 
-    fn cmd_tcp_echo(&mut self, w: &mut ShellWriter) {
+    fn cmd_tcp_echo(&mut self, w: &mut dyn Writer) {
         w.write_str("TCP echo server is running on port 7\r\n");
     }
 
-    fn cmd_tcp_connect(&mut self, _line: &str, w: &mut ShellWriter) {
+    fn cmd_tcp_connect(&mut self, _line: &str, w: &mut dyn Writer) {
         w.write_str("tcp-connect: not available via serial shell\r\n");
     }
 
-    fn cmd_udp_bind(&mut self, _line: &str, w: &mut ShellWriter) {
+    fn cmd_udp_bind(&mut self, _line: &str, w: &mut dyn Writer) {
         w.write_str("udp-bind: not available via serial shell\r\n");
     }
 
-    fn cmd_udp_send(&mut self, _line: &str, w: &mut ShellWriter) {
+    fn cmd_udp_send(&mut self, _line: &str, w: &mut dyn Writer) {
         w.write_str("udp-send: not available via serial shell\r\n");
     }
 
-    fn cmd_udp_recv(&mut self, _line: &str, w: &mut ShellWriter) {
+    fn cmd_udp_recv(&mut self, _line: &str, w: &mut dyn Writer) {
         w.write_str("udp-recv: not available via serial shell\r\n");
     }
 
-    fn cmd_dhcp(&mut self, w: &mut ShellWriter) {
+    fn cmd_dhcp(&mut self, w: &mut dyn Writer) {
         w.write_str("DHCP client starting...\r\n");
         let iface_idx = 1;
         if zenus_net::dhcp::dhcp_start(iface_idx) {
@@ -679,7 +753,7 @@ impl Shell {
         }
     }
 
-    fn cmd_dhcp_server(&mut self, w: &mut ShellWriter) {
+    fn cmd_dhcp_server(&mut self, w: &mut dyn Writer) {
         w.write_str("DHCP server running on 10.0.2.100-10.0.2.115\r\n");
         let iface_idx = 1;
         let iface = match zenus_net::nic::get_iface(iface_idx) {
@@ -698,15 +772,15 @@ impl Shell {
         w.write_str("\r\n");
     }
 
-    fn cmd_resolve(&mut self, _line: &str, w: &mut ShellWriter) {
+    fn cmd_resolve(&mut self, _line: &str, w: &mut dyn Writer) {
         w.write_str("resolve: not available via serial shell\r\n");
     }
 
-    fn cmd_readdev(&mut self, _line: &str, w: &mut ShellWriter) {
+    fn cmd_readdev(&mut self, _line: &str, w: &mut dyn Writer) {
         w.write_str("readdev: not available via serial shell\r\n");
     }
 
-    fn cmd_init_start(&mut self, w: &mut ShellWriter) {
+    fn cmd_init_start(&mut self, w: &mut dyn Writer) {
         if zenus_sched::init::init_system_start() {
             w.write_str("[ OK ] Init system started\r\n");
         } else {
@@ -714,12 +788,12 @@ impl Shell {
         }
     }
 
-    fn cmd_init_shutdown(&mut self, w: &mut ShellWriter) {
+    fn cmd_init_shutdown(&mut self, w: &mut dyn Writer) {
         w.write_str("Shutting down init system...\r\n");
         zenus_sched::init::init_shutdown();
     }
 
-    fn cmd_service_list(&mut self, w: &mut ShellWriter) {
+    fn cmd_service_list(&mut self, w: &mut dyn Writer) {
         let services = zenus_sched::init::service_list();
         if services.is_empty() {
             w.write_str("No services registered\r\n");
@@ -750,7 +824,7 @@ impl Shell {
         }
     }
 
-    fn cmd_service_start(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_service_start(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         let name = match args.get(1) {
             Some(n) => n,
@@ -770,7 +844,7 @@ impl Shell {
         }
     }
 
-    fn cmd_service_stop(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_service_stop(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         let name = match args.get(1) {
             Some(n) => n,
@@ -790,7 +864,7 @@ impl Shell {
         }
     }
 
-    fn cmd_service_restart(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_service_restart(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         let name = match args.get(1) {
             Some(n) => n,
@@ -810,7 +884,7 @@ impl Shell {
         }
     }
 
-    fn cmd_sysctl(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_sysctl(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         if args.args().is_empty() {
             let list = zenus_fs::sysctl::sysctl_list();
@@ -912,7 +986,7 @@ impl Shell {
         }
     }
 
-    fn cmd_pkg_install(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_pkg_install(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         let path = match args.get(1) {
             Some(p) => p,
@@ -946,7 +1020,7 @@ impl Shell {
         }
     }
 
-    fn cmd_pkg_list(&mut self, w: &mut ShellWriter) {
+    fn cmd_pkg_list(&mut self, w: &mut dyn Writer) {
         let pkgs = zenus_fs::pkg::pkg_list();
         if pkgs.is_empty() {
             w.write_str("No packages installed\r\n");
@@ -964,7 +1038,7 @@ impl Shell {
         }
     }
 
-    fn cmd_pkg_remove(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_pkg_remove(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         let name = match args.get(1) {
             Some(n) => n,
@@ -982,7 +1056,7 @@ impl Shell {
         }
     }
 
-    fn cmd_pkg_info(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_pkg_info(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         let name = match args.get(1) {
             Some(n) => n,
@@ -1012,12 +1086,12 @@ impl Shell {
         }
     }
 
-    fn cmd_watchdog_pet(&mut self, w: &mut ShellWriter) {
+    fn cmd_watchdog_pet(&mut self, w: &mut dyn Writer) {
         zenus_arch::watchdog::watchdog_pet();
         w.write_str("Watchdog petted\r\n");
     }
 
-    fn cmd_watchdog_status(&mut self, w: &mut ShellWriter) {
+    fn cmd_watchdog_status(&mut self, w: &mut dyn Writer) {
         let active = zenus_arch::watchdog::watchdog_is_active();
         let remaining = zenus_arch::watchdog::watchdog_get_remaining();
         let timeout = zenus_arch::watchdog::watchdog_get_timeout();
@@ -1033,7 +1107,7 @@ impl Shell {
         w.write_str("s\r\n");
     }
 
-    fn cmd_crashdump(&mut self, w: &mut ShellWriter) {
+    fn cmd_crashdump(&mut self, w: &mut dyn Writer) {
         match zenus_arch::crash::crash_dump_get() {
             Some(dump) => {
                 w.write_str("Crash dump available:\r\n");
@@ -1045,7 +1119,7 @@ impl Shell {
         }
     }
 
-    fn cmd_lockdep_status(&mut self, w: &mut ShellWriter) {
+    fn cmd_lockdep_status(&mut self, w: &mut dyn Writer) {
         let status = zenus_sync::lockdep::lockdep_status();
         w.write_str("Lockdep status:\r\n");
         w.write_str("  Classes: ");
@@ -1068,7 +1142,7 @@ impl Shell {
         }
     }
 
-    fn cmd_syslog(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_syslog(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         let count = args
             .get(1)
@@ -1096,7 +1170,7 @@ impl Shell {
         }
     }
 
-    fn cmd_ssh_start(&mut self, w: &mut ShellWriter) {
+    fn cmd_ssh_start(&mut self, w: &mut dyn Writer) {
         if zenus_net::ssh::SshServer::is_running() {
             w.write_str("SSH server is already running\r\n");
             return;
@@ -1108,7 +1182,7 @@ impl Shell {
         }
     }
 
-    fn cmd_ssh_status(&mut self, w: &mut ShellWriter) {
+    fn cmd_ssh_status(&mut self, w: &mut dyn Writer) {
         if zenus_net::ssh::SshServer::is_running() {
             let conns = zenus_net::ssh::SshServer::connection_count();
             w.write_str("SSH server: RUNNING\r\n");
@@ -1120,7 +1194,7 @@ impl Shell {
         }
     }
 
-    fn cmd_ns_info(&mut self, w: &mut ShellWriter) {
+    fn cmd_ns_info(&mut self, w: &mut dyn Writer) {
         let uts_ns = zenus_sched::scheduler::current_uts_ns();
         let pid_ns = zenus_sched::scheduler::current_pid_ns();
         let mnt_ns = zenus_sched::scheduler::current_mnt_ns();
@@ -1154,7 +1228,7 @@ impl Shell {
         w.write_str("\r\n");
     }
 
-    fn cmd_ns_sethost(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_ns_sethost(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         let hostname = match args.get(1) {
             Some(h) => h,
@@ -1173,7 +1247,7 @@ impl Shell {
         }
     }
 
-    fn cmd_ns_clone(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_ns_clone(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         let mut flags = 0u64;
         if args.has_flag("--uts") || args.has_flag("uts") {
@@ -1201,7 +1275,7 @@ impl Shell {
         w.write_str("Clone attempted\r\n");
     }
 
-    fn cmd_firewall_list(&mut self, w: &mut ShellWriter) {
+    fn cmd_firewall_list(&mut self, w: &mut dyn Writer) {
         let rules = zenus_net::firewall::firewall_list_rules();
         let mut found = false;
         for i in 0..zenus_net::firewall::MAX_RULES {
@@ -1258,7 +1332,7 @@ impl Shell {
         w.write_str("\r\n");
     }
 
-    fn cmd_firewall_add(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_firewall_add(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         if args.args().len() < 7 {
             w.write_str("Usage: firewall-add <action> <proto> <src> <src_mask> <dst> <dst_mask> <src_port> <dst_port> [established]\r\n");
@@ -1334,7 +1408,7 @@ impl Shell {
         }
     }
 
-    fn cmd_firewall_remove(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_firewall_remove(&mut self, line: &str, w: &mut dyn Writer) {
         let args = Args::parse(line);
         let idx = match args.get(1).and_then(|s| s.parse::<usize>().ok()) {
             Some(i) => i,
@@ -1350,7 +1424,7 @@ impl Shell {
         }
     }
 
-    fn cmd_run(&mut self, line: &str, w: &mut ShellWriter) {
+    fn cmd_run(&mut self, line: &str, w: &mut dyn Writer) {
         // Detect trailing "&" for background execution.
         let background = line.ends_with('&');
         let line = line.trim_end_matches('&').trim_end();
@@ -1732,11 +1806,11 @@ impl Shell {
         }
     }
 
-    fn cmd_jobs(&mut self, w: &mut ShellWriter) {
+    fn cmd_jobs(&mut self, w: &mut dyn Writer) {
         w.write_str("Background jobs: (not yet tracked)\r\n");
     }
 
-    fn cmd_pipe_test(&mut self, w: &mut ShellWriter) {
+    fn cmd_pipe_test(&mut self, w: &mut dyn Writer) {
         w.write_str("Running pipe test...\r\n");
         // Delegate to the `run` command infrastructure
         self.cmd_run("run /initrd/bin/pipe_test", w);

@@ -12,6 +12,43 @@ pub trait Writer {
     fn write_ip(&mut self, ip: [u8; 4]);
 }
 
+/// Source of input for a command. The shell feeds pipeline stages through a
+/// `SliceReader` over the previous stage's captured output; interactive use
+/// passes an empty reader so `cat`/`grep` with no file simply produce nothing
+/// instead of blocking on the console.
+pub trait Reader {
+    fn read_byte(&mut self) -> Option<u8>;
+}
+
+/// In-memory reader over a byte slice. Used to connect pipeline stages: the
+/// bytes one stage wrote become the stdin of the next.
+pub struct SliceReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> SliceReader<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        SliceReader { data, pos: 0 }
+    }
+
+    pub fn empty() -> SliceReader<'static> {
+        SliceReader { data: &[], pos: 0 }
+    }
+}
+
+impl Reader for SliceReader<'_> {
+    fn read_byte(&mut self) -> Option<u8> {
+        if self.pos < self.data.len() {
+            let b = self.data[self.pos];
+            self.pos += 1;
+            Some(b)
+        } else {
+            None
+        }
+    }
+}
+
 pub fn write_u64<W: Writer + ?Sized>(w: &mut W, v: u64) {
     if v == 0 {
         w.write_byte(b'0');
@@ -167,3 +204,40 @@ pub fn writeln<W: Writer + ?Sized>(w: &mut W, s: &str) {
     w.write_str(s);
     w.write_byte(b'\n');
 }
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    #[test]
+    fn slice_reader_yields_all_bytes_then_none() {
+        let data = [1u8, 2, 3];
+        let mut r = SliceReader::new(&data);
+        assert_eq!(r.read_byte(), Some(1));
+        assert_eq!(r.read_byte(), Some(2));
+        assert_eq!(r.read_byte(), Some(3));
+        assert_eq!(r.read_byte(), None);
+        assert_eq!(r.read_byte(), None);
+    }
+
+    #[test]
+    fn empty_reader_returns_none() {
+        let mut r = SliceReader::empty();
+        assert_eq!(r.read_byte(), None);
+        assert_eq!(r.read_byte(), None);
+    }
+
+    #[test]
+    fn output_buf_collects_str_and_byte() {
+        let mut store = [0u8; 16];
+        let len;
+        {
+            let mut buf = OutputBuf::new(&mut store);
+            buf.write_str("hi");
+            buf.write_byte(b'!');
+            len = buf.len();
+        }
+        assert_eq!(&store[..len], b"hi!");
+    }
+}
+

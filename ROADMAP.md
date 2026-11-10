@@ -76,7 +76,7 @@ smoke test that requires the *ordinary* kernel to reach the shell prompt
   `syscall_dispatch6` (blocked syscalls return -EPERM). There is one set, not
   Linux's permitted/effective/inheritable split, and no `capset`-style way to
   add a capability back.
-- **Shell** — ~90 builtins, no job control, no pipelines, no redirection.
+- **Shell** — ~90 builtins, pipelines (`|`) between builtins (in-memory stage buffering), no job control, no redirection.
 
 ## Known broken
 
@@ -134,7 +134,10 @@ advertised but unenforced, and the hierarchy is flat. Next:
 
 2. **Userspace, next step.** `zenus-libc` exists with syscall wrappers.
    What is missing: a full libc port (printf, string, memory functions),
-   ELF userspace loading from initrd, and shell pipelines (`|`).
+   ELF userspace loading from initrd, and shell redirection (`>`/`<`) and job
+   control. Shell pipelines (`|`) between builtins now work: stages are buffered
+   in memory and stages that read stdin (`cat`, `grep`) consume the previous
+   stage's output.
 3. **Capabilities, next step.** The set exists and is consulted by six syscalls
    and by every file-permission check. What is missing is a way to *gain*
    privilege deliberately (no `capset`, no file capabilities on an ELF).

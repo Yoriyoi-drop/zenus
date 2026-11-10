@@ -4010,3 +4010,39 @@ perubahan.
 - `[FUZZ] EXIT code=0`
 
 **Test:** tidak ada test host yang menutupi (butuh VM — pengecualian yang diizinkan per AGENTS.md untuk hardware/scheduler). Verifikasi manual via `make fuzz-smoke` dan membaca log serial.
+
+## BUG-080 / fitur — shell pipelines (`|`) between builtins
+
+**Status:** RESOLVED + diverifikasi end-to-end (boot QEMU, kirim perintah lewat
+serial TCP, `echo … | grep …` dan pipeline multi-stage `echo … | grep … | grep …`
+menghasilkan output yang benar; tidak ada kebocoran stdin bila tidak cocok).
+**Keparahan:** roadmap gap — ROADMAP.md secara eksplisit mencantumkan shell
+"no pipelines" sebagai *missing*.
+
+**Akar:** shell Zenus sepenuhnya *builtin* (tidak spawn proses eksternal), dan
+builtin inti (`cat`, `grep`) hanya membaca dari argumen path file — tidak ada
+abstraksi `stdin`. Pipeline butuh dua hal: (a) trait `Reader`/stdin, dan
+(b) parser `|` di shell dengan buffering antar-stage in-memory.
+
+**Perubahan:**
+- `zutils/crates/common/src/lib.rs`: tambah `pub trait Reader { fn read_byte(&mut self) -> Option<u8>; }`
+  dan `pub struct SliceReader<'a>` (reader in-memory, `empty()` + `new()`). Pure,
+  bisa di-host-test.
+- `zutils/crates/cat/src/lib.rs`: `execute(args, r: &mut dyn Reader, w)` — bila
+  tidak ada argumen path, baca dari reader (POSIX `cat` tanpa operand menyalin stdin).
+- `zutils/crates/grep/src/lib.rs`: `execute(args, r, w)` — bila tidak ada argumen
+  file, baca dari reader; masih wajib pattern.
+- `apps/src/shell.rs`:
+  - `replace_all` `w: &mut ShellWriter` → `w: &mut dyn Writer` (43+ `cmd_*`
+    methods berubah secara mekanis; pipeline kini bisa menangkap output via `VecWriter`).
+  - `execute(&mut self, line, r: &mut dyn Reader, w: &mut dyn Writer)`.
+  - tambah `VecWriter` (impl `Writer`, buffer `Vec<u8>`).
+  - tambah `run_pipeline`: split `|`, jalankan tiap stage; stage tengah/akhir
+    memakai `SliceReader` dari buffer stage sebelumnya, stage terakhir menulis ke
+    writer asli. Stage tunggal jatuh ke `execute` normal (stdin = `SliceReader::empty()`).
+  - `run()` mem-branch `|` sebelum `execute`.
+- `crates/zenus-net/src/ssh.rs`: caller `cat::execute` diperbarui (tambah `SliceReader::empty()`).
+
+**Test:** host tests baru di `common` (SliceReader), `cat` (stdin), `grep` (stdin +
+missing pattern). `make test-host` hijau; `make test` 27/27; boot + pipeline
+terverifikasi manual via `make iso` + QEMU serial TCP.
