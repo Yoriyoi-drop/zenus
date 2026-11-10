@@ -7,9 +7,10 @@ Zenus is an x86_64 kernel written in Rust (`no_std`). It boots via Limine
 fuzzing framework and a host-side unit-test suite.
 
 State: **pre-alpha**. Core subsystems work; the security model is incomplete
-(no KPTI, and a capability set with no way to gain one back — see
-`SECURITY.md`) and several subsystems are deliberately shallow (see "Known
-shallow spots" below).
+(KPTI is active for syscall isolation but there is no driver isolation or
+cryptography, and the capability set can only ever shrink — see `SECURITY.md`)
+and several subsystems are deliberately shallow (see "Known shallow spots"
+below).
 
 ## Build and run
 
@@ -103,7 +104,11 @@ Do not assume these work; read the code first.
   * QEMU's default `qemu64` model has neither feature, so any test target that
     should exercise them needs `-cpu max` — `make test` and the fuzz targets
     have it.
-- No KPTI, no secure boot, no crypto library.
+- KPTI is **active** for syscall isolation (per-task user view, CR3 swapped on
+  syscall entry/return, scheduler keeps the CR3 slots current) — but user mode
+  returns from syscalls with `IF=0`, so ring-3 interrupts are avoided and the
+  IDT trampoline stubs are a belt-and-suspenders path. No secure boot, no crypto
+  library.
 - Capabilities exist but are **one set per task** (`zenus_sched::caps`), not
   Linux's permitted/effective/inheritable split. `mount`, `umount2`,
   `sethostname`, `setuid`, `setgid`, `kill` and every file-permission check

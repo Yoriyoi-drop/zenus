@@ -397,9 +397,12 @@ pub extern "C" fn entry() -> ! {
     cpu::init();
     frame_allocator::global_init(mem_regions, hhdm_offset);
     paging::init(hhdm_offset);
-    // Publish the kernel CR3 where the KPTI entry stub can read it. Nothing
-    // executes the stub yet (KPTI is not active), but the slot must not be 0
-    // when it is.
+    // Publish the kernel CR3 where the KPTI path can read it. syscall_entry
+    // swaps CR3 to the kernel view on entry and back to the per-task user view
+    // on return, and the scheduler keeps the per-CPU slots current on every
+    // context switch — KPTI is active for syscall isolation. init_trampoline
+    // also publishes the slot the (built but not-normally-used) IDT trampoline
+    // stubs would read, so it must not be 0.
     zenus_mem::kpti::init_trampoline();
     frame_allocator::reserve_boot_stack(hhdm_offset);
     interrupts::init();

@@ -5,9 +5,11 @@
 Zenus is an educational kernel. It has real memory-safety discipline in the
 Rust sense (ownership, no `unsafe` without a comment explaining it) and real
 effort in its parsers, but its **security model is not complete**. SMEP and
-SMAP are enabled at boot, which closes the largest hole in the list below, but
-there is still no KPTI, no capability system and no driver isolation. Do not
-deploy this on anything you care about.
+SMAP are enabled at boot, KPTI is active for syscall isolation, and there is a
+per-task capability set — but the capability set can only ever shrink (it is a
+single set per task, not Linux's permitted/effective/inheritable split), there
+is no driver isolation, and there is no cryptography. Do not deploy this on
+anything you care about.
 
 ## What is actually enforced
 
@@ -15,7 +17,7 @@ deploy this on anything you care about.
 |---|---|
 | User/kernel address separation | Yes — per-process CR3, `USER_SPACE_LIMIT = 0x0000_8000_0000_0000` |
 | SMEP / SMAP | **Enabled at boot**, in `apps::entry`. Needs a CPU (or QEMU `-cpu max`) that has them |
-| KPTI | Partially implemented: stage 1 (user view) and stage 2 (trampoline + CR3 swap) are built and tested, but not yet active; IDT entry stubs (stage 3) and scheduler activation (stage 4) remain |
+| KPTI | **Active** for syscall isolation: `syscall_entry` switches CR3 to the per-task kernel view on entry and back to the per-task user view on return (`crates/zenus-arch/src/cpu.rs`), and the scheduler updates the per-CPU CR3 slots on every context switch (`set_user_cr3_slot`/`set_kernel_cr3_slot` in `zenus-sched`). A user task runs with the kernel half of its address space unmapped. User mode returns from syscalls with `IF=0`, so ring-3 interrupts are avoided and the IDT trampoline stubs (built in `.text.kpti`) are a belt-and-suspenders path rather than the active one |
 | Unix permission bits (uid/gid/mode) | Yes, in `vfs::access_check` |
 | Path confinement | Components are bounded (`MAX_PATH_SEGMENTS`), over-long paths are refused, `..` cannot escape a mount prefix |
 | Package install confinement | `.zpk` entry paths are validated before anything is written |
@@ -28,14 +30,23 @@ deploy this on anything you care about.
 
 ## The gaps that matter
 
-### 1. KPTI partially implemented
+### 1. KPTI is active for syscall isolation
 
-SMEP and SMAP are on. Page-table isolation has its first two stages: `zenus_mem::kpti`
-builds a per-task user view with the kernel half zeroed, and a page-aligned
-trampoline (`.text.kpti`/`.kpti_data`) can switch CR3. It is **not active yet**:
-a user CR3 still has the whole kernel mapped until entry stubs for the 256 IDT
-vectors and the syscall/return paths are in place. KPTI (or PCID-based
-trampolines) is the usual answer and is in progress.
+SMEP and SMAP are on. `zenus_mem::kpti` builds a per-task user view with the
+kernel half zeroed, and `syscall_entry` (`crates/zenus-arch/src/cpu.rs`) swaps
+CR3 between that user view and the kernel view on every syscall entry and return.
+The scheduler keeps the per-CPU CR3 slots current on each context switch, so a
+running user task never has the kernel mapped. This is the active isolation
+mechanism.
+
+The IDT trampoline stubs in `.text.kpti` (one per vector, switching CR3 before
+jumping to the real handler) are built and the slot is published at boot, but
+they are **not the path that user mode normally takes into the kernel**: user
+mode returns from syscalls with `IF=0`, so the timer and other interrupts do
+not fire while a task is in ring 3. That is deliberate — it keeps the simpler
+syscall-only CR3 switch as the single isolation boundary and avoids needing the
+full 256-vector trampoline to be live. If user mode ever runs with `IF=1`, the
+trampoline stubs would need to be the real IDT targets.
 
 Two supporting rules the kernel relies on, both enforced by the source rather
 than by the hardware:

@@ -4077,3 +4077,24 @@ benar; target tidak ada → `write failed`/`not found` ditangani tanpa hang).
 **Test:** tidak ada host test VFS-write (butuh VM); verifikasi manual via
 `make iso` + QEMU serial TCP (harness kirim perintah, strip echo, assert isi
 file). `make build`, `make test-host`, `make test` (27/27) tetap hijau.
+
+## BUG-082 — dokumentasi KPTI tidak konsisten dengan kode (reconcile)
+
+**Status:** RESOLVED (dokumentasi). **Keparahan:** rendah — dokumen salah, bukan
+bug kernel.
+
+**Temuan:** `apps/src/lib.rs:401` (komentar) dan `SECURITY.md` menyatakan KPTI
+"not yet active / no KPTI", padahal kode sebenarnya mengaktifkannya:
+`syscall_entry` (`crates/zenus-arch/src/cpu.rs`) menukar CR3 ke kernel view saat
+masuk syscall dan ke per-task user view saat kembali; scheduler memanggil
+`set_user_cr3_slot`/`set_kernel_cr3_slot` tiap context switch
+(`zenus-sched/src/scheduler.rs:1213`, `:1983`). Tiap task punya `user_cr3`
+(`build_user_view`). User mode kembali dari syscall dengan `IF=0`, sehingga
+interrupt ring-3 dihindari dan stub trampoline IDT `.text.kpti` adalah jalur
+cadangan, bukan jalur aktif.
+
+**Perubahan:** `SECURITY.md` (paragraf pembuka, tabel "What is actually
+enforced", section "KPTI is active for syscall isolation"), `AGENTS.md`
+(paragraf State dan "Known shallow spots"), dan komentar `apps/src/lib.rs:401`
+direvisi agar menyatakan KPTI aktif untuk isolasi syscall, konsisten dengan
+`ROADMAP.md` dan kode. Tidak ada perubahan fungsional; `make build` hijau.
