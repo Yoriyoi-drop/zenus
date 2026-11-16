@@ -1546,6 +1546,225 @@ impl ZnfFile {
     }
 }
 
+/// Magic number for a Zenus Native Archive: bytes `5A 4E 41 52` = "ZNAR".
+pub const ZNA_MAGIC: u32 = 0x52_41_4E_5A; // little-endian "ZNAR"
+
+/// Current `.zna` format version.
+pub const ZNA_VERSION: u16 = 1;
+
+/// Compression algorithm advertised in the archive header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ZnaCompression {
+    None = 0,
+    Lz4 = 1,
+    Zstd = 2,
+    Brotli = 3,
+    Xz = 4,
+}
+
+impl ZnaCompression {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ZnaCompression::None),
+            1 => Some(ZnaCompression::Lz4),
+            2 => Some(ZnaCompression::Zstd),
+            3 => Some(ZnaCompression::Brotli),
+            4 => Some(ZnaCompression::Xz),
+            _ => None,
+        }
+    }
+}
+
+/// One file entry inside the archive: name, offset, compressed size,
+/// uncompressed size, compression method, and checksum.
+#[derive(Debug, Clone)]
+pub struct ZnaEntry {
+    pub name: String,
+    pub offset: u64,
+    pub compressed_size: u64,
+    pub uncompressed_size: u64,
+    pub compression: ZnaCompression,
+    pub checksum: [u8; 16],
+}
+
+/// Fixed-size archive header after magic/version.
+#[derive(Debug, Clone)]
+pub struct ZnaArchiveHeader {
+    pub version: u16,
+    pub compression: ZnaCompression,
+    pub encryption: u8,
+    pub total_files: u16,
+    pub total_size: u64,
+    pub compressed_size: u64,
+}
+
+/// A parsed `.zna` universal archive.
+#[derive(Debug, Clone)]
+pub struct ZnaFile {
+    pub header: ZnaArchiveHeader,
+    pub entries: Vec<ZnaEntry>,
+    pub metadata: Vec<u8>,
+    pub checksum_table: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub raw: Vec<u8>,
+}
+
+/// Errors while parsing or validating a `.zna` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZnaError {
+    TooSmall,
+    BadMagic { found: u32 },
+    BadVersion { found: u16 },
+    Truncated,
+    InvalidUtf8,
+    InvalidCompression(u8),
+    EntryOutOfBounds,
+}
+
+impl fmt::Display for ZnaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZnaError::TooSmall => write!(f, "zna: file too small to contain a header"),
+            ZnaError::BadMagic { found } => {
+                write!(f, "zna: invalid magic number 0x{:08X}, expected 0x{:08X} (\"ZNAR\")", found, ZNA_MAGIC)
+            }
+            ZnaError::BadVersion { found } => {
+                write!(f, "zna: unsupported format version {}, expected {}", found, ZNA_VERSION)
+            }
+            ZnaError::Truncated => write!(f, "zna: file truncated while reading tables"),
+            ZnaError::InvalidUtf8 => write!(f, "zna: entry name or metadata is not valid UTF-8"),
+            ZnaError::InvalidCompression(c) => write!(f, "zna: invalid compression {}", c),
+            ZnaError::EntryOutOfBounds => write!(f, "zna: entry data extends past end of archive"),
+        }
+    }
+}
+
+impl ZnaFile {
+    /// Parse a `.zna` image from a byte buffer. Pure, host-testable parser:
+    /// validates magic/version, reads the fixed header, then the file index
+    /// table (each: u16 name length + name + u64 offset + u64 compressed size
+    /// + u64 uncompressed size + u8 compression + 16-byte checksum), followed
+    /// by the metadata, checksum table, and signature blobs.
+    pub fn parse(data: &[u8]) -> Result<Self, ZnaError> {
+        if data.len() < 8 {
+            return Err(ZnaError::TooSmall);
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != ZNA_MAGIC {
+            return Err(ZnaError::BadMagic { found: magic });
+        }
+
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != ZNA_VERSION {
+            return Err(ZnaError::BadVersion { found: version });
+        }
+
+        if data.len() < 24 {
+            return Err(ZnaError::TooSmall);
+        }
+
+        let hdr_version = u16::from_le_bytes(data[6..8].try_into().unwrap());
+        let compression_raw = data[8];
+        let compression = ZnaCompression::from_u8(compression_raw)
+            .ok_or(ZnaError::InvalidCompression(compression_raw))?;
+        let encryption = data[9];
+        let total_files = u16::from_le_bytes(data[10..12].try_into().unwrap());
+        let total_size = u64::from_le_bytes(data[12..20].try_into().unwrap());
+        let compressed_size = u64::from_le_bytes(data[20..28].try_into().unwrap());
+
+        let header = ZnaArchiveHeader {
+            version: hdr_version,
+            compression,
+            encryption,
+            total_files,
+            total_size,
+            compressed_size,
+        };
+
+        let mut off = 28usize;
+        let mut entries = Vec::with_capacity(total_files as usize);
+        for _ in 0..total_files as usize {
+            if off + 2 > data.len() {
+                return Err(ZnaError::Truncated);
+            }
+            let nlen = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+            off += 2;
+            if off + nlen > data.len() {
+                return Err(ZnaError::Truncated);
+            }
+            let name = core::str::from_utf8(&data[off..off + nlen])
+                .map_err(|_| ZnaError::InvalidUtf8)?
+                .to_string();
+            off += nlen;
+            if off + 30 > data.len() {
+                return Err(ZnaError::Truncated);
+            }
+            let offset = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+            let compressed_size = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
+            let uncompressed_size =
+                u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
+            let comp_raw = data[off + 24];
+            let comp = ZnaCompression::from_u8(comp_raw).ok_or(ZnaError::InvalidCompression(comp_raw))?;
+            let mut checksum = [0u8; 16];
+            checksum.copy_from_slice(&data[off + 25..off + 41]);
+            off += 41;
+            if offset as u128 + compressed_size as u128 > data.len() as u128 {
+                return Err(ZnaError::EntryOutOfBounds);
+            }
+            entries.push(ZnaEntry {
+                name,
+                offset,
+                compressed_size,
+                uncompressed_size,
+                compression: comp,
+                checksum,
+            });
+        }
+
+        // metadata blob: u64 size + bytes
+        let metadata = read_size_prefixed_blob(data, &mut off)?;
+        // checksum table blob: u64 size + bytes
+        let checksum_table = read_size_prefixed_blob(data, &mut off)?;
+        // signature blob: u64 size + bytes
+        let signature = read_size_prefixed_blob(data, &mut off)?;
+
+        Ok(ZnaFile {
+            header,
+            entries,
+            metadata,
+            checksum_table,
+            signature,
+            raw: Vec::from(data),
+        })
+    }
+
+    /// Return the (compressed) data bytes for the entry with the given name,
+    /// if present.
+    pub fn entry_data(&self, name: &str) -> Option<&[u8]> {
+        let entry = self.entries.iter().find(|e| e.name == name)?;
+        let start = entry.offset as usize;
+        let end = start + entry.compressed_size as usize;
+        self.raw.get(start..end)
+    }
+}
+
+/// Read a size-prefixed blob (u64 length + bytes) at `*off`, advancing `*off`.
+fn read_size_prefixed_blob(data: &[u8], off: &mut usize) -> Result<Vec<u8>, ZnaError> {
+    if *off + 8 > data.len() {
+        return Err(ZnaError::Truncated);
+    }
+    let size = u64::from_le_bytes(data[*off..*off + 8].try_into().unwrap()) as usize;
+    *off += 8;
+    if *off + size > data.len() {
+        return Err(ZnaError::Truncated);
+    }
+    let blob = Vec::from(&data[*off..*off + size]);
+    *off += size;
+    Ok(blob)
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
@@ -2296,6 +2515,125 @@ mod host_tests {
         match ZnfFile::parse(&img) {
             Err(ZnfError::BlobOutOfBounds) => {}
             other => panic!("expected BlobOutOfBounds, got {:?}", other),
+        }
+    }
+
+    fn make_valid_zna() -> Vec<u8> {
+        // Layout: header(28) + file index + metadata blob + checksum table
+        // blob + signature blob + file data (referenced by entry offset).
+        let file_data = b"archive contents here";
+        let metadata = b"created=2026-01-01"; // 18 bytes
+        let checksum_table = b"cksum-table"; // 11 bytes
+        let signature = b"ARCHIVE-SIG"; // 13 bytes
+
+        let total_files = 1u16;
+        let entry_name = b"data.bin";
+        let entry_name_len = entry_name.len() as u16;
+        // entry: name_len(2) + name + offset(8) + compressed(8) + uncompressed(8)
+        // + comp(1) + checksum(16) = 51
+        let entry_size = 2 + entry_name_len as usize + 8 + 8 + 8 + 1 + 16;
+
+        // Blobs come right after the entry table.
+        let blobs_start = 28 + entry_size as u64; // 79
+        let meta_off = blobs_start as u64;
+        let csum_off = meta_off + 8 + metadata.len() as u64;
+        let sig_off = csum_off + 8 + checksum_table.len() as u64;
+        // File data goes after all blobs.
+        let data_off = sig_off + 8 + signature.len() as u64;
+        let total = data_off + file_data.len() as u64;
+
+        let mut buf = Vec::with_capacity(total as usize);
+        buf.extend_from_slice(&ZNA_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&ZNA_VERSION.to_le_bytes());
+        // header: hdr_version, compression(None), encryption(0), total_files,
+        // total_size, compressed_size
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.push(ZnaCompression::None as u8);
+        buf.push(0); // encryption none
+        buf.extend_from_slice(&total_files.to_le_bytes());
+        buf.extend_from_slice(&(file_data.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&(file_data.len() as u64).to_le_bytes());
+        // file index
+        buf.extend_from_slice(&entry_name_len.to_le_bytes());
+        buf.extend_from_slice(entry_name);
+        buf.extend_from_slice(&data_off.to_le_bytes());
+        buf.extend_from_slice(&(file_data.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&(file_data.len() as u64).to_le_bytes());
+        buf.push(ZnaCompression::None as u8);
+        buf.extend_from_slice(&[0u8; 16]); // checksum
+        // metadata blob: size + bytes
+        buf.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
+        buf.extend_from_slice(metadata);
+        // checksum table blob: size + bytes
+        buf.extend_from_slice(&(checksum_table.len() as u64).to_le_bytes());
+        buf.extend_from_slice(checksum_table);
+        // signature blob: size + bytes
+        buf.extend_from_slice(&(signature.len() as u64).to_le_bytes());
+        buf.extend_from_slice(signature);
+        // file data (referenced by entry offset)
+        buf.extend_from_slice(file_data);
+        assert_eq!(buf.len(), total as usize);
+        buf
+    }
+
+    #[test]
+    fn zna_parses_valid_archive() {
+        let img = make_valid_zna();
+        let f = ZnaFile::parse(&img).expect("valid zna should parse");
+        assert_eq!(f.header.version, 1);
+        assert_eq!(f.header.compression, ZnaCompression::None);
+        assert_eq!(f.header.total_files, 1);
+        assert_eq!(f.entries.len(), 1);
+        assert_eq!(f.entries[0].name, "data.bin");
+        assert_eq!(f.entries[0].compression, ZnaCompression::None);
+        assert_eq!(f.metadata, b"created=2026-01-01");
+        assert_eq!(f.checksum_table, b"cksum-table");
+        assert_eq!(f.signature, b"ARCHIVE-SIG");
+        assert_eq!(f.entry_data("data.bin"), Some(&b"archive contents here"[..]));
+        assert_eq!(f.entry_data("missing.bin"), None);
+    }
+
+    #[test]
+    fn zna_rejects_bad_magic() {
+        let mut img = make_valid_zna();
+        img[0] = 0x00;
+        match ZnaFile::parse(&img) {
+            Err(ZnaError::BadMagic { found }) => assert_ne!(found, ZNA_MAGIC),
+            other => panic!("expected BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn zna_rejects_bad_version() {
+        let mut img = make_valid_zna();
+        img[4] = 9;
+        match ZnaFile::parse(&img) {
+            Err(ZnaError::BadVersion { found }) => assert_eq!(found, 9),
+            other => panic!("expected BadVersion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn zna_rejects_invalid_compression() {
+        let mut img = make_valid_zna();
+        // compression byte at offset 8
+        img[8] = 99;
+        match ZnaFile::parse(&img) {
+            Err(ZnaError::InvalidCompression(c)) => assert_eq!(c, 99),
+            other => panic!("expected InvalidCompression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn zna_rejects_entry_out_of_bounds() {
+        let mut img = make_valid_zna();
+        // entry compressed_size: header(28) + name_len(2) + name(8) + offset(8)
+        let size_offset = 28 + 2 + 8 + 8;
+        let size_bytes = u64::to_le_bytes(img.len() as u64 + 1000);
+        img[size_offset..size_offset + 8].copy_from_slice(&size_bytes);
+        match ZnaFile::parse(&img) {
+            Err(ZnaError::EntryOutOfBounds) => {}
+            other => panic!("expected EntryOutOfBounds, got {:?}", other),
         }
     }
 }

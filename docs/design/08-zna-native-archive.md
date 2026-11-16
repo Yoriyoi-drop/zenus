@@ -404,6 +404,23 @@ Karena memiliki indeks, aplikasi tidak perlu mengekstrak seluruh arsip hanya unt
 
 Dengan posisi ini, `.zna` menjadi format arsip serbaguna Zenus OS. Berbeda dari `.znpkg` yang berfokus pada instalasi perangkat lunak, `.zna` ditujukan sebagai format penyimpanan umum yang cepat, aman, dan fleksibel untuk segala jenis data di dalam ekosistem Zenus.
 
+---
+
+## Status implementasi
+
+Format `.zna` sudah diimplementasi sebagai **stak parser stub** di `crates/zenus-formats` (bersama `.zns`, `.znl`, `.znd`, `.znm`, `.znpkg`, `.zni`, dan `.znf`):
+
+- `ZNA_MAGIC = 0x52414E5A` ("ZNAR", little-endian), `ZNA_VERSION = 1`
+- `ZnaArchiveHeader`: versi, kompresi (None/LZ4/Zstd/Brotli/XZ), enkripsi, jumlah berkas, ukuran total, ukuran terkompresi
+- `ZnaEntry`: nama, offset, ukuran terkompresi, ukuran tidak terkompresi, kompresi, checksum 16-byte
+- `ZnaFile`: entri, metadata, tabel checksum, dan signature
+- `ZnaFile::parse(data)`: parser murni (`no_std`, host-testable) yang memvalidasi magic/versi, lalu membaca header, indeks berkas, dan blob berukuran-panjang-berawalan (metadata, checksum table, signature)
+- `ZnaFile::entry_data(name)`: ambil data berkas berdasarkan nama
+- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 40 tes (6 `.zns` + 5 `.znl` + 5 `.znd` + 4 `.znm` + 5 `.znpkg` + 5 `.zni` + 5 `.znf` + 5 `.zna`), semua lulus (`cargo test -p zenus-formats`)
+- Bare-metal build: lolos `cargo build -p zenus-formats --target x86_64-unknown-none`
+
+Belum diimplementasi (jadwal berikutnya): dekompresi aktual (LZ4/Zstd/XZ/Brotli), dekripsi, verifikasi checksum per berkas, verifikasi tanda tangan digital, dan ekstraksi ke filesystem.
+
 
 `.znc` adalah **Zenus Native Configuration**, yaitu format konfigurasi standar untuk seluruh komponen Zenus OS. Kalau `.zns` menentukan **apa yang dijalankan**, maka `.znc` menentukan **bagaimana aplikasi atau sistem tersebut berjalan**. Banyak sistem operasi memakai campuran `.ini`, `.conf`, `.cfg`, `.xml`, `.json`, `.yaml`, yang akhirnya membuat pengembang harus mengingat lima sintaks berbeda hanya untuk mengubah angka `timeout`. Zenus dapat menghindari kekacauan itu dengan satu format konfigurasi resmi.
 
