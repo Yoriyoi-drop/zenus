@@ -550,16 +550,18 @@ Dengan desain seperti ini, `.zns` bukan sekadar "file yang bisa dijalankan", tet
 
 ## Status implementasi
 
-Format `.zns` sudah diimplementasi sebagai **stak parser stub** di `crates/zenus-formats`:
+Format `.zns` sudah diimplementasi sebagai **parser dan loader penuh** di `crates/zenus-formats`:
 
-- `ZNS_MAGIC = 0x58534E5A` ("ZNSX", little-endian)
+- `ZNS_MAGIC = 0x58534E5A` ("ZNSX", little-endian), `ZNS_VERSION = 1`
 - `ZnsExecHeader`: entry point, arsitektur (AEX32/AEX64), ukuran image, jumlah segment/section, flags
 - `ZnsProgramHeader`: offset, vaddr, paddr, filesz, memsz, flags (R/W/X)
 - `ZnsFile::parse(data)`: parser murni (`no_std`, host-tesable) yang memvalidasi magic, versi, dan tabel segment, serta menolak file yang rusak/truncated
-- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 6 tes, semua lulus (`cargo test -p zenus-formats`)
+- `ZnsFile::load()`: memuat semua segment ke memori, menyalin data terinisialisasi, dan zero-fill `memsz` ke atas `filesz` (BSS); mengembalikan `ZnsLoadedImage` dengan entry point, daftar `ZnsSegmentLoad` (vaddr, memsz, filesz, flags, data), dan total ukuran memori; pure `no_std`, host-tesable
+- `ZnsSegmentLoad`: satu segment siap dipetakan ke address space
+- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 53 tes (termasuk 3 tes loader: `zns_loads_valid_image`, `zns_load_zero_fills_bss`, `zns_load_entry_point_preserved`), semua lulus (`cargo test -p zenus-formats`)
 - Bare-metal build: lolos `cargo build -p zenus-formats --target x86_64-unknown-none`
 
-Belum diimplementasi (jadwal berikutnya): pemetaan segment ke memori, relokasi ASLR, verifikasi tanda tangan digital, dan pemuatan section `.text`/`.rodata`/`.data`/`.bss` ke address space tugas.
+Belum diimplementasi (jadwal berikutnya): pemetaan segment ke page table tugas, relokasi ASLR, verifikasi tanda tangan digital, dan pemuatan section `.text`/`.rodata`/`.data`/`.bss` ke address space tugas melalui kernel loader.
 
 
 Kalau `.znl` menjadi library resmi Zenus OS, maka perannya setara dengan **DLL** di Windows atau **shared object (.so)** di Linux. Bedanya, format ini bisa dirancang sejak awal agar lebih aman, lebih cepat dimuat, dan lebih mudah dikelola. Karena jika setiap aplikasi membawa salinan fungsi yang sama, RAM akan bekerja lembur hanya untuk mengulang pekerjaan yang identik. Komputer memang sabar, tetapi bukan berarti harus diperlakukan begitu.

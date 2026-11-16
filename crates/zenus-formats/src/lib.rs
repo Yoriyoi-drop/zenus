@@ -221,6 +221,96 @@ impl ZnsFile {
     }
 }
 
+/// Error while loading a `.zns` image into memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZnsLoadError {
+    Parse(ZnsError),
+    SegmentOverflow { index: usize },
+    AllocationFailed,
+    InvalidAddress { index: usize, reason: &'static str },
+}
+
+impl fmt::Display for ZnsLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZnsLoadError::Parse(e) => write!(f, "zns load: parse error: {}", e),
+            ZnsLoadError::SegmentOverflow { index } => {
+                write!(f, "zns load: segment {} overflows address space", index)
+            }
+            ZnsLoadError::AllocationFailed => {
+                write!(f, "zns load: memory allocation failed")
+            }
+            ZnsLoadError::InvalidAddress { index, reason } => {
+                write!(f, "zns load: segment {} invalid: {}", index, reason)
+            }
+        }
+    }
+}
+
+/// One segment ready to be mapped into an address space.
+#[derive(Debug, Clone)]
+pub struct ZnsSegmentLoad {
+    pub vaddr: u64,
+    pub memsz: u64,
+    pub filesz: u64,
+    pub flags: ZnsSegFlags,
+    pub data: Vec<u8>, // initialized data (filesz bytes), zero-filled to memsz
+}
+
+/// A loaded `.zns` image, ready to be mapped into a task's address space.
+#[derive(Debug, Clone)]
+pub struct ZnsLoadedImage {
+    pub entry_point: u64,
+    pub segments: Vec<ZnsSegmentLoad>,
+    pub total_memsz: u64,
+}
+
+impl ZnsFile {
+    /// Load all segments into memory. Returns a `ZnsLoadedImage` with each
+    /// segment's initialized data copied into a `Vec` and zero-filled out to
+    /// `memsz`. This is pure (`no_std`) and host-testable: it allocates memory
+    /// but does not touch page tables or the MMU.
+    pub fn load(&self) -> Result<ZnsLoadedImage, ZnsLoadError> {
+        let mut segments = Vec::with_capacity(self.segments.len());
+        let mut total_memsz: u64 = 0;
+
+        for (i, seg) in self.segments.iter().enumerate() {
+            let data = match self.segment_data(i) {
+                Some(d) => Vec::from(d),
+                None => return Err(ZnsLoadError::SegmentOverflow { index: i }),
+            };
+
+            if seg.memsz < seg.filesz {
+                return Err(ZnsLoadError::AllocationFailed);
+            }
+
+            // Zero-fill out to memsz.
+            let mut full = Vec::with_capacity(seg.memsz as usize);
+            full.extend_from_slice(&data);
+            full.resize(seg.memsz as usize, 0);
+
+            segments.push(ZnsSegmentLoad {
+                vaddr: seg.vaddr,
+                memsz: seg.memsz,
+                filesz: seg.filesz,
+                flags: seg.flags,
+                data: full,
+            });
+
+            let seg_end = seg.vaddr.checked_add(seg.memsz).ok_or_else(|| {
+                ZnsLoadError::SegmentOverflow { index: i }
+            })?;
+            total_memsz = total_memsz.max(seg_end);
+        }
+
+        Ok(ZnsLoadedImage {
+            entry_point: self.header.entry_point,
+            segments,
+            total_memsz,
+        })
+    }
+}
+
 /// Magic number for a Zenus Native Library: bytes `5A 4E 4C 42` = "ZNLB".
 pub const ZNL_MAGIC: u32 = 0x42_4C_4E_5A; // little-endian "ZNLB"
 
@@ -2187,6 +2277,65 @@ mod host_tests {
         assert_eq!(f.segments.len(), 1);
         assert_eq!(f.segments[0].flags, ZnsSegFlags::RX);
         assert_eq!(f.segment_data(0).map(|d| d.len()), Some(4096));
+    }
+
+    #[test]
+    fn zns_loads_valid_image() {
+        let img = make_valid_image();
+        let f = ZnsFile::parse(&img).expect("valid image should parse");
+        let loaded = f.load().expect("valid image should load");
+        assert_eq!(loaded.entry_point, 0x0040_0000);
+        assert_eq!(loaded.segments.len(), 1);
+        assert_eq!(loaded.segments[0].vaddr, 0x0040_0000);
+        assert_eq!(loaded.segments[0].filesz, 4096);
+        assert_eq!(loaded.segments[0].memsz, 4096);
+        assert_eq!(loaded.segments[0].flags, ZnsSegFlags::RX);
+        assert_eq!(loaded.segments[0].data.len(), 4096);
+        assert_eq!(loaded.total_memsz, 0x0040_0000 + 4096);
+    }
+
+    #[test]
+    fn zns_load_zero_fills_bss() {
+        // Build an image where memsz > filesz (BSS).
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&ZNS_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&ZNS_VERSION.to_le_bytes());
+        buf.extend_from_slice(&0x0040_0000u64.to_le_bytes()); // entry
+        buf.extend_from_slice(&64u16.to_le_bytes()); // arch
+        buf.extend_from_slice(&0u64.to_le_bytes()); // image_size
+        buf.extend_from_slice(&1u16.to_le_bytes()); // segment_count
+        buf.extend_from_slice(&0u16.to_le_bytes()); // section_count
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        // segment: offset 0x1000, vaddr 0x400000, filesz 16, memsz 64, RW
+        buf.extend_from_slice(&0x1000u64.to_le_bytes());
+        buf.extend_from_slice(&0x0040_0000u64.to_le_bytes());
+        buf.extend_from_slice(&0x0040_0000u64.to_le_bytes());
+        buf.extend_from_slice(&16u64.to_le_bytes()); // filesz
+        buf.extend_from_slice(&64u64.to_le_bytes()); // memsz > filesz
+        buf.extend_from_slice(&[ZnsSegFlags::RW.bits(), 0, 0, 0, 0, 0, 0, 0]);
+        buf.resize(0x1000 + 16, 0);
+        // fill first 16 bytes with non-zero
+        for i in 0..16 {
+            buf[0x1000 + i] = i as u8;
+        }
+
+        let f = ZnsFile::parse(&buf).expect("valid image should parse");
+        let loaded = f.load().expect("should load");
+        assert_eq!(loaded.segments[0].data.len(), 64); // memsz
+        for i in 0..16 {
+            assert_eq!(loaded.segments[0].data[i], i as u8);
+        }
+        for i in 16..64 {
+            assert_eq!(loaded.segments[0].data[i], 0); // zero-filled BSS
+        }
+    }
+
+    #[test]
+    fn zns_load_entry_point_preserved() {
+        let img = make_valid_image();
+        let f = ZnsFile::parse(&img).expect("valid image should parse");
+        let loaded = f.load().expect("should load");
+        assert_eq!(loaded.entry_point, f.header.entry_point);
     }
 
     #[test]
