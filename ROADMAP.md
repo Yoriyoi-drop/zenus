@@ -114,9 +114,9 @@ Do not build on these without reading the code:
 | Thing | Reality |
 |---|---|
 | SSH | `ZENUS_SSH/1.0`, a homegrown line protocol with a weak keystream and a default password |
-| Capabilities | A per-task set exists and gates `mount`/`umount2`/`sethostname`; it is one set, not the Linux three, and file access still keys off uid. No `capset`-style way to add a capability back. |
+| Capabilities | A per-task set exists and gates `mount`/`umount2`/`sethostname`; it is one set, not the Linux three, and file access still keys off uid. `CapSet::with()` stub exists in `crates/zenus-sched/src/caps.rs` but is not wired to any syscall — nothing can add a capability back at runtime yet. |
 | Container runtime / OCI | Does not exist |
-| Cryptography | No library at all |
+| Cryptography | No library at all — `crates/zenus-crypto` provides a stub (`hash`, `encrypt`, `decrypt`, `hmac`, `fill_random` all return `NotImplemented`) with host tests. |
 | Userspace | `zenus-libc` provides syscall wrappers and errno constants. Shell `run` supports `&` for background execution. Ring-3 programs are built from `zutils/` by hand. |
 | Drivers | AHCI SATA driver added alongside PIO ATA and virtio-blk. NVMe and USB not yet implemented. |
 
