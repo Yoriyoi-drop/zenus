@@ -469,6 +469,22 @@ Agar `.znc` benar-benar menjadi format konfigurasi modern, saya menyarankan dua 
 
 Pendekatan ini mirip dengan bagaimana beberapa ekosistem memiliki format yang mudah ditulis manusia sekaligus representasi biner yang dioptimalkan untuk performa, sehingga Zenus mendapatkan kemudahan penggunaan tanpa mengorbankan efisiensi.
 
+---
+
+## Status implementasi
+
+Format `.znc` sudah diimplementasi sebagai **stak parser stub** di `crates/zenus-formats` (bersama `.zns`, `.znl`, `.znd`, `.znm`, `.znpkg`, `.zni`, `.znf`, dan `.zna`):
+
+- `ZNC_MAGIC = 0x46434E5A` ("ZNCF", little-endian), `ZNC_VERSION = 1`
+- `ZncConfigHeader`: versi, jumlah entri, offset/ukuran metadata
+- `ZncEntry`: kunci, tipe nilai (String/Integer/Boolean/Float/Blob/List/Section), dan nilai bytes
+- `ZncFile::parse(data)`: parser murni (`no_std`, host-testable) yang memvalidasi magic/versi, lalu membaca tabel entri dan blob metadata
+- `ZncFile::get(key)`, `::get_str(key)`, `::get_bool(key)`, `::get_int(key)`: aksesor nilai bertipe
+- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 45 tes (6 `.zns` + 5 `.znl` + 5 `.znd` + 4 `.znm` + 5 `.znpkg` + 5 `.zni` + 5 `.znf` + 5 `.zna` + 5 `.znc`), semua lulus (`cargo test -p zenus-formats`)
+- Bare-metal build: lolos `cargo build -p zenus-formats --target x86_64-unknown-none`
+
+Belum diimplementasi (jadwal berikutnya): skema validasi, inheritance antar konfigurasi, live reload, enkripsi nilai sensitif, dan tanda tangan digital.
+
 
 `.znlog` adalah **Zenus Native Log**, yaitu format log standar di seluruh Zenus OS. Jika `.znc` mengatur konfigurasi sistem, maka `.znlog` mencatat **semua peristiwa (events)** yang terjadi di sistem. Daripada setiap aplikasi membuat format log sendiri yang harus dibaca dengan doa dan keberanian, Zenus dapat memiliki satu standar log yang konsisten.
 

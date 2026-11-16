@@ -1765,6 +1765,206 @@ fn read_size_prefixed_blob(data: &[u8], off: &mut usize) -> Result<Vec<u8>, ZnaE
     Ok(blob)
 }
 
+/// Magic number for a Zenus Native Configuration: bytes `5A 4E 43 46` = "ZNCF".
+pub const ZNC_MAGIC: u32 = 0x46_43_4E_5A; // little-endian "ZNCF"
+
+/// Current `.znc` format version.
+pub const ZNC_VERSION: u16 = 1;
+
+/// Value type advertised in a configuration entry header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ZncValueType {
+    String = 0,
+    Integer = 1,
+    Boolean = 2,
+    Float = 3,
+    Blob = 4,
+    List = 5,
+    Section = 6,
+}
+
+impl ZncValueType {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ZncValueType::String),
+            1 => Some(ZncValueType::Integer),
+            2 => Some(ZncValueType::Boolean),
+            3 => Some(ZncValueType::Float),
+            4 => Some(ZncValueType::Blob),
+            5 => Some(ZncValueType::List),
+            6 => Some(ZncValueType::Section),
+            _ => None,
+        }
+    }
+}
+
+/// One configuration entry: key, value type, and value bytes.
+#[derive(Debug, Clone)]
+pub struct ZncEntry {
+    pub key: String,
+    pub value_type: ZncValueType,
+    pub value: Vec<u8>,
+}
+
+/// Fixed-size configuration header after magic/version.
+#[derive(Debug, Clone)]
+pub struct ZncConfigHeader {
+    pub version: u16,
+    pub entry_count: u16,
+    pub metadata_offset: u64,
+    pub metadata_size: u64,
+}
+
+/// A parsed `.znc` configuration file.
+#[derive(Debug, Clone)]
+pub struct ZncFile {
+    pub header: ZncConfigHeader,
+    pub entries: Vec<ZncEntry>,
+    pub metadata: Vec<u8>,
+    pub raw: Vec<u8>,
+}
+
+/// Errors while parsing or validating a `.znc` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZncError {
+    TooSmall,
+    BadMagic { found: u32 },
+    BadVersion { found: u16 },
+    Truncated,
+    InvalidUtf8,
+    InvalidValueType(u8),
+    EntryOutOfBounds,
+}
+
+impl fmt::Display for ZncError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZncError::TooSmall => write!(f, "znc: file too small to contain a header"),
+            ZncError::BadMagic { found } => {
+                write!(f, "znc: invalid magic number 0x{:08X}, expected 0x{:08X} (\"ZNCF\")", found, ZNC_MAGIC)
+            }
+            ZncError::BadVersion { found } => {
+                write!(f, "znc: unsupported format version {}, expected {}", found, ZNC_VERSION)
+            }
+            ZncError::Truncated => write!(f, "znc: file truncated while reading tables"),
+            ZncError::InvalidUtf8 => write!(f, "znc: key or metadata is not valid UTF-8"),
+            ZncError::InvalidValueType(t) => write!(f, "znc: invalid value type {}", t),
+            ZncError::EntryOutOfBounds => write!(f, "znc: entry value extends past end of config"),
+        }
+    }
+}
+
+impl ZncFile {
+    /// Parse a `.znc` image from a byte buffer. Pure, host-testable parser:
+    /// validates magic/version, reads the fixed header, then the entry table
+    /// (each: u16 key length + key + u8 value type + u64 value length + value
+    /// bytes), followed by the metadata blob.
+    pub fn parse(data: &[u8]) -> Result<Self, ZncError> {
+        if data.len() < 8 {
+            return Err(ZncError::TooSmall);
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != ZNC_MAGIC {
+            return Err(ZncError::BadMagic { found: magic });
+        }
+
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != ZNC_VERSION {
+            return Err(ZncError::BadVersion { found: version });
+        }
+
+        if data.len() < 26 {
+            return Err(ZncError::TooSmall);
+        }
+
+        let hdr_version = u16::from_le_bytes(data[6..8].try_into().unwrap());
+        let entry_count = u16::from_le_bytes(data[8..10].try_into().unwrap());
+        let metadata_offset = u64::from_le_bytes(data[10..18].try_into().unwrap());
+        let metadata_size = u64::from_le_bytes(data[18..26].try_into().unwrap());
+
+        let header = ZncConfigHeader {
+            version: hdr_version,
+            entry_count,
+            metadata_offset,
+            metadata_size,
+        };
+
+        let mut off = 26usize;
+        let mut entries = Vec::with_capacity(entry_count as usize);
+        for _ in 0..entry_count as usize {
+            if off + 2 > data.len() {
+                return Err(ZncError::Truncated);
+            }
+            let klen = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+            off += 2;
+            if off + klen > data.len() {
+                return Err(ZncError::Truncated);
+            }
+            let key = core::str::from_utf8(&data[off..off + klen])
+                .map_err(|_| ZncError::InvalidUtf8)?
+                .to_string();
+            off += klen;
+            if off + 9 > data.len() {
+                return Err(ZncError::Truncated);
+            }
+            let vtype_raw = data[off];
+            off += 1;
+            let vtype =
+                ZncValueType::from_u8(vtype_raw).ok_or(ZncError::InvalidValueType(vtype_raw))?;
+            let vlen = u64::from_le_bytes(data[off..off + 8].try_into().unwrap()) as usize;
+            off += 8;
+            if off + vlen > data.len() {
+                return Err(ZncError::EntryOutOfBounds);
+            }
+            let value = Vec::from(&data[off..off + vlen]);
+            off += vlen;
+            entries.push(ZncEntry { key, value_type: vtype, value });
+        }
+
+        let metadata = if metadata_offset as usize + metadata_size as usize > data.len() {
+            return Err(ZncError::Truncated);
+        } else {
+            Vec::from(&data[metadata_offset as usize
+                ..(metadata_offset + metadata_size) as usize])
+        };
+
+        Ok(ZncFile {
+            header,
+            entries,
+            metadata,
+            raw: Vec::from(data),
+        })
+    }
+
+    /// Return the value for the given configuration key, if present.
+    pub fn get(&self, key: &str) -> Option<&[u8]> {
+        self.entries.iter().find(|e| e.key == key).map(|e| e.value.as_slice())
+    }
+
+    /// Return the value as a `&str` if it is a string entry and valid UTF-8.
+    pub fn get_str(&self, key: &str) -> Option<&str> {
+        self.get(key).and_then(|v| core::str::from_utf8(v).ok())
+    }
+
+    /// Return the value as a `bool` if it is a boolean entry (non-zero = true).
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        self.get(key).map(|v| !v.is_empty() && v[0] != 0)
+    }
+
+    /// Return the value as an `i64` if it is an integer entry (little-endian).
+    pub fn get_int(&self, key: &str) -> Option<i64> {
+        self.get(key).and_then(|v| {
+            if v.len() >= 8 {
+                Some(i64::from_le_bytes(v[..8].try_into().ok()?))
+            } else {
+                None
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
@@ -2633,6 +2833,113 @@ mod host_tests {
         img[size_offset..size_offset + 8].copy_from_slice(&size_bytes);
         match ZnaFile::parse(&img) {
             Err(ZnaError::EntryOutOfBounds) => {}
+            other => panic!("expected EntryOutOfBounds, got {:?}", other),
+        }
+    }
+
+    fn make_valid_znc() -> Vec<u8> {
+        // Layout: header(26) + entry table + metadata blob.
+        let meta = b"config-version=1";
+
+        let entry_count = 2u16;
+        let key1 = b"timeout";
+        let key1_len = key1.len() as u16;
+        let val1 = b"30"; // integer string "30"
+        let val1_len = val1.len() as u64;
+        let key2 = b"debug";
+        let key2_len = key2.len() as u16;
+        let val2 = [1u8]; // boolean true
+        let val2_len = val2.len() as u64;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&ZNC_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&ZNC_VERSION.to_le_bytes());
+        // header: hdr_version, entry_count, metadata_offset, metadata_size
+        // metadata will be written after entries
+        let entry_table_size = (2 + key1_len as usize + 1 + 8 + val1_len as usize)
+            + (2 + key2_len as usize + 1 + 8 + val2_len as usize);
+        let meta_offset = 26 + entry_table_size as u64;
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&entry_count.to_le_bytes());
+        buf.extend_from_slice(&meta_offset.to_le_bytes());
+        buf.extend_from_slice(&(meta.len() as u64).to_le_bytes());
+        // entry 1: timeout = "30" (String)
+        buf.extend_from_slice(&key1_len.to_le_bytes());
+        buf.extend_from_slice(key1);
+        buf.push(ZncValueType::String as u8);
+        buf.extend_from_slice(&val1_len.to_le_bytes());
+        buf.extend_from_slice(val1);
+        // entry 2: debug = true (Boolean)
+        buf.extend_from_slice(&key2_len.to_le_bytes());
+        buf.extend_from_slice(key2);
+        buf.push(ZncValueType::Boolean as u8);
+        buf.extend_from_slice(&val2_len.to_le_bytes());
+        buf.extend_from_slice(&val2);
+        // metadata blob
+        buf.extend_from_slice(meta);
+        buf
+    }
+
+    #[test]
+    fn znc_parses_valid_config() {
+        let img = make_valid_znc();
+        let f = ZncFile::parse(&img).expect("valid znc should parse");
+        assert_eq!(f.header.version, 1);
+        assert_eq!(f.header.entry_count, 2);
+        assert_eq!(f.entries.len(), 2);
+        assert_eq!(f.metadata, b"config-version=1");
+        assert_eq!(f.get("timeout"), Some(&b"30"[..]));
+        assert_eq!(f.get("debug"), Some(&[1u8][..]));
+        assert_eq!(f.get_str("timeout"), Some("30"));
+        assert_eq!(f.get_str("debug"), Some("\u{1}"));
+        assert_eq!(f.get_bool("debug"), Some(true));
+        assert_eq!(f.get_bool("timeout"), Some(true));
+        assert_eq!(f.get_int("timeout"), None);
+        assert_eq!(f.get_int("debug"), None);
+        assert_eq!(f.get("missing"), None);
+    }
+
+    #[test]
+    fn znc_rejects_bad_magic() {
+        let mut img = make_valid_znc();
+        img[0] = 0x00;
+        match ZncFile::parse(&img) {
+            Err(ZncError::BadMagic { found }) => assert_ne!(found, ZNC_MAGIC),
+            other => panic!("expected BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znc_rejects_bad_version() {
+        let mut img = make_valid_znc();
+        img[4] = 9;
+        match ZncFile::parse(&img) {
+            Err(ZncError::BadVersion { found }) => assert_eq!(found, 9),
+            other => panic!("expected BadVersion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znc_rejects_invalid_value_type() {
+        let mut img = make_valid_znc();
+        // entry 1 value type byte: header(26) + key1_len(2) + key1(7)
+        let vtype_offset = 26 + 2 + 7;
+        img[vtype_offset] = 99;
+        match ZncFile::parse(&img) {
+            Err(ZncError::InvalidValueType(t)) => assert_eq!(t, 99),
+            other => panic!("expected InvalidValueType, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znc_rejects_entry_out_of_bounds() {
+        let mut img = make_valid_znc();
+        // entry 1 value length: header(26) + key1_len(2) + key1(7) + vtype(1)
+        let len_offset = 26 + 2 + 7 + 1;
+        let len_bytes = u64::to_le_bytes(img.len() as u64 + 1000);
+        img[len_offset..len_offset + 8].copy_from_slice(&len_bytes);
+        match ZncFile::parse(&img) {
+            Err(ZncError::EntryOutOfBounds) => {}
             other => panic!("expected EntryOutOfBounds, got {:?}", other),
         }
     }
