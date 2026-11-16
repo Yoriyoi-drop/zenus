@@ -6,6 +6,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -220,6 +221,230 @@ impl ZnsFile {
     }
 }
 
+/// Magic number for a Zenus Native Library: bytes `5A 4E 4C 42` = "ZNLB".
+pub const ZNL_MAGIC: u32 = 0x42_4C_4E_5A; // little-endian "ZNLB"
+
+/// Current `.znl` format version.
+pub const ZNL_VERSION: u16 = 1;
+
+/// Build type advertised in a library header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ZnlBuild {
+    Debug = 0,
+    Release = 1,
+}
+
+impl ZnlBuild {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ZnlBuild::Debug),
+            1 => Some(ZnlBuild::Release),
+            _ => None,
+        }
+    }
+}
+
+/// Library flags (shared, plugin, system).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZnlFlags {
+    pub shared: bool,
+    pub plugin: bool,
+    pub system: bool,
+}
+
+impl ZnlFlags {
+    pub const NONE: Self = Self { shared: false, plugin: false, system: false };
+    pub const SHARED: Self = Self { shared: true, plugin: false, system: false };
+
+    pub fn bits(self) -> u8 {
+        let mut b = 0u8;
+        if self.shared { b |= 1; }
+        if self.plugin { b |= 2; }
+        if self.system { b |= 4; }
+        b
+    }
+}
+
+/// Fixed-size library header after magic/version.
+#[derive(Debug, Clone)]
+pub struct ZnlLibraryHeader {
+    pub abi_version: u16,
+    pub arch: ZnsArch,
+    pub build: ZnlBuild,
+    pub flags: ZnlFlags,
+    pub export_count: u16,
+    pub import_count: u16,
+}
+
+/// One exported symbol: name + address.
+#[derive(Debug, Clone)]
+pub struct ZnlExport {
+    pub name: String,
+    pub address: u64,
+}
+
+/// One imported symbol: name, address, and (optional) library it comes from.
+#[derive(Debug, Clone)]
+pub struct ZnlImport {
+    pub name: String,
+    pub address: u64,
+    pub library: Option<String>,
+}
+
+/// A parsed `.znl` shared library.
+#[derive(Debug, Clone)]
+pub struct ZnlFile {
+    pub header: ZnlLibraryHeader,
+    pub exports: Vec<ZnlExport>,
+    pub imports: Vec<ZnlImport>,
+    pub raw: Vec<u8>,
+}
+
+/// Errors while parsing or validating a `.znl` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZnlError {
+    TooSmall,
+    BadMagic { found: u32 },
+    BadVersion { found: u16 },
+    Truncated,
+    InvalidUtf8,
+    UnsupportedArch(u16),
+    InvalidBuild(u8),
+}
+
+impl fmt::Display for ZnlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZnlError::TooSmall => write!(f, "znl: file too small to contain a header"),
+            ZnlError::BadMagic { found } => {
+                write!(f, "znl: invalid magic number 0x{:08X}, expected 0x{:08X} (\"ZNLB\")", found, ZNL_MAGIC)
+            }
+            ZnlError::BadVersion { found } => {
+                write!(f, "znl: unsupported format version {}, expected {}", found, ZNL_VERSION)
+            }
+            ZnlError::Truncated => write!(f, "znl: file truncated while reading tables"),
+            ZnlError::InvalidUtf8 => write!(f, "znl: symbol name is not valid UTF-8"),
+            ZnlError::UnsupportedArch(a) => write!(f, "znl: unsupported architecture {}", a),
+            ZnlError::InvalidBuild(b) => write!(f, "znl: invalid build type {}", b),
+        }
+    }
+}
+
+impl ZnlFile {
+    /// Parse a `.znl` image from a byte buffer. Pure, host-testable parser:
+    /// validates magic/version, reads the fixed header, then the export and
+    /// import symbol tables (each entry: u64 address + u16 name length + name
+    /// bytes + u8 library-length for imports).
+    pub fn parse(data: &[u8]) -> Result<Self, ZnlError> {
+        if data.len() < 8 {
+            return Err(ZnlError::TooSmall);
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != ZNL_MAGIC {
+            return Err(ZnlError::BadMagic { found: magic });
+        }
+
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != ZNL_VERSION {
+            return Err(ZnlError::BadVersion { found: version });
+        }
+
+        if data.len() < 22 {
+            return Err(ZnlError::TooSmall);
+        }
+
+        let abi_version = u16::from_le_bytes(data[6..8].try_into().unwrap());
+        let arch_raw = u16::from_le_bytes(data[8..10].try_into().unwrap());
+        let arch = ZnsArch::from_u16(arch_raw).ok_or(ZnlError::UnsupportedArch(arch_raw))?;
+        let build_raw = data[10];
+        let build = ZnlBuild::from_u8(build_raw).ok_or(ZnlError::InvalidBuild(build_raw))?;
+        let flags_raw = data[11];
+        let flags = ZnlFlags {
+            shared: flags_raw & 1 != 0,
+            plugin: flags_raw & 2 != 0,
+            system: flags_raw & 4 != 0,
+        };
+        let export_count = u16::from_le_bytes(data[12..14].try_into().unwrap());
+        let import_count = u16::from_le_bytes(data[14..16].try_into().unwrap());
+
+        let header = ZnlLibraryHeader {
+            abi_version,
+            arch,
+            build,
+            flags,
+            export_count,
+            import_count,
+        };
+
+        let mut off = 16usize;
+        let mut exports = Vec::with_capacity(export_count as usize);
+        for i in 0..export_count as usize {
+            let addr = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+            off += 8;
+            let nlen = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+            off += 2;
+            if off + nlen > data.len() {
+                return Err(ZnlError::Truncated);
+            }
+            let name = core::str::from_utf8(&data[off..off + nlen])
+                .map_err(|_| ZnlError::InvalidUtf8)?
+                .to_string();
+            off += nlen;
+            exports.push(ZnlExport { name, address: addr });
+            let _ = i;
+        }
+
+        let mut imports = Vec::with_capacity(import_count as usize);
+        for i in 0..import_count as usize {
+            let addr = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+            off += 8;
+            let nlen = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+            off += 2;
+            if off + nlen > data.len() {
+                return Err(ZnlError::Truncated);
+            }
+            let name = core::str::from_utf8(&data[off..off + nlen])
+                .map_err(|_| ZnlError::InvalidUtf8)?
+                .to_string();
+            off += nlen;
+            let lib_len = data[off] as usize;
+            off += 1;
+            let library = if off + lib_len > data.len() {
+                return Err(ZnlError::Truncated);
+            } else if lib_len == 0 {
+                None
+            } else {
+                Some(
+                    core::str::from_utf8(&data[off..off + lib_len])
+                        .map_err(|_| ZnlError::InvalidUtf8)?
+                        .to_string(),
+                )
+            };
+            off += lib_len;
+            imports.push(ZnlImport {
+                name,
+                address: addr,
+                library,
+            });
+            let _ = i;
+        }
+
+        Ok(ZnlFile {
+            header,
+            exports,
+            imports,
+            raw: Vec::from(data),
+        })
+    }
+
+    /// Look up an exported symbol by name, returning its address if present.
+    pub fn export_address(&self, name: &str) -> Option<u64> {
+        self.exports.iter().find(|e| e.name == name).map(|e| e.address)
+    }
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
@@ -331,5 +556,90 @@ mod host_tests {
         assert_eq!(ZnsSegFlags::RW.bits(), 0b011);
         assert_eq!(ZnsSegFlags::R.bits(), 0b001);
         assert_eq!(ZnsSegFlags::NONE.bits(), 0);
+    }
+
+    fn make_valid_znl() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&ZNL_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&ZNL_VERSION.to_le_bytes());
+        // abi_version, arch(Aex64), build(Release), flags(shared),
+        // export_count=1, import_count=1
+        buf.extend_from_slice(&5u16.to_le_bytes());
+        buf.extend_from_slice(&64u16.to_le_bytes());
+        buf.extend_from_slice(&[ZnlBuild::Release as u8]);
+        buf.extend_from_slice(&[ZnlFlags::SHARED.bits()]);
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        // export: address 0x1000, name "libgraphics_draw" (17 bytes)
+        buf.extend_from_slice(&0x1000u64.to_le_bytes());
+        let name = b"libgraphics_draw";
+        buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(name);
+        // import: address 0, name "libc_malloc" (11 bytes), lib len 0 (none)
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        let iname = b"libc_malloc";
+        buf.extend_from_slice(&(iname.len() as u16).to_le_bytes());
+        buf.extend_from_slice(iname);
+        buf.push(0);
+        buf
+    }
+
+    #[test]
+    fn znl_parses_valid_library() {
+        let img = make_valid_znl();
+        let f = ZnlFile::parse(&img).expect("valid znl should parse");
+        assert_eq!(f.header.abi_version, 5);
+        assert_eq!(f.header.arch, ZnsArch::Aex64);
+        assert_eq!(f.header.build, ZnlBuild::Release);
+        assert_eq!(f.header.flags, ZnlFlags::SHARED);
+        assert_eq!(f.exports.len(), 1);
+        assert_eq!(f.imports.len(), 1);
+        assert_eq!(f.exports[0].name, "libgraphics_draw");
+        assert_eq!(f.exports[0].address, 0x1000);
+        assert_eq!(f.imports[0].name, "libc_malloc");
+        assert_eq!(f.imports[0].address, 0);
+        assert_eq!(f.imports[0].library, None);
+        assert_eq!(f.export_address("libgraphics_draw"), Some(0x1000));
+        assert_eq!(f.export_address("missing"), None);
+    }
+
+    #[test]
+    fn znl_rejects_bad_magic() {
+        let mut img = make_valid_znl();
+        img[0] = 0x00;
+        match ZnlFile::parse(&img) {
+            Err(ZnlError::BadMagic { found }) => assert_ne!(found, ZNL_MAGIC),
+            other => panic!("expected BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znl_rejects_bad_version() {
+        let mut img = make_valid_znl();
+        img[4] = 9;
+        match ZnlFile::parse(&img) {
+            Err(ZnlError::BadVersion { found }) => assert_eq!(found, 9),
+            other => panic!("expected BadVersion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znl_rejects_truncated_export_name() {
+        let mut img = make_valid_znl();
+        // cut the buffer right after export 0's address+name-length, before
+        // the name bytes → parser must report Truncated.
+        img.truncate(26);
+        match ZnlFile::parse(&img) {
+            Err(ZnlError::Truncated) => {}
+            other => panic!("expected Truncated, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znl_export_address_lookup() {
+        let img = make_valid_znl();
+        let f = ZnlFile::parse(&img).unwrap();
+        assert_eq!(f.export_address("libgraphics_draw"), Some(0x1000));
+        assert_eq!(f.export_address("missing"), None);
     }
 }

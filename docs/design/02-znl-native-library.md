@@ -502,6 +502,22 @@ Aplikasi dapat memuat plugin hanya saat diperlukan, tanpa harus dibangun ulang.
 
 Dengan rancangan ini, `.znl` menjadi fondasi seluruh API Zenus OS. Semua komponen, mulai dari GUI, jaringan, audio, grafis, hingga layanan sistem dapat disediakan sebagai library modular yang dapat dipakai ulang, diperbarui secara independen, dan dibagikan ke banyak aplikasi tanpa pemborosan memori.
 
+---
+
+## Status implementasi
+
+Format `.znl` sudah diimplementasi sebagai **stak parser stub** di `crates/zenus-formats` (bersama `.zns`):
+
+- `ZNL_MAGIC = 0x424C4E5A` ("ZNLB", little-endian), `ZNL_VERSION = 1`
+- `ZnlLibraryHeader`: ABI version, arsitektur (AEX32/AEX64), build type (Debug/Release), flags (shared/plugin/system), jumlah export/import
+- `ZnlExport`: nama + alamat; `ZnlImport`: nama + alamat + library opsional
+- `ZnlFile::parse(data)`: parser murni (`no_std`, host-testable) yang memvalidasi magic/versi, lalu membaca tabel export dan import simbol
+- `ZnlFile::export_address(name)`: pencarian alamat simbol berdasarkan nama
+- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 11 tes (6 `.zns` + 5 `.znl`), semua lulus (`cargo test -p zenus-formats`)
+- Bare-metal build: lolos `cargo build -p zenus-formats --target x86_64-unknown-none`
+
+Belum diimplementasi (jadwal berikutnya): pemuatan library ke memori, resolusi simbol antar library, verifikasi tanda tangan digital, dan lazy loading.
+
 
 `.znd` adalah salah satu format paling penting dalam sebuah sistem operasi. Kalau `.zns` menjalankan aplikasi dan `.znl` menyediakan library, maka `.znd` adalah jembatan antara kernel dan perangkat keras. Tanpa driver, sistem operasi hanya melihat "benda misterius yang terhubung". Komputer memang cepat, tetapi tidak memiliki bakat telepati.
 
