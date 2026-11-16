@@ -1965,6 +1965,192 @@ impl ZncFile {
     }
 }
 
+/// Magic number for a Zenus Native Log: bytes `5A 4E 4C 4F` = "ZNLO".
+pub const ZNLOG_MAGIC: u32 = 0x4F_4C_4E_5A; // little-endian "ZNLO"
+
+/// Current `.znlog` format version.
+pub const ZNLOG_VERSION: u16 = 1;
+
+/// Log severity level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ZnlogLevel {
+    Trace = 0,
+    Debug = 1,
+    Info = 2,
+    Warn = 3,
+    Error = 4,
+    Critical = 5,
+}
+
+impl ZnlogLevel {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ZnlogLevel::Trace),
+            1 => Some(ZnlogLevel::Debug),
+            2 => Some(ZnlogLevel::Info),
+            3 => Some(ZnlogLevel::Warn),
+            4 => Some(ZnlogLevel::Error),
+            5 => Some(ZnlogLevel::Critical),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ZnlogLevel::Trace => "TRACE",
+            ZnlogLevel::Debug => "DEBUG",
+            ZnlogLevel::Info => "INFO",
+            ZnlogLevel::Warn => "WARN",
+            ZnlogLevel::Error => "ERROR",
+            ZnlogLevel::Critical => "CRITICAL",
+        }
+    }
+}
+
+/// One log entry: timestamp, level, source, and message.
+#[derive(Debug, Clone)]
+pub struct ZnlogEntry {
+    pub timestamp_ns: u64,
+    pub level: ZnlogLevel,
+    pub source: String,
+    pub message: String,
+}
+
+/// Fixed-size log header after magic/version.
+#[derive(Debug, Clone)]
+pub struct ZnlogHeader {
+    pub version: u16,
+    pub entry_count: u16,
+    pub total_bytes: u64,
+}
+
+/// A parsed `.znlog` log file.
+#[derive(Debug, Clone)]
+pub struct ZnlogFile {
+    pub header: ZnlogHeader,
+    pub entries: Vec<ZnlogEntry>,
+    pub raw: Vec<u8>,
+}
+
+/// Errors while parsing or validating a `.znlog` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZnlogError {
+    TooSmall,
+    BadMagic { found: u32 },
+    BadVersion { found: u16 },
+    Truncated,
+    InvalidUtf8,
+    InvalidLevel(u8),
+}
+
+impl fmt::Display for ZnlogError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZnlogError::TooSmall => write!(f, "znlog: file too small to contain a header"),
+            ZnlogError::BadMagic { found } => {
+                write!(f, "znlog: invalid magic number 0x{:08X}, expected 0x{:08X} (\"ZNLO\")", found, ZNLOG_MAGIC)
+            }
+            ZnlogError::BadVersion { found } => {
+                write!(f, "znlog: unsupported format version {}, expected {}", found, ZNLOG_VERSION)
+            }
+            ZnlogError::Truncated => write!(f, "znlog: file truncated while reading entries"),
+            ZnlogError::InvalidUtf8 => write!(f, "znlog: source or message is not valid UTF-8"),
+            ZnlogError::InvalidLevel(l) => write!(f, "znlog: invalid log level {}", l),
+        }
+    }
+}
+
+impl ZnlogFile {
+    /// Parse a `.znlog` image from a byte buffer. Pure, host-testable parser:
+    /// validates magic/version, reads the fixed header, then the entry table
+    /// (each: u64 timestamp + u8 level + u16 source length + source + u32
+    /// message length + message).
+    pub fn parse(data: &[u8]) -> Result<Self, ZnlogError> {
+        if data.len() < 8 {
+            return Err(ZnlogError::TooSmall);
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != ZNLOG_MAGIC {
+            return Err(ZnlogError::BadMagic { found: magic });
+        }
+
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != ZNLOG_VERSION {
+            return Err(ZnlogError::BadVersion { found: version });
+        }
+
+        if data.len() < 10 {
+            return Err(ZnlogError::TooSmall);
+        }
+
+        let hdr_version = u16::from_le_bytes(data[6..8].try_into().unwrap());
+        let entry_count = u16::from_le_bytes(data[8..10].try_into().unwrap());
+        let total_bytes = u64::from_le_bytes(data[10..18].try_into().unwrap());
+
+        let header = ZnlogHeader {
+            version: hdr_version,
+            entry_count,
+            total_bytes,
+        };
+
+        let mut off = 18usize;
+        let mut entries = Vec::with_capacity(entry_count as usize);
+        for _ in 0..entry_count as usize {
+            if off + 9 > data.len() {
+                return Err(ZnlogError::Truncated);
+            }
+            let timestamp_ns = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+            off += 8;
+            let level_raw = data[off];
+            off += 1;
+            let level = ZnlogLevel::from_u8(level_raw).ok_or(ZnlogError::InvalidLevel(level_raw))?;
+            if off + 2 > data.len() {
+                return Err(ZnlogError::Truncated);
+            }
+            let slen = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+            off += 2;
+            if off + slen > data.len() {
+                return Err(ZnlogError::Truncated);
+            }
+            let source = core::str::from_utf8(&data[off..off + slen])
+                .map_err(|_| ZnlogError::InvalidUtf8)?
+                .to_string();
+            off += slen;
+            if off + 4 > data.len() {
+                return Err(ZnlogError::Truncated);
+            }
+            let mlen = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+            off += 4;
+            if off + mlen > data.len() {
+                return Err(ZnlogError::Truncated);
+            }
+            let message = core::str::from_utf8(&data[off..off + mlen])
+                .map_err(|_| ZnlogError::InvalidUtf8)?
+                .to_string();
+            off += mlen;
+            entries.push(ZnlogEntry { timestamp_ns, level, source, message });
+        }
+
+        Ok(ZnlogFile {
+            header,
+            entries,
+            raw: Vec::from(data),
+        })
+    }
+
+    /// Return all entries at or above the given severity level.
+    pub fn filter_level(&self, min: ZnlogLevel) -> Vec<&ZnlogEntry> {
+        self.entries.iter().filter(|e| e.level as u8 >= min as u8).collect()
+    }
+
+    /// Return all entries from the given source, if any.
+    pub fn filter_source(&self, source: &str) -> Vec<&ZnlogEntry> {
+        self.entries.iter().filter(|e| e.source == source).collect()
+    }
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
@@ -2941,6 +3127,116 @@ mod host_tests {
         match ZncFile::parse(&img) {
             Err(ZncError::EntryOutOfBounds) => {}
             other => panic!("expected EntryOutOfBounds, got {:?}", other),
+        }
+    }
+
+    fn make_valid_znlog() -> Vec<u8> {
+        // Layout: header(18) + entries.
+        let ts1 = 1_700_000_000_000_000_000u64;
+        let src1 = b"kernel";
+        let msg1 = b"boot complete";
+        let ts2 = 1_700_000_001_000_000_000u64;
+        let src2 = b"shell";
+        let msg2 = b"user login";
+
+        let entry_count = 2u16;
+        let entry1_size = 8 + 1 + 2 + src1.len() + 4 + msg1.len();
+        let entry2_size = 8 + 1 + 2 + src2.len() + 4 + msg2.len();
+        let total_bytes = entry1_size as u64 + entry2_size as u64;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&ZNLOG_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&ZNLOG_VERSION.to_le_bytes());
+        // header: hdr_version, entry_count, total_bytes
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&entry_count.to_le_bytes());
+        buf.extend_from_slice(&total_bytes.to_le_bytes());
+        // entry 1: INFO from kernel "boot complete"
+        buf.extend_from_slice(&ts1.to_le_bytes());
+        buf.push(ZnlogLevel::Info as u8);
+        buf.extend_from_slice(&(src1.len() as u16).to_le_bytes());
+        buf.extend_from_slice(src1);
+        buf.extend_from_slice(&(msg1.len() as u32).to_le_bytes());
+        buf.extend_from_slice(msg1);
+        // entry 2: WARN from shell "user login"
+        buf.extend_from_slice(&ts2.to_le_bytes());
+        buf.push(ZnlogLevel::Warn as u8);
+        buf.extend_from_slice(&(src2.len() as u16).to_le_bytes());
+        buf.extend_from_slice(src2);
+        buf.extend_from_slice(&(msg2.len() as u32).to_le_bytes());
+        buf.extend_from_slice(msg2);
+        buf
+    }
+
+    #[test]
+    fn znlog_parses_valid_log() {
+        let img = make_valid_znlog();
+        let f = ZnlogFile::parse(&img).expect("valid znlog should parse");
+        assert_eq!(f.header.version, 1);
+        assert_eq!(f.header.entry_count, 2);
+        assert_eq!(f.entries.len(), 2);
+        assert_eq!(f.entries[0].timestamp_ns, 1_700_000_000_000_000_000);
+        assert_eq!(f.entries[0].level, ZnlogLevel::Info);
+        assert_eq!(f.entries[0].source, "kernel");
+        assert_eq!(f.entries[0].message, "boot complete");
+        assert_eq!(f.entries[1].timestamp_ns, 1_700_000_001_000_000_000);
+        assert_eq!(f.entries[1].level, ZnlogLevel::Warn);
+        assert_eq!(f.entries[1].source, "shell");
+        assert_eq!(f.entries[1].message, "user login");
+        assert_eq!(f.entries[0].level.as_str(), "INFO");
+        assert_eq!(f.entries[1].level.as_str(), "WARN");
+        // filter_level(Warn) should include Warn and above
+        let warn_and_above = f.filter_level(ZnlogLevel::Warn);
+        assert_eq!(warn_and_above.len(), 1);
+        assert_eq!(warn_and_above[0].source, "shell");
+        // filter_source
+        let kernel = f.filter_source("kernel");
+        assert_eq!(kernel.len(), 1);
+        assert_eq!(kernel[0].message, "boot complete");
+        assert_eq!(f.filter_source("missing").len(), 0);
+    }
+
+    #[test]
+    fn znlog_rejects_bad_magic() {
+        let mut img = make_valid_znlog();
+        img[0] = 0x00;
+        match ZnlogFile::parse(&img) {
+            Err(ZnlogError::BadMagic { found }) => assert_ne!(found, ZNLOG_MAGIC),
+            other => panic!("expected BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znlog_rejects_bad_version() {
+        let mut img = make_valid_znlog();
+        img[4] = 9;
+        match ZnlogFile::parse(&img) {
+            Err(ZnlogError::BadVersion { found }) => assert_eq!(found, 9),
+            other => panic!("expected BadVersion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znlog_rejects_invalid_level() {
+        let mut img = make_valid_znlog();
+        // entry 1 level byte: header(18) + timestamp(8)
+        let level_offset = 18 + 8;
+        img[level_offset] = 99;
+        match ZnlogFile::parse(&img) {
+            Err(ZnlogError::InvalidLevel(l)) => assert_eq!(l, 99),
+            other => panic!("expected InvalidLevel, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znlog_rejects_truncated_entry() {
+        let mut img = make_valid_znlog();
+        // cut after entry 1's source length prefix, before source bytes
+        // entry 1: ts(8) + level(1) + src_len(2) = 11 bytes at offset 18
+        img.truncate(18 + 11);
+        match ZnlogFile::parse(&img) {
+            Err(ZnlogError::Truncated) => {}
+            other => panic!("expected Truncated, got {:?}", other),
         }
     }
 }

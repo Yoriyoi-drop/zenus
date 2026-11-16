@@ -547,6 +547,23 @@ Fitur:
 | `.znc`   | Configuration     |
 | `.znlog` | Structured Log    |
 
+---
+
+## Status implementasi
+
+Format `.znlog` sudah diimplementasi sebagai **stak parser stub** di `crates/zenus-formats` (terjadi sebagai format terakhir dalam serangkaian `.zn*`):
+
+- `ZNLOG_MAGIC = 0x4F4C4E5A` ("ZNLO", little-endian), `ZNLOG_VERSION = 1`
+- `ZnlogHeader`: versi, jumlah entri, total bytes
+- `ZnlogEntry`: timestamp (nanosekundi), level (Trace/Debug/Info/Warn/Error/Critical), source, dan message
+- `ZnlogFile::parse(data)`: parser murni (`no_std`, host-testable) yang memvalidasi magic/versi, lalu membaca tabel entri (timestamp + level + source + message)
+- `ZnlogFile::filter_level(min)` dan `::filter_source(src)`: filter entri berdasarkan severity dan sumber
+- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 50 tes (6 `.zns` + 5 `.znl` + 5 `.znd` + 4 `.znm` + 5 `.znpkg` + 5 `.zni` + 5 `.znf` + 5 `.zna` + 5 `.znc` + 5 `.znlog`), semua lulus (`cargo test -p zenus-formats`)
+- Bare-metal build: lolos `cargo build -p zenus-formats --target x86_64-unknown-none`
+
+Belum diimplementasi (jadwal berikutnya): rotasi log, kompresi, enkripsi, tanda tangan digital, indeks untuk pencarian cepat, dan integrasi dengan sistem observabilitas Zenus (Zenus Event Framework).
+
+
 ## Saran untuk Zenus OS
 
 Kalau tujuan Zenus adalah menjadi OS modern yang cocok untuk desktop, server, AI, dan embedded, saya akan menambahkan satu konsep lagi di atas `.znlog`, yaitu **Zenus Event Framework (ZEF)**.
