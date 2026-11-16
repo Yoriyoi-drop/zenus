@@ -597,4 +597,17 @@ Hardware Trust Score : 98
 Overall Risk         : Low
 Recommended Action   : Continue Operation
 
+---
+
+## Status implementasi
+
+Layer 9 — Hardware Guardian sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "Hardware Guardian", `layer_number()` = 9, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku pengawas hardware (PCIe guardian, firmware guardian, silicon fingerprint, PUF, autonomous hardware defense) — design record saja.
+
 

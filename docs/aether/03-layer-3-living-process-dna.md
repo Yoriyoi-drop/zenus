@@ -563,3 +563,16 @@ Threat Prediction : Low
 Parent Process    : explorer.exe
 Status            : Healthy
 
+---
+
+## Status implementasi
+
+Layer 3 — Living Process DNA sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "Living Process DNA", `layer_number()` = 3, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku DNA proses (behavioral fingerprint, mutation detection, digital twin comparison, AI mutation predictor) — design record saja.
+

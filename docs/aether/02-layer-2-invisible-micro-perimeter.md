@@ -435,3 +435,16 @@ Encryption      : TLS 1.3 + mTLS
 Session TTL     : 300 detik
 Monitoring Mode : Active
 
+---
+
+## Status implementasi
+
+Layer 2 — Invisible Micro Perimeter sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "Invisible Micro Perimeter", `layer_number()` = 2, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku perimeter mikro (port sembunyi, mTLS tunnel, service mesh, dynamic risk response) — design record saja.
+

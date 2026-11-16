@@ -574,3 +574,16 @@ Alternative Action   : Live Workload Migration
 Simulation Count     : 12,864
 Decision Time        : 48 ms
 
+---
+
+## Status implementasi
+
+Layer 5 — Predictive Causal AI sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "Predictive Causal AI", `layer_number()` = 5, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku AI prediktif (AI consensus, reinforcement learning, Bayesian risk engine, impact prediction, explainable AI) — design record saja.
+

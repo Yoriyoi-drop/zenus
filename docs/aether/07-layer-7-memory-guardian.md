@@ -628,4 +628,17 @@ Kernel Interaction    : Normal
 Overall Memory Risk   : 6
 Recommended Action    : Continue Monitoring
 
+---
+
+## Status implementasi
+
+Layer 7 — Memory Guardian sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "Memory Guardian", `layer_number()` = 7, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku pemantauan memori (heap guardian, thread guardian, DMA guardian, memory time machine, autonomous memory response) — design record saja.
+
 

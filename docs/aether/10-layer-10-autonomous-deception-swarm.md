@@ -589,3 +589,16 @@ Business Risk          : None (Production Isolated)
 Evidence Collected     : Complete
 Recommended Action     : Continue Observation
 
+---
+
+## Status implementasi
+
+Layer 10 — Autonomous Deception Swarm sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "Autonomous Deception Swarm", `layer_number()` = 10, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku deception (honeypot, honey service, threat DNA collector, swarm learning, ethical guardrail) — design record saja.
+

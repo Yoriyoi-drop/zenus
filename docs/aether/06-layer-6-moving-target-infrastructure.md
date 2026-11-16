@@ -617,4 +617,17 @@ Key Rotation         : Every 30 seconds
 Expected Downtime    : 0%
 Infrastructure Score : 97
 
+---
+
+## Status implementasi
+
+Layer 6 — Moving Target Infrastructure sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "Moving Target Infrastructure", `layer_number()` = 6, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku moving target (IP rotation, port virtualization, service relocation, shadow infrastructure, adaptive network mutation) — design record saja.
+
 

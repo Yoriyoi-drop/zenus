@@ -518,4 +518,17 @@ Session Status : Active
 Permission     : Developer
 Expires        : 14:35 UTC
 
+---
+
+## Status implementasi
+
+Layer 1 — Adaptive Identity Mesh sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "Adaptive Identity Mesh", `layer_number()` = 1, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku identitas adaptif (Zero Trust, mTLS, TPM, Continuous Authentication, AI Identity Engine) — design record saja.
+
 

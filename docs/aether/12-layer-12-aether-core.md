@@ -781,3 +781,16 @@ Layer 9   : Hardware Guardian
 Layer 10  : Autonomous Deception Swarm
 Layer 11  : Digital Twin & Self-Healing Infrastructure
 Layer 12  : AETHER CORE (Global Cognitive Orchestrator)
+
+---
+
+## Status implementasi
+
+Layer 12 — AETHER CORE sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "AETHER CORE", `layer_number()` = 12, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku AETHER CORE (global context engine, world model, global time machine, cognitive security score, human-in-the-loop, AI governance) — design record saja.

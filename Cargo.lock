@@ -106,6 +106,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zenus-aether"
+version = "0.1.0"
+
+[[package]]
 name = "zenus-arch"
 version = "0.1.0"
 dependencies = [

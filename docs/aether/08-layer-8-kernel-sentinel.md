@@ -594,3 +594,16 @@ Kernel Memory Health : Healthy
 Trust Score          : 99
 Recommended Action   : Continue Operation
 
+---
+
+## Status implementasi
+
+Layer 8 — Kernel Sentinel sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "Kernel Sentinel", `layer_number()` = 8, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku pengawas kernel (hook detection, interrupt guardian, page table guardian, kernel digital twin, autonomous kernel defense) — design record saja.
+

@@ -795,3 +795,16 @@ Affected Devices   : 3
 Risk Level         : Critical
 Recommended Action : Isolate Session & Escalate
 
+---
+
+## Status implementasi
+
+Layer 4 — Intent & Behavior Graph sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait: `name()` = "Intent & Behavior Graph", `layer_number()` = 4, `status()` = `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)`
+- Host tests: `crates/zenus-aether/src/lib.rs` — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku graph perilaku (multi-dimensional graph, time graph, chain risk engine, causal graph, predictive attack engine) — design record saja.
+

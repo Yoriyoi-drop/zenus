@@ -322,3 +322,17 @@ Kernel Protection
 Memory Protection
 Time Travel Recovery
 
+---
+
+## Status implementasi
+
+AETHER SHIELD (12 layer) sudah direkam sebagai **stub** di `crates/zenus-aether`:
+
+- `AetherLayer` trait dengan `name()`, `layer_number()`, `status()`, dan `init()`
+- Semua 12 layer (Adaptive Identity Mesh → AETHER CORE) memiliki status `LayerStatus::Stub`
+- `init()` mengembalikan `Err(InitError::NotImplemented)` untuk setiap layer
+- Host tests: `crates/zenus-aether/src/lib.rs` (`host_tests`) — 6 tes, semua lulus (`cargo test -p zenus-aether`)
+- Bare-metal build: lolos `cargo build -p zenus-aether --target x86_64-unknown-none`
+
+Belum diimplementasi: seluruh perilaku adaptif (AI, deteksi ancaman, respons otomatis, deception, self-healing) — dokumen ini adalah design record, tidak ada implementasi nyata di kernel. Jaringan yang ada saat ini adalah firewall konvensional (`crates/zenus-net/src/firewall.rs`), tidak AETHER SHIELD.
+
