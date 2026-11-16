@@ -76,6 +76,21 @@ impl CapSet {
             self
         }
     }
+
+    /// The same set with `cap` added. Adding is idempotent.
+    ///
+    /// This is the `capset`-style operation: it deliberately grants a
+    /// capability back to the task. The security model otherwise only ever
+    /// shrinks the set (`PR_CAPBSET_DROP`), so this is the single gate through
+    /// which privilege can be regained — and callers must be audited before it
+    /// is wired to any syscall.
+    pub const fn with(self, cap: u8) -> Self {
+        if cap < CAP_COUNT {
+            CapSet(self.0 | (1u64 << cap))
+        } else {
+            self
+        }
+    }
 }
 
 /// Whether a task may switch its uid to `new_uid`.
@@ -181,5 +196,32 @@ mod host_tests {
         assert_eq!(set, super::CapSet::all());
         assert!(!set.has(super::CAP_COUNT));
         assert_eq!(super::CapSet::from_bits(0), super::CapSet::none());
+    }
+
+    #[test]
+    fn adding_a_capability_restores_exactly_that_one() {
+        let none = super::CapSet::none();
+        let with_admin = none.with(super::CAP_SYS_ADMIN);
+
+        assert!(with_admin.has(super::CAP_SYS_ADMIN));
+        for cap in 0..super::CAP_COUNT {
+            if cap != super::CAP_SYS_ADMIN {
+                assert!(!with_admin.has(cap), "capability {} must stay clear", cap);
+            }
+        }
+
+        // Idempotent.
+        assert_eq!(with_admin.with(super::CAP_SYS_ADMIN), with_admin);
+    }
+
+    #[test]
+    fn add_then_drop_is_a_round_trip() {
+        let all = super::CapSet::all();
+        let no_admin = all.without(super::CAP_SYS_ADMIN);
+        assert!(!no_admin.has(super::CAP_SYS_ADMIN));
+
+        let again = no_admin.with(super::CAP_SYS_ADMIN);
+        assert!(again.has(super::CAP_SYS_ADMIN));
+        assert_eq!(again, all);
     }
 }
