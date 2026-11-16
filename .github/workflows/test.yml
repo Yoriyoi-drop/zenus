@@ -71,6 +71,11 @@ jobs:
           echo "Booting the ordinary kernel; it must reach the shell prompt..."
           make smoke
 
+      - name: Syscall ABI Regression (BUG-083)
+        run: |
+          echo "Verifying syscall return values reach userspace (cat read/write)..."
+          make abi-smoke
+
       - name: Upload Test Results
         if: always()
         uses: actions/upload-artifact@v3

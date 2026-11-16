@@ -290,6 +290,17 @@ SMOKE_TIMEOUT ?= 120
 smoke: $(ISO)
 	SMOKE_TIMEOUT=$(SMOKE_TIMEOUT) bash boot-smoke.sh $(ISO)
 
+# ── Syscall ABI regression (BUG-083) ──
+#
+# `smoke` only checks that the prompt appears; it never drives the shell, so a
+# syscall whose return value is clobbered boots and passes unnoticed. This runs
+# `cat` (the first user program that consumes `read`'s result) and fails if its
+# one-line input is not echoed or the serial is flooded with zeroes — the exact
+# signature of BUG-083, where RAX held the user CR3 instead of the byte count.
+.PHONY: abi-smoke
+abi-smoke: $(ISO)
+	ABI_SMOKE_ISO=$(ISO) python3 abi-smoke.py
+
 clean:
 	rm -rf $(BUILD_DIR) $(ISO_DIR)
 	rm -f initrd.tar

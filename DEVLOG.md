@@ -4146,3 +4146,10 @@ semua 0 failure; `make test` 27/27 OK (termasuk `kpti/*` yang nyata);
 `make iso` + QEMU serial TCP: `hello`, `echo`, `fault` (mati bersih SIGSEGV)
 normal, dan skenario pemicu `cat → fault` menghasilkan 0 byte null
 (`bytes=608`, `nulls=0`, `dbgcon=0`; bug lama >1.000.000 byte null).
+
+**Regression guard:** `abi-smoke.py` (target `make abi-smoke`, dijalankan CI)
+menjalankan `cat` pada kernel biasa, mengirim satu baris pendek, dan gagal bila
+baris itu tidak ter-echo atau serial dibanjiri null. `boot-smoke.sh` tidak
+menangkap bug ini karena ia hanya menunggu prompt tanpa mengirim input. Dengan
+fix aktif: `[ABI-SMOKE] OK: 587 bytes, 0 nulls`; ambang 2 KB/50 null akan
+menangkap flood 401 KB dari BUG-083.
