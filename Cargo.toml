@@ -3,6 +3,7 @@ members = [
     "apps",
     "crates/zenus-aether",
     "crates/zenus-arch",
+    "crates/zenus-crypto",
     "crates/zenus-mem",
     "crates/zenus-sched",
     "crates/zenus-console",

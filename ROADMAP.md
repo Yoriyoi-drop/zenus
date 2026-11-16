@@ -129,8 +129,10 @@ Do not build on these without reading the code:
 
 **Real cgroup enforcement is done for `pids` and `memory`** (BUG-041):
 `pids.max` refuses a task creation and `memory.max` refuses an `mmap`, both
-checked against a pure, host-tested controller table. `cpu`/`io` remain
-advertised but unenforced, and the hierarchy is flat. Next:
+checked against a pure, host-tested controller table. `cpu` is now stub-enforced:
+`schedule_tick()` calls `charge_cpu_for_task(current, 1)` each timer tick.
+`io` remains advertised but unenforced (block device layer lacks task context
+and zenus-fs does not depend on zenus-sched). The hierarchy is flat. Next:
 
 2. **Userspace, next step.** `zenus-libc` exists with syscall wrappers, and ELF
    userspace programs are already loaded and run from the VFS/initrd via the
@@ -144,8 +146,10 @@ advertised but unenforced, and the hierarchy is flat. Next:
    `<`, and stages that read stdin (`cat`, `grep`) consume the previous stage's
    output or the redirected file.
 3. **Capabilities, next step.** The set exists and is consulted by six syscalls
-   and by every file-permission check. What is missing is a way to *gain*
-   privilege deliberately (no `capset`, no file capabilities on an ELF).
+   and by every file-permission check. A `CapSet::with()` stub (capset-style
+   add-back) exists in `crates/zenus-sched/src/caps.rs` with host tests, but it
+   is not yet wired to any syscall — no `PR_CAPBSET_ADD` and no file
+   capabilities on an ELF. Nothing can add a capability back at runtime yet.
 
 Boot testing is done: `make smoke` boots the ordinary kernel headless and fails
 unless the shell prompt appears, and `make test-quiet` now fails when the
