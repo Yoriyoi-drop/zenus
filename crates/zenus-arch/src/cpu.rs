@@ -109,8 +109,14 @@ core::arch::global_asm!(
     // CR3 is still the user view here. Switch to the kernel view before
     // touching any kernel memory (including gs). The slot lives in .kpti_data
     // which is mapped in both views.
-    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
-    "  mov cr3, rcx",
+    //
+    // IMPORTANT: `syscall` left the user return RIP in RCX and RFLAGS in R11.
+    // Load the kernel CR3 through RBX — NOT RCX — or the next `push rcx` would
+    // save the kernel CR3 as the "user RIP" and IRETQ would jump into the page
+    // tables. This used to clobber RCX and every returning user syscall landed
+    // at the CR3 value (a triple fault on next ring-3 instruction).
+    "  mov rbx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rbx",
     "  swapgs",
     "  mov gs:[0], rsp",
     "  mov rsp, gs:[8]",
@@ -126,33 +132,34 @@ core::arch::global_asm!(
     "  push r11", // KSP-48: user RFLAGS (deep copy, safe)
     "  push rcx", // KSP-56: user RIP (deep copy, safe) ← PUSHED LAST
     // Reload arg4/5/6 from the stack slots, before they are clobbered.
-    "  mov r8, [rsp + 16]", // r8  = arg4 (orig r10 @ KSP-8)
-    "  mov r9, [rsp + 8]",  // r9  = arg5 (orig r8  @ KSP-16)
-    "  mov r10, [rsp]",     // r10 = arg6 (orig r9  @ KSP-24)
+    // After the 7 pushes RSP = KSP-56, so relative to RSP:
+    //   orig r10 (arg4) @ KSP-8  = RSP+48
+    //   orig r8  (arg5) @ KSP-16 = RSP+40
+    //   orig r9  (arg6) @ KSP-24 = RSP+32
+    "  mov r8, [rsp + 48]", // r8  = arg4 (orig r10)
+    "  mov r9, [rsp + 40]", // r9  = arg5 (orig r8)
+    "  mov r10, [rsp + 32]",// r10 = arg6 (orig r9)
     // Rotate arg1..arg3 into position: a3=rdx, a2=rsi, a1=rdi, num=rax
     "  mov rcx, rdx",
     "  mov rdx, rsi",
     "  mov rsi, rdi",
     "  mov rdi, rax",
     "  call syscall_dispatch6",
+    // RAX now holds the syscall return value. Save it: the code below
+    // reuses RAX (to load the user RSP and then the user CR3) before IRETQ,
+    // so without this stash every syscall would return the user CR3 instead of
+    // its real result. That made cat (which uses read()'s return as the write
+    // count) spew 401408 garbage bytes — the null-spew bug.
+    "  mov rbx, rax",
     // After call+ret: RSP = KSP - 56 (ret_addr consumed by ret inside dispatch)
     // Pop deep copies, then skip the arg slots + corrupted originals:
     "  pop rcx", // RCX = saved RIP from DEEP COPY (safe), RSP = KSP - 48
     "  pop r11", // R11 = saved RFLAGS from DEEP COPY (safe), RSP = KSP - 40
     // Restore the user-visible arg registers clobbered above.
-    "  mov r10, [rsp]",     // orig r10 (arg4)
-    "  mov r8, [rsp + 8]",  // orig r8  (arg5)
-    "  mov r9, [rsp + 16]", // orig r9  (arg6)
+    "  mov r10, [rsp + 32]", // orig r10 (arg4) @ KSP-8  = RSP+32
+    "  mov r8, [rsp + 24]",  // orig r8  (arg5) @ KSP-16 = RSP+24
+    "  mov r9, [rsp + 16]",  // orig r9  (arg6) @ KSP-24 = RSP+16
     "  add rsp, 40",        // Skip arg slots + corrupted originals, RSP = KSP
-    // Validate saved RCX before SYSRET.
-    // Kernel-space RCX or NULL RCX indicates corruption; route to debug loop.
-    "  mov rax, rcx",
-    "  shr rax, 47",
-    "  cmp rax, 1",
-    "  jae 9f",
-    "  test ecx, ecx",
-    "  jz 9f",
-    "10:",
     // Return to user mode via IRETQ (not SYSRET).
     // SYSRET in 64-bit mode sets RSP = RDX, but RDX was clobbered by
     // syscall_dispatch (caller-saved register). IRETQ loads RSP from
@@ -182,95 +189,18 @@ core::arch::global_asm!(
     "  mov rax, [rip + kpti_user_cr3_slot]",
     "  mov cr3, rax",
     "  swapgs",
+    // Restore the syscall return value into RAX. We stashed it in RBX right
+    // after the dispatch call; IRETQ only reloads RIP/CS/RFLAGS/RSP/SS, so the
+    // remaining registers keep whatever the kernel left in them — meaning RAX
+    // would otherwise still hold the user CR3 we just loaded.
+    "  mov rax, rbx",
     "  iretq",
-    // Label 9: corrupted RCX (kernel-space or NULL). Normal path falls
-    // through iretq above and never reaches here; the validation jumps
-    // (`jae 9f`/`jz 9f`) land here. Print bad RCX to COM1, then halt.
-    "9:",
-    "  mov rdi, rcx",
-    "  call dbg_print_hex",
-    "98:",
-    "  cli",
-    "  hlt",
-    "  jmp 98b",
     ".att_syntax prefix",
 );
 
 extern "C" {
     pub fn syscall_entry();
     pub fn syscall_signal_hook(kernel_rsp: u64);
-}
-
-// Debug helper — no extern declarations needed, defined below in this module.
-// global_asm! finds them by symbol name (both are #[no_mangle] pub extern "C").
-
-/// Write one byte to UART COM1 (0x3F8).
-///
-/// Allocation-free on purpose: this runs from the syscall fault/halt path
-/// where the heap spinlock may already be held, so `alloc::format!` could
-/// deadlock.
-#[inline]
-unsafe fn dbg_putb(b: u8) {
-    core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nostack, preserves_flags));
-}
-
-/// Write a 64-bit value as hex to UART COM1 (0x3F8). Never allocates.
-#[no_mangle]
-pub extern "C" fn dbg_print_hex(val: u64) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    unsafe {
-        dbg_putb(b'0');
-        dbg_putb(b'x');
-        for i in 0..16u32 {
-            let nibble = ((val >> ((15 - i) * 4)) & 0xf) as usize;
-            dbg_putb(HEX[nibble]);
-        }
-        dbg_putb(b'\n');
-    }
-}
-
-/// Print task index, CPU ID, and kernel stack pointer to UART.
-/// Never allocates (see `dbg_putb`).
-#[no_mangle]
-pub extern "C" fn dbg_print_taskinfo() {
-    unsafe {
-        dbg_putb(b'T');
-        let cpu = crate::interrupts::apic::current_apic_id();
-        let idx = CURRENT_TASK[(cpu as usize) % MAX_CPUS].load(Ordering::Relaxed);
-        dbg_print_dec(idx as u64);
-        dbg_putb(b'C');
-        dbg_putb(b'P');
-        dbg_putb(b'U');
-        dbg_print_dec(cpu as u64);
-        let rsp: u64;
-        core::arch::asm!("mov {}, gs:[8]", out(reg) rsp, options(nostack));
-        dbg_putb(b' ');
-        dbg_print_hex(rsp);
-    }
-}
-
-/// Write a decimal value to UART COM1. Never allocates.
-#[no_mangle]
-pub extern "C" fn dbg_print_dec(mut val: u64) {
-    let mut buf = [0u8; 20];
-    let mut n = 0usize;
-    if val == 0 {
-        unsafe {
-            dbg_putb(b'0');
-        }
-        return;
-    }
-    while val > 0 {
-        buf[n] = b'0' + (val % 10) as u8;
-        val /= 10;
-        n += 1;
-    }
-    unsafe {
-        while n > 0 {
-            n -= 1;
-            dbg_putb(buf[n]);
-        }
-    }
 }
 
 pub fn init() {

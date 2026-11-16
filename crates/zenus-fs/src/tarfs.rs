@@ -49,11 +49,32 @@ struct TarEntry {
 const MAX_ENTRIES: usize = 64;
 const MAX_DIR_ENTRIES: usize = 128;
 
+// Initrd names are immutable for the life of the kernel, so they are copied
+// into this static arena instead of the heap. The heap-backed `Box::leak`
+// approach tied the entries to allocator liveness: any write that scribbles
+// over a `&'static str` pointer in `TarEntry`, or reuses the leaked block,
+// silently turned `find_inode("bin")` into a miss after the first user task
+// exited and freed its buffers. A static arena can neither be freed nor
+// reused, so the names stay valid for every open() for the rest of boot.
+const NAME_ARENA_SIZE: usize = 8192;
+static mut NAME_ARENA: [u8; NAME_ARENA_SIZE] = [0; NAME_ARENA_SIZE];
+static mut NAME_ARENA_OFF: usize = 0;
+
 fn copy_name(name: &str) -> &'static str {
     let bytes = name.as_bytes();
-    let len = bytes.len().min(255);
-    let s: alloc::string::String = core::str::from_utf8(&bytes[..len]).unwrap_or("").into();
-    Box::leak(s.into_boxed_str())
+    let room = NAME_ARENA_SIZE - 1 - unsafe { NAME_ARENA_OFF };
+    let len = bytes.len().min(255).min(room);
+    if len == 0 {
+        return "";
+    }
+    unsafe {
+        let off = NAME_ARENA_OFF;
+        NAME_ARENA[off..off + len].copy_from_slice(&bytes[..len]);
+        NAME_ARENA_OFF += len;
+        // Safe: the slice is exactly `len` valid UTF-8 bytes copied from
+        // `name`, living in a `'static` arena that is never freed or reused.
+        core::str::from_utf8(&NAME_ARENA[off..off + len]).unwrap_or("")
+    }
 }
 
 struct TarData {
@@ -78,6 +99,9 @@ pub struct TarFs;
 
 impl TarFs {
     pub fn load(addr: u64, len: u64) -> Option<&'static Self> {
+        unsafe {
+            NAME_ARENA_OFF = 0;
+        }
         let data = unsafe { slice::from_raw_parts(addr as *const u8, len as usize) };
         let mut tmp_entries: [TarEntry; MAX_ENTRIES] = [TarEntry {
             inode: 0,

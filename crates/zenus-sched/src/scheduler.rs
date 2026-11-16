@@ -1,7 +1,10 @@
 use super::task::{Task, TaskInfo, TaskState, MAX_TASKS};
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use zenus_mem::allocator::ALLOCATOR;
-use zenus_mem::kpti::{build_user_view, destroy_user_view, set_kernel_cr3_slot, set_user_cr3_slot};
+use zenus_mem::kpti::{
+    build_user_view, destroy_user_view, map_kernel_stack_into_user_view,
+    map_system_tables_into_user_view, set_kernel_cr3_slot, set_user_cr3_slot,
+};
 use zenus_ns::{NsId, NS_ROOT};
 use zenus_sync::spinlock::SpinLock;
 
@@ -357,10 +360,18 @@ core::arch::global_asm!(
     "  jne 4f",
     // Ring 3: KERNEL_GS_BASE points at this CPU's PerCpu struct. Zero
     // GS_BASE so user mode can't reach kernel memory through GS.
+    // IMPORTANT: `wrmsr` needs edx:eax = 0, but the caller-saved rax/rdx hold
+    // the user's live registers — zeroing them here silently clobbers the
+    // returning task's rax and rdx (every reschedule handed userspace a 0 in
+    // those two). Save/restore them around the wrmsr instead.
+    "  push rax",
+    "  push rdx",
     "  xor eax, eax",
     "  xor edx, edx",
     "  mov ecx, 0xC0000101",
     "  wrmsr",
+    "  pop rdx",
+    "  pop rax",
     "2:",
     "  cli",
     "  iretq",
@@ -511,10 +522,20 @@ core::arch::global_asm!(
     "  jne timer_bad_frame",
     // Ring 3: KERNEL_GS_BASE points at this CPU's PerCpu struct, so zero
     // GS_BASE before dropping to user mode.
+    // IMPORTANT: same clobber guard as context_switch_yield — `wrmsr` needs
+    // edx:eax = 0, but rax/rdx hold the user's live registers. On the timer
+    // path the interrupt fires *constantly*, so without this save/restore
+    // every reschedule to ring 3 handed userspace a 0 in rax and rdx (which
+    // is exactly how `hello`'s write(1) lost its byte count and exit(60)
+    // became exit(0)). Save/restore around the wrmsr.
+    "  push rax",
+    "  push rdx",
     "  xor eax, eax",
     "  xor edx, edx",
     "  mov ecx, 0xC0000101",
     "  wrmsr",
+    "  pop rdx",
+    "  pop rax",
     "timer_iret:",
     // One `iretq` for both rings. It loads RIP/CS/RFLAGS/RSP/SS and raises
     // IF as a SINGLE atomic step, which is the only way to resume a task
@@ -740,10 +761,8 @@ pub fn clone_task(
         task.cr3 = cr3;
         task.user_cr3 = cr3;
         // Build the KPTI user view for the cloned task, inheriting the parent's
-        // user half. Falls back to the kernel CR3 if no frame is available.
-        if let Some(view) = build_user_view(cr3) {
-            task.user_cr3 = view;
-        }
+        // user half. Falls back to the kernel CR3 if a mapping fails.
+        task.user_cr3 = build_user_view_with_mappings(cr3, stack_top, stack_size as u64);
         task.heap_brk = heap_brk;
         task.heap_floor = heap_brk;
         task.uid = parent.uid;
@@ -791,6 +810,37 @@ pub fn clone_task(
 
     CPU_TASK_COUNT[cpu as usize].fetch_add(1, Ordering::SeqCst);
     id
+}
+
+/// Build a KPTI user view for `cr3` and map into it everything the CPU must
+/// reach through that view while a ring-3 task runs:
+///
+/// * the task's **kernel stack** (the `iretq` return frame and a ring-3
+///   interrupt trap frame live there, both CPL0 supervisor accesses under
+///   SMAP); and
+/// * the CPU **system tables** — IDT, GDT, TSS — which every fault, interrupt
+///   and even a plain `iretq` back to ring 3 reads through the current CR3.
+///
+/// Returns the user view CR3 on success, or `cr3` (the insecure full view) if
+/// any mapping fails, so the task still boots even when a frame is short.
+fn build_user_view_with_mappings(cr3: u64, stack_top: u64, stack_size: u64) -> u64 {
+    let Some(view) = build_user_view(cr3) else {
+        return cr3;
+    };
+    let tables = [
+        zenus_arch::interrupts::idt::idt_range(),
+        zenus_arch::gdt::gdt_range(),
+        zenus_arch::gdt::tss_range(),
+    ];
+    let stack_ok = stack_size == 0
+        || map_kernel_stack_into_user_view(view, cr3, stack_top, stack_size);
+    let sys_ok = map_system_tables_into_user_view(view, &tables);
+    if stack_ok && sys_ok {
+        view
+    } else {
+        destroy_user_view(view);
+        cr3
+    }
 }
 
 pub fn create_user_task(
@@ -884,10 +934,8 @@ pub fn create_user_task(
         // Build the KPTI user view for this task. The user view shares the
         // user half of the address space but zeroes the kernel half, so a
         // ring-3 task cannot reach kernel addresses. Falls back to the kernel
-        // CR3 (no isolation) if no frame is available.
-        if let Some(view) = build_user_view(cr3) {
-            task.user_cr3 = view;
-        }
+        // CR3 (no isolation) if a mapping fails.
+        task.user_cr3 = build_user_view_with_mappings(cr3, stack_top, stack_size as u64);
         task.heap_brk = heap_brk;
         task.heap_floor = heap_brk;
         // Capture the parent BEFORE taking TASKS — `current_task_id()`
@@ -1709,11 +1757,11 @@ pub fn set_task_cr3(id: u64, cr3: u64) {
                         if let Some(ref mut t2) = t2 {
                             if t2.id == id {
                                 t2.cr3 = cr3;
-                                if let Some(view) = build_user_view(cr3) {
-                                    t2.user_cr3 = view;
-                                } else {
-                                    t2.user_cr3 = cr3;
-                                }
+                                t2.user_cr3 = build_user_view_with_mappings(
+                                    cr3,
+                                    t2.kernel_rsp_top,
+                                    t2.stack_size,
+                                );
                                 return;
                             }
                         }
@@ -1721,11 +1769,11 @@ pub fn set_task_cr3(id: u64, cr3: u64) {
                     return;
                 }
                 task.cr3 = cr3;
-                if let Some(view) = build_user_view(cr3) {
-                    task.user_cr3 = view;
-                } else {
-                    task.user_cr3 = cr3;
-                }
+                task.user_cr3 = build_user_view_with_mappings(
+                    cr3,
+                    task.kernel_rsp_top,
+                    task.stack_size,
+                );
                 return;
             }
         }
@@ -2372,11 +2420,6 @@ pub fn exit_current_task(code: u64) -> ! {
 
     // Deliver SIGCHLD to parent process
     signal_deliver(parent_pid, super::signal::SIGCHLD);
-
-    // Write debug marker before yield (visible in serial/log)
-    unsafe {
-        core::arch::asm!("out 0xe9, al", in("al") b'X', options(nostack, preserves_flags));
-    }
 
     // Switch to the next ready task via yield_now().
     // Since this task is Terminated, is_active() returns false and

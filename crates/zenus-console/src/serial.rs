@@ -246,6 +246,15 @@ pub fn flush_output() {
         Some(b) => b,
         None => return,
     };
+    // Defensive: if the output buffer is corrupt (length out of bounds, or a
+    // fully-zero page that would spew garbage to the serial console), drop it
+    // rather than flushing it.
+    if ob.len > ob.data.len()
+        || (ob.len > 256 && ob.data[..256].iter().all(|&b| b == 0))
+    {
+        ob.len = 0;
+        return;
+    }
     if ob.len == 0 {
         return;
     }
@@ -262,6 +271,13 @@ pub fn flush_output() {
 /// spurious). JANGAN panggil dari timer ISR (risiko deadlock).
 pub fn flush_output_blocking() {
     let mut ob = OUTPUT_BUF.lock();
+    // Defensive: drop a corrupt output buffer (see flush_output).
+    if ob.len > ob.data.len()
+        || (ob.len > 256 && ob.data[..256].iter().all(|&b| b == 0))
+    {
+        ob.len = 0;
+        return;
+    }
     if ob.len == 0 {
         return;
     }

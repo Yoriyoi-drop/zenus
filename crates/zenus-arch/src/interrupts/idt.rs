@@ -13,6 +13,7 @@ extern "C" {
     static kpti_idt_entry_6: u8;
     static kpti_idt_entry_13: u8;
     static kpti_idt_entry_14: u8;
+    static kpti_idt_entry_8: u8;
     static kpti_idt_entry_32: u8;
     static kpti_idt_entry_33: u8;
     static kpti_idt_entry_36: u8;
@@ -148,6 +149,7 @@ pub fn init() {
             handler::interrupt_spurious as *const () as u64,
             handler::interrupt_nic as *const () as u64,
             handler::interrupt_stray as *const () as u64,
+            double_fault_handler as *const () as u64,
         );
 
     // KPTI entry stubs live in .text.kpti, mapped into both the kernel and
@@ -174,9 +176,18 @@ pub fn init() {
         idt.device_not_available
             .set_handler_fn(device_not_available_handler);
 
+        // Double fault routed through a KPTI stub so it can run with the
+        // user view loaded (it switches CR3 to the kernel view before jumping
+        // to the handler). Uses TSS.RSP0 (mapped in every user view as a
+        // supervisor page) rather than the DF IST, because the IST stack is a
+        // kernel-address page that is NOT mapped in the user view and would
+        // itself triple-fault. This keeps the double-fault handler reachable
+        // for diagnosis; the IST is restored once IST stacks are mapped into
+        // user views.
         idt.double_fault
-            .set_handler_fn(double_fault_handler)
-            .set_stack_index((gdt::DF_IST_IDX + 1) as u16);
+            .set_handler_addr(x86_64::VirtAddr::new(
+                &kpti_idt_entry_8 as *const u8 as u64,
+            ));
 
         idt.invalid_tss.set_handler_fn(invalid_tss_handler);
         idt.segment_not_present
@@ -247,6 +258,18 @@ pub fn load_ap() {
         let idt = &*IDT.as_ptr();
         idt.load();
     }
+}
+
+/// BSP IDT virtual address range, for KPTI user-view mapping.
+///
+/// The CPU fetches gate descriptors from the IDT at the linear address in IDTR,
+/// through whatever CR3 is loaded — which is the user view whenever a ring-3
+/// task faults. The user view zeroes the kernel half, so the IDT (a kernel
+/// BSS page) must be remapped into it as a supervisor page. This returns the
+/// kernel-view address and size; the user view keeps the same virtual address.
+pub fn idt_range() -> (u64, u64) {
+    let start = core::ptr::addr_of!(IDT) as u64;
+    (start, core::mem::size_of::<InterruptDescriptorTable>() as u64)
 }
 
 extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) {
@@ -518,7 +541,7 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
         if let Some(kill) = faults::user_fault_handler() {
             kill(addr, frame.instruction_pointer.as_u64()); // never returns
         }
-    }
+    } else {
 
     let s = SerialPort::new(0x3F8);
 

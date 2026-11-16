@@ -139,3 +139,25 @@ pub fn set_tss_stack(stack_ptr: VirtAddr) {
         tss.privilege_stack_table[0] = stack_ptr;
     }
 }
+
+/// BSP GDT virtual address range, for KPTI user-view mapping.
+///
+/// The CPU reads segment descriptors (including the CS/SS reload performed by a
+/// plain `iretq` back to ring 3) from the GDT at the GDTR linear address,
+/// through whatever CR3 is loaded. A user view zeroes the kernel half, so the
+/// GDT (a kernel BSS page) must be remapped into it as a supervisor page.
+pub fn gdt_range() -> (u64, u64) {
+    let start = core::ptr::addr_of!(GDT) as u64;
+    (start, core::mem::size_of::<GdtTable>() as u64)
+}
+
+/// BSP TSS virtual address range, for KPTI user-view mapping.
+///
+/// A ring-3 → ring-0 transition (any interrupt/exception) reads `TSS.RSP0` to
+/// find the kernel stack, via the TR → GDT descriptor → TSS linear address,
+/// through whatever CR3 is loaded. A user view zeroes the kernel half, so the
+/// TSS (a kernel BSS page) must be remapped into it as a supervisor page.
+pub fn tss_range() -> (u64, u64) {
+    let start = core::ptr::addr_of!(TSS) as u64;
+    (start, core::mem::size_of::<TaskStateSegment>() as u64)
+}

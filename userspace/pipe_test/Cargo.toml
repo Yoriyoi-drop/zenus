@@ -3,5 +3,8 @@ name = "pipe_test"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+crate-type = ["staticlib"]
+
 [dependencies]
 syscall_core = { path = "../syscall_core" }

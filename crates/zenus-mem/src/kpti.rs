@@ -100,6 +100,11 @@ core::arch::global_asm!(
     "  mov rcx, [rip + kpti_kernel_cr3_slot]",
     "  mov cr3, rcx",
     "  jmp [rip + kpti_idt_target_14]",
+    ".globl kpti_idt_entry_8",
+    "kpti_idt_entry_8:",
+    "  mov rcx, [rip + kpti_kernel_cr3_slot]",
+    "  mov cr3, rcx",
+    "  jmp [rip + kpti_idt_target_8]",
     // --- Hardware interrupt vectors ---
     ".globl kpti_idt_entry_32",
     "kpti_idt_entry_32:",
@@ -151,6 +156,10 @@ core::arch::global_asm!(
     "kpti_idt_target_14:",
     "  .quad 0",
     ".balign 8",
+    ".globl kpti_idt_target_8",
+    "kpti_idt_target_8:",
+    "  .quad 0",
+    ".balign 8",
     ".globl kpti_idt_target_32",
     "kpti_idt_target_32:",
     "  .quad 0",
@@ -181,6 +190,7 @@ extern "C" {
     static kpti_idt_target_6: u64;
     static kpti_idt_target_13: u64;
     static kpti_idt_target_14: u64;
+    static kpti_idt_target_8: u64;
     static kpti_idt_target_32: u64;
     static kpti_idt_target_33: u64;
     static kpti_idt_target_36: u64;
@@ -196,12 +206,14 @@ extern "C" {
 pub fn init_idt_entry_targets(
     div0: u64, inv_op: u64, gpf: u64, page_fault: u64,
     timer: u64, keyboard: u64, serial: u64, spurious: u64, nic: u64, stray: u64,
+    double_fault: u64,
 ) {
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_0) as *mut u64, div0);
         core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_6) as *mut u64, inv_op);
         core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_13) as *mut u64, gpf);
         core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_14) as *mut u64, page_fault);
+        core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_8) as *mut u64, double_fault);
         core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_32) as *mut u64, timer);
         core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_33) as *mut u64, keyboard);
         core::ptr::write_volatile(core::ptr::addr_of!(kpti_idt_target_36) as *mut u64, serial);
@@ -401,6 +413,122 @@ pub fn build_user_view(kernel_view_cr3: u64) -> Option<u64> {
 pub fn destroy_user_view(user_view_cr3: u64) {
     let mut allocator = crate::frame_allocator::FRAME_ALLOCATOR.lock();
     allocator.free_frame(x86_64::PhysAddr::new(user_view_cr3 & !0xFFF));
+}
+
+/// Map a task's kernel stack into its user view as a **supervisor** page.
+///
+/// When a user task returns to ring 3 (`iretq`) or takes an interrupt while
+/// running with the user view loaded, the CPU must touch the kernel stack: the
+/// `iretq` reads its five-word return frame from it, and a ring-3 interrupt
+/// pushes its trap frame onto `TSS.RSP0` (the kernel stack) before the KPTI stub
+/// can switch CR3 back to the kernel view. The user view zeroes the kernel half
+/// of the address space, so without this mapping both accesses fault on an
+/// unmapped kernel address and triple-fault the machine.
+///
+/// The mapping MUST be supervisor (U/S = 0), not user-accessible. The `iretq`
+/// frame read and the ring-3 interrupt trap-frame push are both *supervisor*
+/// accesses (the CPU has already raised to CPL0), and SMAP is active with AC = 0
+/// on the return path: a supervisor access to a user-accessible page faults, so
+/// a `map_user_page_raw` here turns every syscall return into a #PF that then
+/// double-faults on the same unmapped-looking page and triple-faults silently
+/// (no fault/double-fault serial output survives). Supervisor pages let ring 0
+/// touch the stack while keeping it unreachable from ring 3, which is exactly
+/// the isolation KPTI wants.
+///
+/// The user view's high half is *not* shared with the kernel view (only the
+/// user half is copied), so mapping here builds fresh page-table levels for the
+/// stack's virtual range and leaves the kernel view untouched. The frames are
+/// the same ones the kernel view already maps; only the U/S bit differs.
+///
+/// Returns `false` if any page cannot be resolved or mapped — the caller then
+/// keeps the (insecure but bootable) full view instead of the user view so the
+/// task can still run.
+pub fn map_kernel_stack_into_user_view(
+    user_cr3: u64,
+    kernel_cr3: u64,
+    stack_top: u64,
+    stack_size: u64,
+) -> bool {
+    if stack_size == 0 || stack_top < stack_size {
+        return false;
+    }
+    let hhdm = paging::hhdm_offset();
+    if hhdm == 0 {
+        return false;
+    }
+    let stack_base = stack_top - stack_size;
+    let mut v = stack_base;
+    while v < stack_top {
+        let phys = match paging::virt_to_phys_raw(kernel_cr3, v) {
+            Some(p) => p,
+            None => return false,
+        };
+        // Writable, not executable: the stack holds no code. Supervisor so the
+        // CPL0 `iretq`/interrupt-trap-frame accesses are legal under SMAP.
+        if !paging::map_supervisor_page_raw(user_cr3, v, phys, true) {
+            return false;
+        }
+        v += paging::PAGE_SIZE as u64;
+    }
+    true
+}
+
+/// Map the CPU system tables (IDT, GDT, TSS) into a user view as **supervisor**
+/// pages.
+///
+/// When a ring-3 task faults or takes an interrupt, the CPU must reach three
+/// kernel-address structures through whatever CR3 is loaded at that moment —
+/// and after a syscall return that CR3 is the *user* view:
+///
+/// * the **IDT**: the gate for the fault/interrupt vector is fetched at the
+///   linear address in IDTR, through the current page tables;
+/// * the **GDT**: every segment load (including the CS/SS reload by a plain
+///   `iretq` back to ring 3) reads the descriptor from the GDT at the GDTR
+///   linear address;
+/// * the **TSS**: a ring-3 → ring-0 transition (any interrupt/exception) reads
+///   `TSS.RSP0` to find the kernel stack, via the TR → GDT descriptor → TSS
+///   linear address.
+///
+/// A user view zeroes the kernel half (entries 256..512) of the address space,
+/// so all three land in unmapped kernel addresses and the *first* fault is
+/// itself undeliverable: it escalates to a double fault, whose entry is
+/// likewise unmapped, and the machine triple-faults silently — which is exactly
+/// the `skdR` + silence we saw on every syscall return. Mapping them as
+/// supervisor pages makes them present for the CPL0 fetch while keeping them
+/// unreachable from ring 3 (the same isolation KPTI wants), so faults and
+/// interrupts from user mode can finally be handled instead of wedging the box.
+///
+/// `tables` is a list of `(virtual_start, byte_length)` ranges (the kernel
+/// view's addresses, which the user view keeps identical). Pages covering each
+/// range are mapped one at a time; a range that is empty or already past the end
+/// of a frame is skipped.
+pub fn map_system_tables_into_user_view(user_cr3: u64, tables: &[(u64, u64)]) -> bool {
+    let kernel = paging::kernel_cr3();
+    let hhdm = paging::hhdm_offset();
+    if hhdm == 0 {
+        return false;
+    }
+    for &(start, len) in tables {
+        if start == 0 || len == 0 {
+            continue;
+        }
+        let mut va = start & !0xFFF;
+        let end = (start + len + 0xFFF) & !0xFFF;
+        while va < end {
+            let phys = match paging::virt_to_phys_raw(kernel, va) {
+                Some(p) => p,
+                None => return false,
+            };
+            // Writable, non-executable: these are data pages the CPU reads (and
+            // may rewrite, e.g. TSS IST on a nested fault). Supervisor so ring 3
+            // cannot touch them.
+            if !paging::map_supervisor_page_raw(user_cr3, va, phys, true) {
+                return false;
+            }
+            va += paging::PAGE_SIZE as u64;
+        }
+    }
+    true
 }
 
 /// Whether a PML4 index is part of the user half.

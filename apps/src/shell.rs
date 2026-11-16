@@ -678,6 +678,8 @@ impl Shell {
             "pkg-info" => self.cmd_pkg_info(line, w),
             "watchdog-pet" => self.cmd_watchdog_pet(w),
             "watchdog-status" => self.cmd_watchdog_status(w),
+            "jobs" => self.cmd_jobs(line, w),
+            "wait" => self.cmd_wait(line, w),
             "crashdump" => self.cmd_crashdump(w),
             "lockdep-status" => self.cmd_lockdep_status(w),
             "syslog" => self.cmd_syslog(line, w),
@@ -706,7 +708,6 @@ impl Shell {
             "firewall-add" => self.cmd_firewall_add(line, w),
             "firewall-remove" => self.cmd_firewall_remove(line, w),
             "run" => self.cmd_run(line, w),
-            "jobs" => self.cmd_jobs(w),
             "pipe-test" => self.cmd_pipe_test(w),
             _ => return false,
         }
@@ -1766,6 +1767,47 @@ impl Shell {
         }
     }
 
+    /// Wait for a child task (PID from `run … &` output) and reap it. With no
+    /// argument, waits for any child. Reaping clears the zombie that `run … &`
+    /// would otherwise leak. Implements a non-blocking poll loop with `yield`
+    /// (the kernel has no blocking wait) and a timeout.
+    fn cmd_wait(&mut self, line: &str, w: &mut dyn Writer) {
+        let args = Args::parse(line);
+        let me = zenus_sched::scheduler::current_task_id();
+        let target = args.get(1).and_then(|s| s.parse::<u64>().ok());
+        let child = target.unwrap_or(0);
+        let mut loops: u64 = 0;
+        loop {
+            zenus_sched::scheduler::yield_now();
+            if let Some((cpid, code)) =
+                zenus_sched::scheduler::wait_for_child(me, child, 1)
+            {
+                zenus_sched::scheduler::reap_task(cpid);
+                w.write_str("[PID ");
+                w.write_u64(cpid);
+                w.write_str("] reaped, exit code ");
+                w.write_u64(code);
+                w.write_str("\r\n");
+                return;
+            }
+            loops += 1;
+            if let Some(pid) = target {
+                if zenus_sched::scheduler::get_task(pid).is_none()
+                    && loops > 1
+                {
+                    w.write_str("wait: no such child ");
+                    w.write_u64(pid);
+                    w.write_str("\r\n");
+                    return;
+                }
+            }
+            if loops > 5000 {
+                w.write_str("wait: timeout\r\n");
+                return;
+            }
+        }
+    }
+
     /// Complete the command name (first word in buffer)
     fn tab_complete_command(&mut self) {
         // Find end of first word
@@ -1962,8 +2004,30 @@ impl Shell {
         }
     }
 
-    fn cmd_jobs(&mut self, w: &mut dyn Writer) {
-        w.write_str("Background jobs: (not yet tracked)\r\n");
+    fn cmd_jobs(&mut self, _line: &str, w: &mut dyn Writer) {
+        let me = zenus_sched::scheduler::current_task_id();
+        let tasks = zenus_sched::scheduler::list_tasks();
+        let mut any = false;
+        for t in tasks.iter().flatten() {
+            if t.id == me {
+                continue;
+            }
+            any = true;
+            w.write_str("[");
+            w.write_u64(t.id);
+            w.write_str("] ");
+            w.write_str(t.state.to_str());
+            w.write_str(" ");
+            let mut i = 0;
+            while i < t.name.len() && t.name[i] != 0 {
+                w.write_byte(t.name[i]);
+                i += 1;
+            }
+            w.write_str("\r\n");
+        }
+        if !any {
+            w.write_str("no jobs\r\n");
+        }
     }
 
     fn cmd_pipe_test(&mut self, w: &mut dyn Writer) {
