@@ -861,6 +861,209 @@ impl ZnmFile {
     }
 }
 
+/// Magic number for a Zenus Native Package: bytes `5A 4E 50 4B` = "ZNPK".
+pub const ZNPKG_MAGIC: u32 = 0x4B_50_4E_5A; // little-endian "ZNPK"
+
+/// Current `.znpkg` format version.
+pub const ZNPKG_VERSION: u16 = 1;
+
+/// Type of a file contained inside a `.znpkg` package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ZnpkgFileType {
+    Executable = 0,
+    Library = 1,
+    Driver = 2,
+    Module = 3,
+    Archive = 4,
+    Firmware = 5,
+    Configuration = 6,
+    Log = 7,
+    Other = 255,
+}
+
+impl ZnpkgFileType {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ZnpkgFileType::Executable),
+            1 => Some(ZnpkgFileType::Library),
+            2 => Some(ZnpkgFileType::Driver),
+            3 => Some(ZnpkgFileType::Module),
+            4 => Some(ZnpkgFileType::Archive),
+            5 => Some(ZnpkgFileType::Firmware),
+            6 => Some(ZnpkgFileType::Configuration),
+            7 => Some(ZnpkgFileType::Log),
+            255 => Some(ZnpkgFileType::Other),
+            _ => None,
+        }
+    }
+}
+
+/// One file entry inside a package: name, offset, size, and type.
+#[derive(Debug, Clone)]
+pub struct ZnpkgEntry {
+    pub name: String,
+    pub offset: u64,
+    pub size: u64,
+    pub file_type: ZnpkgFileType,
+}
+
+/// Fixed-size package header after magic/version.
+#[derive(Debug, Clone)]
+pub struct ZnpkgHeader {
+    pub version: u16,
+    pub file_count: u16,
+    pub manifest_offset: u64,
+    pub manifest_size: u64,
+    pub script_offset: u64,
+    pub script_size: u64,
+}
+
+/// A parsed `.znpkg` package (a container of `.zn*` files plus a manifest and
+/// an install script).
+#[derive(Debug, Clone)]
+pub struct ZnpkgFile {
+    pub header: ZnpkgHeader,
+    pub entries: Vec<ZnpkgEntry>,
+    pub manifest: Vec<u8>,
+    pub install_script: Vec<u8>,
+    pub raw: Vec<u8>,
+}
+
+/// Errors while parsing or validating a `.znpkg` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZnpkgError {
+    TooSmall,
+    BadMagic { found: u32 },
+    BadVersion { found: u16 },
+    Truncated,
+    InvalidUtf8,
+    InvalidFileType(u8),
+    EntryOutOfBounds,
+}
+
+impl fmt::Display for ZnpkgError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZnpkgError::TooSmall => write!(f, "znpkg: file too small to contain a header"),
+            ZnpkgError::BadMagic { found } => {
+                write!(f, "znpkg: invalid magic number 0x{:08X}, expected 0x{:08X} (\"ZNPK\")", found, ZNPKG_MAGIC)
+            }
+            ZnpkgError::BadVersion { found } => {
+                write!(f, "znpkg: unsupported format version {}, expected {}", found, ZNPKG_VERSION)
+            }
+            ZnpkgError::Truncated => write!(f, "znpkg: file truncated while reading tables"),
+            ZnpkgError::InvalidUtf8 => write!(f, "znpkg: entry name or manifest is not valid UTF-8"),
+            ZnpkgError::InvalidFileType(t) => write!(f, "znpkg: invalid file type {}", t),
+            ZnpkgError::EntryOutOfBounds => write!(f, "znpkg: entry data extends past end of package"),
+        }
+    }
+}
+
+impl ZnpkgFile {
+    /// Parse a `.znpkg` image from a byte buffer. Pure, host-testable parser:
+    /// validates magic/version, reads the fixed header, then the entry table
+    /// (each: u16 name length + name + u64 offset + u64 size + u8 type), the
+    /// manifest blob, and the install script blob.
+    pub fn parse(data: &[u8]) -> Result<Self, ZnpkgError> {
+        if data.len() < 8 {
+            return Err(ZnpkgError::TooSmall);
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != ZNPKG_MAGIC {
+            return Err(ZnpkgError::BadMagic { found: magic });
+        }
+
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != ZNPKG_VERSION {
+            return Err(ZnpkgError::BadVersion { found: version });
+        }
+
+        if data.len() < 30 {
+            return Err(ZnpkgError::TooSmall);
+        }
+
+        let hdr_version = u16::from_le_bytes(data[6..8].try_into().unwrap());
+        let file_count = u16::from_le_bytes(data[8..10].try_into().unwrap());
+        let manifest_offset = u64::from_le_bytes(data[10..18].try_into().unwrap());
+        let manifest_size = u64::from_le_bytes(data[18..26].try_into().unwrap());
+        let script_offset = u64::from_le_bytes(data[26..34].try_into().unwrap());
+        let script_size = u64::from_le_bytes(data[34..42].try_into().unwrap());
+
+        let header = ZnpkgHeader {
+            version: hdr_version,
+            file_count,
+            manifest_offset,
+            manifest_size,
+            script_offset,
+            script_size,
+        };
+
+        let mut off = 42usize;
+        let mut entries = Vec::with_capacity(file_count as usize);
+        for _ in 0..file_count as usize {
+            if off + 2 > data.len() {
+                return Err(ZnpkgError::Truncated);
+            }
+            let nlen = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+            off += 2;
+            if off + nlen > data.len() {
+                return Err(ZnpkgError::Truncated);
+            }
+            let name = core::str::from_utf8(&data[off..off + nlen])
+                .map_err(|_| ZnpkgError::InvalidUtf8)?
+                .to_string();
+            off += nlen;
+            if off + 16 > data.len() {
+                return Err(ZnpkgError::Truncated);
+            }
+            let offset = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+            let size = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
+            off += 16;
+            let type_raw = data[off];
+            off += 1;
+            let file_type = ZnpkgFileType::from_u8(type_raw).ok_or(ZnpkgError::InvalidFileType(type_raw))?;
+            if offset as u128 + size as u128 > data.len() as u128 {
+                return Err(ZnpkgError::EntryOutOfBounds);
+            }
+            entries.push(ZnpkgEntry { name, offset, size, file_type });
+        }
+
+        // Manifest blob.
+        let manifest = if header.manifest_offset as usize + header.manifest_size as usize > data.len() {
+            return Err(ZnpkgError::Truncated);
+        } else {
+            Vec::from(&data[header.manifest_offset as usize
+                ..(header.manifest_offset + header.manifest_size) as usize])
+        };
+
+        // Install script blob.
+        let install_script = if header.script_offset as usize + header.script_size as usize > data.len() {
+            return Err(ZnpkgError::Truncated);
+        } else {
+            Vec::from(&data[header.script_offset as usize
+                ..(header.script_offset + header.script_size) as usize])
+        };
+
+        Ok(ZnpkgFile {
+            header,
+            entries,
+            manifest,
+            install_script,
+            raw: Vec::from(data),
+        })
+    }
+
+    /// Return the data bytes for the entry with the given name, if present.
+    pub fn entry_data(&self, name: &str) -> Option<&[u8]> {
+        let entry = self.entries.iter().find(|e| e.name == name)?;
+        let start = entry.offset as usize;
+        let end = start + entry.size as usize;
+        self.raw.get(start..end)
+    }
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
@@ -1250,6 +1453,110 @@ mod host_tests {
         match ZnmFile::parse(&img) {
             Err(ZnmError::Truncated) => {}
             other => panic!("expected Truncated, got {:?}", other),
+        }
+    }
+
+    fn make_valid_znpkg() -> Vec<u8> {
+        // Layout: header(42) + entry table + file data + manifest + script.
+        let file_data = b"hello from browser.zns"; // 22 bytes
+        let manifest = b"name=browser\nversion=1.0"; // 20 bytes
+        let script = b"echo installing browser"; // 23 bytes
+
+        let entry_count = 1u16;
+        let entry_name = b"browser.zns";
+        let entry_name_len = entry_name.len() as u16;
+        // entry: name_len(2) + name(9) + offset(8) + size(8) + type(1) = 28
+        let entry_size = 2 + entry_name_len as usize + 8 + 8 + 1;
+        let data_offset = 42 + entry_size as u64; // 70
+        let manifest_offset = data_offset + file_data.len() as u64; // 92
+        let script_offset = manifest_offset + manifest.len() as u64; // 112
+        let total = script_offset + script.len() as u64; // 135
+
+        let mut buf = Vec::with_capacity(total as usize);
+        buf.extend_from_slice(&ZNPKG_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&ZNPKG_VERSION.to_le_bytes());
+        // header: hdr_version, file_count, manifest_offset, manifest_size,
+        // script_offset, script_size
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&entry_count.to_le_bytes());
+        buf.extend_from_slice(&manifest_offset.to_le_bytes());
+        buf.extend_from_slice(&(manifest.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&script_offset.to_le_bytes());
+        buf.extend_from_slice(&(script.len() as u64).to_le_bytes());
+        // entry table
+        buf.extend_from_slice(&entry_name_len.to_le_bytes());
+        buf.extend_from_slice(entry_name);
+        buf.extend_from_slice(&data_offset.to_le_bytes());
+        buf.extend_from_slice(&(file_data.len() as u64).to_le_bytes());
+        buf.push(ZnpkgFileType::Executable as u8);
+        // file data + manifest + script
+        buf.extend_from_slice(file_data);
+        buf.extend_from_slice(manifest);
+        buf.extend_from_slice(script);
+        assert_eq!(buf.len(), total as usize);
+        buf
+    }
+
+    #[test]
+    fn znpkg_parses_valid_package() {
+        let img = make_valid_znpkg();
+        let f = ZnpkgFile::parse(&img).expect("valid znpkg should parse");
+        assert_eq!(f.header.version, 1);
+        assert_eq!(f.header.file_count, 1);
+        assert_eq!(f.entries.len(), 1);
+        assert_eq!(f.entries[0].name, "browser.zns");
+        assert_eq!(f.entries[0].file_type, ZnpkgFileType::Executable);
+        assert_eq!(f.manifest, b"name=browser\nversion=1.0");
+        assert_eq!(f.install_script, b"echo installing browser");
+        assert_eq!(
+            f.entry_data("browser.zns"),
+            Some(&b"hello from browser.zns"[..]),
+        );
+        assert_eq!(f.entry_data("missing.zns"), None);
+    }
+
+    #[test]
+    fn znpkg_rejects_bad_magic() {
+        let mut img = make_valid_znpkg();
+        img[0] = 0x00;
+        match ZnpkgFile::parse(&img) {
+            Err(ZnpkgError::BadMagic { found }) => assert_ne!(found, ZNPKG_MAGIC),
+            other => panic!("expected BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znpkg_rejects_bad_version() {
+        let mut img = make_valid_znpkg();
+        img[4] = 9;
+        match ZnpkgFile::parse(&img) {
+            Err(ZnpkgError::BadVersion { found }) => assert_eq!(found, 9),
+            other => panic!("expected BadVersion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znpkg_rejects_invalid_file_type() {
+        let mut img = make_valid_znpkg();
+        // file type byte: header(42) + name_len(2) + name(11) + offset(8) + size(8)
+        let type_offset = 42 + 2 + 11 + 8 + 8;
+        img[type_offset] = 99;
+        match ZnpkgFile::parse(&img) {
+            Err(ZnpkgError::InvalidFileType(t)) => assert_eq!(t, 99),
+            other => panic!("expected InvalidFileType, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znpkg_rejects_entry_out_of_bounds() {
+        let mut img = make_valid_znpkg();
+        // size field: header(42) + name_len(2) + name(11) + offset(8)
+        let size_offset = 42 + 2 + 11 + 8;
+        let size_bytes = u64::to_le_bytes(img.len() as u64 + 1000);
+        img[size_offset..size_offset + 8].copy_from_slice(&size_bytes);
+        match ZnpkgFile::parse(&img) {
+            Err(ZnpkgError::EntryOutOfBounds) => {}
+            other => panic!("expected EntryOutOfBounds, got {:?}", other),
         }
     }
 }
