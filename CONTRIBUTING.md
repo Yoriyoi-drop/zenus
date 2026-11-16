@@ -79,7 +79,7 @@ Two layers, and they are not interchangeable:
   `Result<(), &'static str>`, registered in `apps/src/test_runner.rs`. The only
   way to test MMIO, the IDT and the APIC. 27 tests today.
 
-**Current coverage**: 399 host tests, 27 in-kernel tests.
+**Current coverage**: 406 host tests, 27 in-kernel tests.
 
 #### Writing Tests
 - Global kernel state is shared by every test in the process (block cache,

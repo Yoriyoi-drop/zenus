@@ -48,7 +48,7 @@ user/kernel transition), seccomp filter mode (`PR_SET_SECCOMP` with
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 399 host unit tests (`make test-host`), 27 in-kernel tests
+**Testing** — 406 host unit tests (`make test-host`), 27 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), a headless boot
 smoke test that requires the *ordinary* kernel to reach the shell prompt
 (`make smoke`), CI running all of them.
@@ -138,8 +138,8 @@ and zenus-fs does not depend on zenus-sched). The hierarchy is flat. Next:
    userspace programs are already loaded and run from the VFS/initrd via the
    shell `run <path> [&]` builtin (`cmd_run` → `load_elf`/`load_elf_raw`,
    with `&` for background execution). What is still missing: a full libc port
-   (printf remains; `string`/`memory` primitives now exist in `zenus-libc`) and
-   full shell job control: `run … &`,
+   (`zenus-libc` now has `string`/`memory` primitives and a type-safe `fmt::format`
+   core; a `printf` wrapper on top of it remains) and full shell job control: `run … &`,
    `jobs` and `wait [pid]` already exist, but there is no `fg`/`bg` to move a
    task between foreground and background. Shell pipelines (`|`) and redirection (`>`/`>>`/`<`)
    between builtins now work: stages are buffered in memory, the final stage (or

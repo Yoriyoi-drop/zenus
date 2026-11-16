@@ -4198,3 +4198,23 @@ primitif dasar tanpa harus menulis inline assembly.
 **Status:** host test 8/8 untuk `zenus-libc` (total workspace 399),
 `cargo build --target x86_64-unknown-none` hijau. `printf` masih belum ada —
 itu langkah berikutnya.
+
+## FEAT-002 — inti formatting type-safe di zenus-libc
+
+Lanjutan FEAT-001: fondasi `printf` tanpa varargs (yang tidak aman dan tidak
+tersedia di `no_std` Rust).
+
+**Perubahan:**
+- `crates/zenus-libc/src/fmt.rs` (baru): `Arg<'a>` enum (`Str`/`Int`/`Uint`/
+  `Hex`/`UpperHex`/`Char`) dan `format(buf, fmt, args) -> usize`. Mendukung
+  `%s`, `%d`, `%i`, `%u`, `%x`, `%X`, `%c`, `%%`. Caller memiliki buffer;
+  tulisan di-clamp ke `buf.len()` tanpa panic. Specifier tak dikenal atau
+  argumen kurang ditulis literal (`%q?`) agar format rusak terlihat, bukan
+  diam-diam memotong pesan. `i64::MIN` ditangani via `unsigned_abs`.
+- `crates/zenus-libc/src/lib.rs`: `pub mod fmt;`.
+- 7 host test: literal, escape `%%`, string/char/uint, signed (termasuk MIN),
+  hex dua case, clamp buffer, dan input malformed.
+
+**Status:** host test `zenus-libc` 15/15 (total workspace **406**),
+`cargo build --target x86_64-unknown-none` hijau. Pembungkus `printf` yang
+menulis ke fd 1 bisa dibangun di atas ini tanpa mengubah API.
