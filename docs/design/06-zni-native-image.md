@@ -400,6 +400,23 @@ Fitur keamanan yang dapat diterapkan:
 
 Dengan rancangan ini, `.zni` menjadi format image serbaguna untuk Zenus OS. Satu format yang sama dapat dipakai mulai dari instalasi desktop, deployment server, mesin virtual, hingga perangkat embedded, sehingga seluruh ekosistem menggunakan mekanisme distribusi dan boot yang konsisten.
 
+---
+
+## Status implementasi
+
+Format `.zni` sudah diimplementasi sebagai **stak parser stub** di `crates/zenus-formats` (bersama `.zns`, `.znl`, `.znd`, `.znm`, dan `.znpkg`):
+
+- `ZNI_MAGIC = 0x4D494E5A` ("ZNIM", little-endian), `ZNI_VERSION = 1`
+- `ZniImageHeader`: versi, arsitektur (AEX32/AEX64), tipe image (boot/recovery/installer/vm/live/server/embedded/container-base), kompresi, enkripsi, ukuran image, jumlah partisi
+- `ZniPartition`: nama, tipe, offset, ukuran
+- `ZniFile`: partisi, metadata, checksum, dan signature
+- `ZniFile::parse(data)`: parser murni (`no_std`, host-testable) yang memvalidasi magic/versi, lalu membaca header, tabel partisi, metadata, checksum, dan signature
+- `ZniFile::partition_data(name)`: ambil isi partisi berdasarkan nama
+- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 30 tes (6 `.zns` + 5 `.znl` + 5 `.znd` + 4 `.znm` + 5 `.znpkg` + 5 `.zni`), semua lulus (`cargo test -p zenus-formats`)
+- Bare-metal build: lolos `cargo build -p zenus-formats --target x86_64-unknown-none`
+
+Belum diimplementasi (jadwal berikutnya): verifikasi tanda tangan digital dan checksum saat boot, dukungan kompresi (LZ4/Zstd/XZ), enkripsi AES-256, dan boot loader yang memuat kernel dari image.
+
 
 `.znf` adalah **Zenus Native Firmware**, yaitu format firmware resmi untuk Zenus OS. Jika `.znd` mengendalikan perangkat keras melalui driver, maka `.znf` adalah perangkat lunak tingkat rendah yang berjalan **di dalam perangkat keras itu sendiri**. Driver memberi perintah, firmware yang menerjemahkan perintah itu menjadi aksi pada perangkat. Tanpa firmware, banyak perangkat modern hanyalah sekumpulan transistor yang menunggu instruksi dengan sabar.
 

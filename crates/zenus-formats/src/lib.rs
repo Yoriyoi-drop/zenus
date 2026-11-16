@@ -1064,6 +1064,268 @@ impl ZnpkgFile {
     }
 }
 
+/// Magic number for a Zenus Native Image: bytes `5A 4E 49 4D` = "ZNIM".
+pub const ZNI_MAGIC: u32 = 0x4D_49_4E_5A; // little-endian "ZNIM"
+
+/// Current `.zni` format version.
+pub const ZNI_VERSION: u16 = 1;
+
+/// Type of system image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ZniImageType {
+    Boot = 0,
+    Recovery = 1,
+    Installer = 2,
+    Vm = 3,
+    Live = 4,
+    Server = 5,
+    Embedded = 6,
+    ContainerBase = 7,
+}
+
+impl ZniImageType {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ZniImageType::Boot),
+            1 => Some(ZniImageType::Recovery),
+            2 => Some(ZniImageType::Installer),
+            3 => Some(ZniImageType::Vm),
+            4 => Some(ZniImageType::Live),
+            5 => Some(ZniImageType::Server),
+            6 => Some(ZniImageType::Embedded),
+            7 => Some(ZniImageType::ContainerBase),
+            _ => None,
+        }
+    }
+}
+
+/// Compression algorithm advertised in the header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ZniCompression {
+    None = 0,
+    Lz4 = 1,
+    Zstd = 2,
+    Xz = 3,
+}
+
+impl ZniCompression {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ZniCompression::None),
+            1 => Some(ZniCompression::Lz4),
+            2 => Some(ZniCompression::Zstd),
+            3 => Some(ZniCompression::Xz),
+            _ => None,
+        }
+    }
+}
+
+/// Encryption method advertised in the header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ZniEncryption {
+    None = 0,
+    Aes256 = 1,
+}
+
+impl ZniEncryption {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ZniEncryption::None),
+            1 => Some(ZniEncryption::Aes256),
+            _ => None,
+        }
+    }
+}
+
+/// One partition described in the image's partition table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZniPartition {
+    pub name: String,
+    pub image_type: ZniImageType,
+    pub offset: u64,
+    pub size: u64,
+}
+
+/// Fixed-size image header after magic/version.
+#[derive(Debug, Clone)]
+pub struct ZniImageHeader {
+    pub version: u16,
+    pub arch: ZnsArch,
+    pub image_type: ZniImageType,
+    pub compression: ZniCompression,
+    pub encryption: ZniEncryption,
+    pub image_size: u64,
+    pub partition_count: u16,
+}
+
+/// A parsed `.zni` system image.
+#[derive(Debug, Clone)]
+pub struct ZniFile {
+    pub header: ZniImageHeader,
+    pub partitions: Vec<ZniPartition>,
+    pub metadata: Vec<u8>,
+    pub checksum: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub raw: Vec<u8>,
+}
+
+/// Errors while parsing or validating a `.zni` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZniError {
+    TooSmall,
+    BadMagic { found: u32 },
+    BadVersion { found: u16 },
+    Truncated,
+    InvalidUtf8,
+    UnsupportedArch(u16),
+    InvalidImageType(u8),
+    InvalidCompression(u8),
+    InvalidEncryption(u8),
+    PartitionOutOfBounds,
+}
+
+impl fmt::Display for ZniError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZniError::TooSmall => write!(f, "zni: file too small to contain a header"),
+            ZniError::BadMagic { found } => {
+                write!(f, "zni: invalid magic number 0x{:08X}, expected 0x{:08X} (\"ZNIM\")", found, ZNI_MAGIC)
+            }
+            ZniError::BadVersion { found } => {
+                write!(f, "zni: unsupported format version {}, expected {}", found, ZNI_VERSION)
+            }
+            ZniError::Truncated => write!(f, "zni: file truncated while reading tables"),
+            ZniError::InvalidUtf8 => write!(f, "zni: partition name is not valid UTF-8"),
+            ZniError::UnsupportedArch(a) => write!(f, "zni: unsupported architecture {}", a),
+            ZniError::InvalidImageType(t) => write!(f, "zni: invalid image type {}", t),
+            ZniError::InvalidCompression(c) => write!(f, "zni: invalid compression {}", c),
+            ZniError::InvalidEncryption(e) => write!(f, "zni: invalid encryption {}", e),
+            ZniError::PartitionOutOfBounds => write!(f, "zni: partition data extends past end of image"),
+        }
+    }
+}
+
+impl ZniFile {
+    /// Parse a `.zni` image from a byte buffer. Pure, host-testable parser:
+    /// validates magic/version, reads the fixed header, then the partition
+    /// table (each: u16 name length + name + u8 type + u64 offset + u64 size),
+    /// followed by the metadata, checksum, and signature blobs.
+    pub fn parse(data: &[u8]) -> Result<Self, ZniError> {
+        if data.len() < 8 {
+            return Err(ZniError::TooSmall);
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != ZNI_MAGIC {
+            return Err(ZniError::BadMagic { found: magic });
+        }
+
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != ZNI_VERSION {
+            return Err(ZniError::BadVersion { found: version });
+        }
+
+        if data.len() < 38 {
+            return Err(ZniError::TooSmall);
+        }
+
+        let hdr_version = u16::from_le_bytes(data[6..8].try_into().unwrap());
+        let arch_raw = u16::from_le_bytes(data[8..10].try_into().unwrap());
+        let arch = ZnsArch::from_u16(arch_raw).ok_or(ZniError::UnsupportedArch(arch_raw))?;
+        let image_type_raw = data[10];
+        let image_type = ZniImageType::from_u8(image_type_raw)
+            .ok_or(ZniError::InvalidImageType(image_type_raw))?;
+        let compression_raw = data[11];
+        let compression = ZniCompression::from_u8(compression_raw)
+            .ok_or(ZniError::InvalidCompression(compression_raw))?;
+        let encryption_raw = data[12];
+        let encryption = ZniEncryption::from_u8(encryption_raw)
+            .ok_or(ZniError::InvalidEncryption(encryption_raw))?;
+        let image_size = u64::from_le_bytes(data[13..21].try_into().unwrap());
+        let partition_count = u16::from_le_bytes(data[21..23].try_into().unwrap());
+        let metadata_offset = u64::from_le_bytes(data[23..31].try_into().unwrap());
+        let metadata_size = u64::from_le_bytes(data[31..39].try_into().unwrap());
+        let checksum_offset = u64::from_le_bytes(data[39..47].try_into().unwrap());
+        let checksum_size = u64::from_le_bytes(data[47..55].try_into().unwrap());
+        let signature_offset = u64::from_le_bytes(data[55..63].try_into().unwrap());
+        let signature_size = u64::from_le_bytes(data[63..71].try_into().unwrap());
+
+        let header = ZniImageHeader {
+            version: hdr_version,
+            arch,
+            image_type,
+            compression,
+            encryption,
+            image_size,
+            partition_count,
+        };
+
+        let mut off = 71usize;
+        let mut partitions = Vec::with_capacity(partition_count as usize);
+        for _ in 0..partition_count as usize {
+            if off + 2 > data.len() {
+                return Err(ZniError::Truncated);
+            }
+            let nlen = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+            off += 2;
+            if off + nlen > data.len() {
+                return Err(ZniError::Truncated);
+            }
+            let name = core::str::from_utf8(&data[off..off + nlen])
+                .map_err(|_| ZniError::InvalidUtf8)?
+                .to_string();
+            off += nlen;
+            if off + 17 > data.len() {
+                return Err(ZniError::Truncated);
+            }
+            let part_type_raw = data[off];
+            off += 1;
+            let part_type = ZniImageType::from_u8(part_type_raw)
+                .ok_or(ZniError::InvalidImageType(part_type_raw))?;
+            let offset = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+            let size = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
+            off += 16;
+            if offset as u128 + size as u128 > data.len() as u128 {
+                return Err(ZniError::PartitionOutOfBounds);
+            }
+            partitions.push(ZniPartition { name, image_type: part_type, offset, size });
+        }
+
+        let blob = |off: u64, size: u64| -> Result<Vec<u8>, ZniError> {
+            let o = off as usize;
+            let s = size as usize;
+            if o + s > data.len() {
+                return Err(ZniError::Truncated);
+            }
+            Ok(Vec::from(&data[o..o + s]))
+        };
+
+        let metadata = blob(metadata_offset, metadata_size)?;
+        let checksum = blob(checksum_offset, checksum_size)?;
+        let signature = blob(signature_offset, signature_size)?;
+
+        Ok(ZniFile {
+            header,
+            partitions,
+            metadata,
+            checksum,
+            signature,
+            raw: Vec::from(data),
+        })
+    }
+
+    /// Return the data bytes for the partition with the given name, if present.
+    pub fn partition_data(&self, name: &str) -> Option<&[u8]> {
+        let part = self.partitions.iter().find(|p| p.name == name)?;
+        let start = part.offset as usize;
+        let end = start + part.size as usize;
+        self.raw.get(start..end)
+    }
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
@@ -1557,6 +1819,126 @@ mod host_tests {
         match ZnpkgFile::parse(&img) {
             Err(ZnpkgError::EntryOutOfBounds) => {}
             other => panic!("expected EntryOutOfBounds, got {:?}", other),
+        }
+    }
+
+    fn make_valid_zni() -> Vec<u8> {
+        // Layout: header(71) + partition table + kernel data + metadata +
+        // checksum + signature.
+        let kernel_data = b"ZENUS KERNEL IMAGE";
+        let metadata = b"name=zenus-boot\nversion=1.0";
+        let checksum = b"abcdef0123456789";
+        let signature = b"SIGNATUREBYTES";
+
+        let partition_count = 1u16;
+        let part_name = b"kernel";
+        let part_name_len = part_name.len() as u16;
+        // partition: name_len(2) + name + type(1) + offset(8) + size(8) = 20
+        let part_size = 2 + part_name_len as usize + 1 + 8 + 8;
+        let kernel_offset = 71 + part_size as u64;
+        let metadata_offset = kernel_offset + kernel_data.len() as u64;
+        let checksum_offset = metadata_offset + metadata.len() as u64;
+        let signature_offset = checksum_offset + checksum.len() as u64;
+        let total = signature_offset + signature.len() as u64;
+
+        let mut buf = Vec::with_capacity(total as usize);
+        buf.extend_from_slice(&ZNI_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&ZNI_VERSION.to_le_bytes());
+        // header: hdr_version, arch(Aex64), image_type(Boot),
+        // compression(None), encryption(None), image_size, partition_count,
+        // metadata_offset, metadata_size, checksum_offset, checksum_size,
+        // signature_offset, signature_size
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&64u16.to_le_bytes());
+        buf.push(ZniImageType::Boot as u8);
+        buf.push(ZniCompression::None as u8);
+        buf.push(ZniEncryption::None as u8);
+        buf.extend_from_slice(&(kernel_data.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&partition_count.to_le_bytes());
+        buf.extend_from_slice(&metadata_offset.to_le_bytes());
+        buf.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&checksum_offset.to_le_bytes());
+        buf.extend_from_slice(&(checksum.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&signature_offset.to_le_bytes());
+        buf.extend_from_slice(&(signature.len() as u64).to_le_bytes());
+        // partition table
+        buf.extend_from_slice(&part_name_len.to_le_bytes());
+        buf.extend_from_slice(part_name);
+        buf.push(ZniImageType::Boot as u8);
+        buf.extend_from_slice(&kernel_offset.to_le_bytes());
+        buf.extend_from_slice(&(kernel_data.len() as u64).to_le_bytes());
+        // kernel data + metadata + checksum + signature
+        buf.extend_from_slice(kernel_data);
+        buf.extend_from_slice(metadata);
+        buf.extend_from_slice(checksum);
+        buf.extend_from_slice(signature);
+        assert_eq!(buf.len(), total as usize);
+        buf
+    }
+
+    #[test]
+    fn zni_parses_valid_image() {
+        let img = make_valid_zni();
+        let f = ZniFile::parse(&img).expect("valid zni should parse");
+        assert_eq!(f.header.version, 1);
+        assert_eq!(f.header.arch, ZnsArch::Aex64);
+        assert_eq!(f.header.image_type, ZniImageType::Boot);
+        assert_eq!(f.header.compression, ZniCompression::None);
+        assert_eq!(f.header.encryption, ZniEncryption::None);
+        assert_eq!(f.partitions.len(), 1);
+        assert_eq!(f.partitions[0].name, "kernel");
+        assert_eq!(f.partitions[0].image_type, ZniImageType::Boot);
+        assert_eq!(f.metadata, b"name=zenus-boot\nversion=1.0");
+        assert_eq!(f.checksum, b"abcdef0123456789");
+        assert_eq!(f.signature, b"SIGNATUREBYTES");
+        assert_eq!(
+            f.partition_data("kernel"),
+            Some(&b"ZENUS KERNEL IMAGE"[..])
+        );
+        assert_eq!(f.partition_data("missing"), None);
+    }
+
+    #[test]
+    fn zni_rejects_bad_magic() {
+        let mut img = make_valid_zni();
+        img[0] = 0x00;
+        match ZniFile::parse(&img) {
+            Err(ZniError::BadMagic { found }) => assert_ne!(found, ZNI_MAGIC),
+            other => panic!("expected BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn zni_rejects_bad_version() {
+        let mut img = make_valid_zni();
+        img[4] = 9;
+        match ZniFile::parse(&img) {
+            Err(ZniError::BadVersion { found }) => assert_eq!(found, 9),
+            other => panic!("expected BadVersion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn zni_rejects_invalid_image_type() {
+        let mut img = make_valid_zni();
+        // image type byte at offset 10
+        img[10] = 99;
+        match ZniFile::parse(&img) {
+            Err(ZniError::InvalidImageType(t)) => assert_eq!(t, 99),
+            other => panic!("expected InvalidImageType, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn zni_rejects_partition_out_of_bounds() {
+        let mut img = make_valid_zni();
+        // partition size field: header(71) + name_len(2) + name(6) + type(1) + offset(8)
+        let size_offset = 71 + 2 + 6 + 1 + 8;
+        let size_bytes = u64::to_le_bytes(img.len() as u64 + 1000);
+        img[size_offset..size_offset + 8].copy_from_slice(&size_bytes);
+        match ZniFile::parse(&img) {
+            Err(ZniError::PartitionOutOfBounds) => {}
+            other => panic!("expected PartitionOutOfBounds, got {:?}", other),
         }
     }
 }
