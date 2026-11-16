@@ -351,6 +351,24 @@ pub fn write(fd: FdT, buf: *const u8, count: usize) -> LibcResult<isize> {
     unsafe { ret_result(syscall3(SYS_WRITE, fd as u64, buf as u64, count as u64)).map(|r| r as isize) }
 }
 
+// ── Formatted output ────────────────────────────────────────────────────────
+
+/// Format via [`fmt::format`] and write the result to `fd`.
+///
+/// The formatted message is capped at 512 bytes and truncated at that
+/// boundary; use several calls for longer output. The cap is deliberate:
+/// it keeps this wrapper allocation-free and fixes the stack footprint.
+pub fn fprintf(fd: FdT, format: &[u8], args: &[fmt::Arg<'_>]) -> LibcResult<isize> {
+    let mut buf = [0u8; 512];
+    let n = fmt::format(&mut buf, format, args);
+    write(fd, buf.as_ptr(), n)
+}
+
+/// Format and write to stdout.
+pub fn printf(format: &[u8], args: &[fmt::Arg<'_>]) -> LibcResult<isize> {
+    fprintf(STDOUT, format, args)
+}
+
 pub fn lseek(fd: FdT, offset: i64, whence: i32) -> LibcResult<isize> {
     unsafe { ret_result(syscall3(SYS_LSEEK, fd as u64, offset as u64, whence as u64)).map(|r| r as isize) }
 }

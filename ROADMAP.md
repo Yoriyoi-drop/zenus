@@ -138,8 +138,8 @@ and zenus-fs does not depend on zenus-sched). The hierarchy is flat. Next:
    userspace programs are already loaded and run from the VFS/initrd via the
    shell `run <path> [&]` builtin (`cmd_run` → `load_elf`/`load_elf_raw`,
    with `&` for background execution). What is still missing: a full libc port
-   (`zenus-libc` now has `string`/`memory` primitives and a type-safe `fmt::format`
-   core; a `printf` wrapper on top of it remains) and full shell job control: `run … &`,
+   (`zenus-libc` now has `string`/`memory` primitives, a type-safe `fmt::format`
+   core and `printf`/`fprintf` wrappers) and full shell job control: `run … &`,
    `jobs` and `wait [pid]` already exist, but there is no `fg`/`bg` to move a
    task between foreground and background. Shell pipelines (`|`) and redirection (`>`/`>>`/`<`)
    between builtins now work: stages are buffered in memory, the final stage (or

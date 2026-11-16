@@ -4218,3 +4218,16 @@ tersedia di `no_std` Rust).
 **Status:** host test `zenus-libc` 15/15 (total workspace **406**),
 `cargo build --target x86_64-unknown-none` hijau. Pembungkus `printf` yang
 menulis ke fd 1 bisa dibangun di atas ini tanpa mengubah API.
+
+## FEAT-003 — `printf`/`fprintf` di atas inti `fmt`
+
+**Perubahan:** `crates/zenus-libc/src/lib.rs` menambah `fprintf(fd, format,
+args)` dan `printf(format, args)`. Keduanya memformat ke buffer stack 512 byte
+lalu memanggil `write(fd, …)`. Batas 512 disengaja: wrapper tetap bebas alokasi
+dan jejak stack tetap di tiap call site; output lebih panjang dipotong dan
+harus dikirim dengan beberapa panggilan.
+
+**Status:** `cargo build --target x86_64-unknown-none` hijau, host test
+`zenus-libc` 15/15. Jalur syscall hanya bisa diverifikasi di QEMU (host test
+dilarang menyentuh syscall). Ini menutup bagian "full libc port" dari ROADMAP
+item 2; yang tersisa adalah `fg`/`bg` job control.

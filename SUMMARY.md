@@ -59,8 +59,8 @@ The in-kernel suite is for hardware paths.
 - `ZENUS_SSH/1.0`: not SSH.
 - `userspace/`: hand-built ring-3 programs. `zenus-libc` has syscall
   wrappers, errno constants and string/memory primitives (`memcpy`/`memmove`/
-  `memset`/`memcmp`/`strlen`/`strcmp`/`strncmp`) and a type-safe
-  `fmt::format` core, but no printf wrapper yet.
+  `memset`/`memcmp`/`strlen`/`strcmp`/`strncmp`), a type-safe `fmt::format`
+  core and `printf`/`fprintf` wrappers (512-byte cap per call).
 - Storage: PIO ATA and AHCI; no NVMe.
 
 See `SECURITY.md` for the full picture and `ROADMAP.md` for what is planned.
