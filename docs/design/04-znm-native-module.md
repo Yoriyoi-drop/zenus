@@ -488,6 +488,22 @@ container.znm
 
 Dengan desain ini, `.znm` menjadi fondasi arsitektur kernel Zenus yang modular. Fitur seperti sistem berkas baru, penjadwal CPU alternatif, subsistem keamanan, virtualisasi, atau dukungan container dapat ditambahkan atau diperbarui sebagai modul tanpa harus membangun ulang seluruh kernel, sehingga Zenus OS lebih mudah dikembangkan dan dipelihara.
 
+---
+
+## Status implementasi
+
+Format `.znm` sudah diimplementasi sebagai **stak parser stub** di `crates/zenus-formats` (bersama `.zns`, `.znl`, dan `.znd`):
+
+- `ZNM_MAGIC = 0x4D4B4E5A` ("ZNKM", little-endian), `ZNM_VERSION = 1`
+- `ZnmModuleHeader`: ABI version, arsitektur (AEX32/AEX64), minimum kernel, build type, flags (core/optional/experimental), jumlah dependency/export/import/init/cleanup/permission
+- `ZnmFile`: daftar dependensi, export simbol, import simbol, fungsi init, fungsi cleanup, dan daftar izin (permission table)
+- `ZnmFile::parse(data)`: parser murni (`no_std`, host-testable) yang memvalidasi magic/versi, lalu membaca semua tabel string panjang-berawalan (length-prefixed)
+- `ZnmFile::exports_symbol(name)` dan `ZnmFile::requires(dep)`: helper pemeriksaan simbol dan dependensi
+- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 20 tes (6 `.zns` + 5 `.znl` + 5 `.znd` + 4 `.znm`), semua lulus (`cargo test -p zenus-formats`)
+- Bare-metal build: lolos `cargo build -p zenus-formats --target x86_64-unknown-none`
+
+Belum diimplementasi (jadwal berikutnya): tabel relokasi, tabel penanganan penyaluhan (exception table), pemuatan modul ke kernel, verifikasi tanda tangan digital, dan rollback saat pemuatan gagal.
+
 
 `.znpkg` adalah format paket aplikasi resmi Zenus OS. Kalau `.zns` adalah aplikasi yang sudah siap dijalankan, maka `.znpkg` adalah wadah distribusinya. Anggap seperti kotak pengiriman yang berisi aplikasi, metadata, ikon, dependensi, dan instruksi instalasi. Jauh lebih rapi daripada tradisi lama yang menyuruh pengguna mengunduh 14 file dari forum lalu berharap semuanya berada di folder yang benar.
 

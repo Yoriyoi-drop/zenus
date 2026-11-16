@@ -662,6 +662,205 @@ impl ZndFile {
     }
 }
 
+/// Magic number for a Zenus Native Module: bytes `5A 4E 4B 4D` = "ZNKM".
+pub const ZNM_MAGIC: u32 = 0x4D_4B_4E_5A; // little-endian "ZNKM"
+
+/// Current `.znm` format version.
+pub const ZNM_VERSION: u16 = 1;
+
+/// Module flags (core, optional, experimental).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZnmFlags {
+    pub core: bool,
+    pub optional: bool,
+    pub experimental: bool,
+}
+
+impl ZnmFlags {
+    pub const NONE: Self = Self { core: false, optional: false, experimental: false };
+    pub const CORE: Self = Self { core: true, optional: false, experimental: false };
+
+    pub fn bits(self) -> u8 {
+        let mut b = 0u8;
+        if self.core { b |= 1; }
+        if self.optional { b |= 2; }
+        if self.experimental { b |= 4; }
+        b
+    }
+}
+
+/// Fixed-size module header after magic/version.
+#[derive(Debug, Clone)]
+pub struct ZnmModuleHeader {
+    pub abi_version: u16,
+    pub arch: ZnsArch,
+    pub minimum_kernel: u16,
+    pub build: ZnlBuild,
+    pub flags: ZnmFlags,
+    pub dependency_count: u16,
+    pub export_count: u16,
+    pub import_count: u16,
+    pub init_count: u16,
+    pub cleanup_count: u16,
+    pub permission_count: u16,
+}
+
+/// A parsed `.znm` kernel module.
+#[derive(Debug, Clone)]
+pub struct ZnmFile {
+    pub header: ZnmModuleHeader,
+    pub dependencies: Vec<String>,
+    pub exports: Vec<String>,
+    pub imports: Vec<String>,
+    pub init_functions: Vec<String>,
+    pub cleanup_functions: Vec<String>,
+    pub permissions: Vec<String>,
+    pub raw: Vec<u8>,
+}
+
+/// Errors while parsing or validating a `.znm` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZnmError {
+    TooSmall,
+    BadMagic { found: u32 },
+    BadVersion { found: u16 },
+    Truncated,
+    InvalidUtf8,
+    UnsupportedArch(u16),
+    InvalidBuild(u8),
+}
+
+impl fmt::Display for ZnmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZnmError::TooSmall => write!(f, "znm: file too small to contain a header"),
+            ZnmError::BadMagic { found } => {
+                write!(f, "znm: invalid magic number 0x{:08X}, expected 0x{:08X} (\"ZNKM\")", found, ZNM_MAGIC)
+            }
+            ZnmError::BadVersion { found } => {
+                write!(f, "znm: unsupported format version {}, expected {}", found, ZNM_VERSION)
+            }
+            ZnmError::Truncated => write!(f, "znm: file truncated while reading tables"),
+            ZnmError::InvalidUtf8 => write!(f, "znm: symbol/dependency string is not valid UTF-8"),
+            ZnmError::UnsupportedArch(a) => write!(f, "znm: unsupported architecture {}", a),
+            ZnmError::InvalidBuild(b) => write!(f, "znm: invalid build type {}", b),
+        }
+    }
+}
+
+impl ZnmFile {
+    /// Parse a `.znm` image from a byte buffer. Pure, host-testable parser:
+    /// validates magic/version, reads the fixed header, then reads a series of
+    /// length-prefixed UTF-8 string tables (dependencies, exports, imports,
+    /// init, cleanup, permissions).
+    pub fn parse(data: &[u8]) -> Result<Self, ZnmError> {
+        if data.len() < 8 {
+            return Err(ZnmError::TooSmall);
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != ZNM_MAGIC {
+            return Err(ZnmError::BadMagic { found: magic });
+        }
+
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != ZNM_VERSION {
+            return Err(ZnmError::BadVersion { found: version });
+        }
+
+        if data.len() < 30 {
+            return Err(ZnmError::TooSmall);
+        }
+
+        let abi_version = u16::from_le_bytes(data[6..8].try_into().unwrap());
+        let arch_raw = u16::from_le_bytes(data[8..10].try_into().unwrap());
+        let arch = ZnsArch::from_u16(arch_raw).ok_or(ZnmError::UnsupportedArch(arch_raw))?;
+        let minimum_kernel = u16::from_le_bytes(data[10..12].try_into().unwrap());
+        let build_raw = data[12];
+        let build = ZnlBuild::from_u8(build_raw).ok_or(ZnmError::InvalidBuild(build_raw))?;
+        let flags_raw = data[13];
+        let flags = ZnmFlags {
+            core: flags_raw & 1 != 0,
+            optional: flags_raw & 2 != 0,
+            experimental: flags_raw & 4 != 0,
+        };
+        let dependency_count = u16::from_le_bytes(data[14..16].try_into().unwrap());
+        let export_count = u16::from_le_bytes(data[16..18].try_into().unwrap());
+        let import_count = u16::from_le_bytes(data[18..20].try_into().unwrap());
+        let init_count = u16::from_le_bytes(data[20..22].try_into().unwrap());
+        let cleanup_count = u16::from_le_bytes(data[22..24].try_into().unwrap());
+        let permission_count = u16::from_le_bytes(data[24..26].try_into().unwrap());
+
+        let header = ZnmModuleHeader {
+            abi_version,
+            arch,
+            minimum_kernel,
+            build,
+            flags,
+            dependency_count,
+            export_count,
+            import_count,
+            init_count,
+            cleanup_count,
+            permission_count,
+        };
+
+        let mut off = 26usize;
+        let mut read_strings = |count: u16, target: &mut Vec<String>| -> Result<(), ZnmError> {
+            for _ in 0..count as usize {
+                if off + 2 > data.len() {
+                    return Err(ZnmError::Truncated);
+                }
+                let len = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+                off += 2;
+                if off + len > data.len() {
+                    return Err(ZnmError::Truncated);
+                }
+                let s = core::str::from_utf8(&data[off..off + len])
+                    .map_err(|_| ZnmError::InvalidUtf8)?
+                    .to_string();
+                off += len;
+                target.push(s);
+            }
+            Ok(())
+        };
+
+        let mut dependencies = Vec::with_capacity(dependency_count as usize);
+        read_strings(dependency_count, &mut dependencies)?;
+        let mut exports = Vec::with_capacity(export_count as usize);
+        read_strings(export_count, &mut exports)?;
+        let mut imports = Vec::with_capacity(import_count as usize);
+        read_strings(import_count, &mut imports)?;
+        let mut init_functions = Vec::with_capacity(init_count as usize);
+        read_strings(init_count, &mut init_functions)?;
+        let mut cleanup_functions = Vec::with_capacity(cleanup_count as usize);
+        read_strings(cleanup_count, &mut cleanup_functions)?;
+        let mut permissions = Vec::with_capacity(permission_count as usize);
+        read_strings(permission_count, &mut permissions)?;
+
+        Ok(ZnmFile {
+            header,
+            dependencies,
+            exports,
+            imports,
+            init_functions,
+            cleanup_functions,
+            permissions,
+            raw: Vec::from(data),
+        })
+    }
+
+    /// Return true if the module exports the given symbol name.
+    pub fn exports_symbol(&self, name: &str) -> bool {
+        self.exports.iter().any(|e| e == name)
+    }
+
+    /// Return true if the module requires the given dependency.
+    pub fn requires(&self, dep: &str) -> bool {
+        self.dependencies.iter().any(|d| d == dep)
+    }
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
@@ -947,6 +1146,109 @@ mod host_tests {
         img.truncate(21);
         match ZndFile::parse(&img) {
             Err(ZndError::Truncated) => {}
+            other => panic!("expected Truncated, got {:?}", other),
+        }
+    }
+
+    fn make_valid_znm() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&ZNM_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&ZNM_VERSION.to_le_bytes());
+        // abi_version, arch(Aex64), minimum_kernel, build(Release),
+        // flags(core), dep=1, export=1, import=1, init=1, cleanup=1, perm=1
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        buf.extend_from_slice(&64u16.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.push(ZnlBuild::Release as u8);
+        buf.push(ZnmFlags::CORE.bits());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        // dependency: "memory.znm"
+        let dep = b"memory.znm";
+        buf.extend_from_slice(&(dep.len() as u16).to_le_bytes());
+        buf.extend_from_slice(dep);
+        // export: "AllocatePage"
+        let exp = b"AllocatePage";
+        buf.extend_from_slice(&(exp.len() as u16).to_le_bytes());
+        buf.extend_from_slice(exp);
+        // import: "RegisterInterrupt"
+        let imp = b"RegisterInterrupt";
+        buf.extend_from_slice(&(imp.len() as u16).to_le_bytes());
+        buf.extend_from_slice(imp);
+        // init: "ModuleInit"
+        let init = b"ModuleInit";
+        buf.extend_from_slice(&(init.len() as u16).to_le_bytes());
+        buf.extend_from_slice(init);
+        // cleanup: "ModuleExit"
+        let cleanup = b"ModuleExit";
+        buf.extend_from_slice(&(cleanup.len() as u16).to_le_bytes());
+        buf.extend_from_slice(cleanup);
+        // permission: "Memory Manager"
+        let perm = b"Memory Manager";
+        buf.extend_from_slice(&(perm.len() as u16).to_le_bytes());
+        buf.extend_from_slice(perm);
+        buf
+    }
+
+    #[test]
+    fn znm_parses_valid_module() {
+        let img = make_valid_znm();
+        let f = ZnmFile::parse(&img).expect("valid znm should parse");
+        assert_eq!(f.header.abi_version, 2);
+        assert_eq!(f.header.arch, ZnsArch::Aex64);
+        assert_eq!(f.header.minimum_kernel, 1);
+        assert_eq!(f.header.build, ZnlBuild::Release);
+        assert!(f.header.flags.core);
+        assert_eq!(f.dependencies.len(), 1);
+        assert_eq!(f.dependencies[0], "memory.znm");
+        assert_eq!(f.exports.len(), 1);
+        assert_eq!(f.exports[0], "AllocatePage");
+        assert_eq!(f.imports.len(), 1);
+        assert_eq!(f.imports[0], "RegisterInterrupt");
+        assert_eq!(f.init_functions.len(), 1);
+        assert_eq!(f.init_functions[0], "ModuleInit");
+        assert_eq!(f.cleanup_functions.len(), 1);
+        assert_eq!(f.cleanup_functions[0], "ModuleExit");
+        assert_eq!(f.permissions.len(), 1);
+        assert_eq!(f.permissions[0], "Memory Manager");
+        assert!(f.exports_symbol("AllocatePage"));
+        assert!(!f.exports_symbol("FreePage"));
+        assert!(f.requires("memory.znm"));
+        assert!(!f.requires("scheduler.znm"));
+    }
+
+    #[test]
+    fn znm_rejects_bad_magic() {
+        let mut img = make_valid_znm();
+        img[0] = 0x00;
+        match ZnmFile::parse(&img) {
+            Err(ZnmError::BadMagic { found }) => assert_ne!(found, ZNM_MAGIC),
+            other => panic!("expected BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znm_rejects_bad_version() {
+        let mut img = make_valid_znm();
+        img[4] = 9;
+        match ZnmFile::parse(&img) {
+            Err(ZnmError::BadVersion { found }) => assert_eq!(found, 9),
+            other => panic!("expected BadVersion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znm_rejects_truncated_dependency() {
+        let mut img = make_valid_znm();
+        // header (26 bytes) + dep length prefix (2 bytes) kept, but the dep
+        // name bytes are cut → parser must report Truncated, not TooSmall.
+        img.truncate(30);
+        match ZnmFile::parse(&img) {
+            Err(ZnmError::Truncated) => {}
             other => panic!("expected Truncated, got {:?}", other),
         }
     }
