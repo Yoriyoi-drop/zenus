@@ -124,6 +124,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zenus-formats"
+version = "0.1.0"
+
+[[package]]
 name = "zenus-fs"
 version = "0.1.0"
 dependencies = [

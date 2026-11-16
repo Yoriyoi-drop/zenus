@@ -546,6 +546,21 @@ Aplikasi mulai berjalan
 
 Dengan desain seperti ini, `.zns` bukan sekadar "file yang bisa dijalankan", tetapi menjadi **format executable modern** yang menggabungkan kemampuan format seperti ELF, PE, dan Mach-O, sambil menambahkan fitur keamanan, metadata, serta manajemen izin yang dirancang sejak awal untuk Zenus OS.
 
+---
+
+## Status implementasi
+
+Format `.zns` sudah diimplementasi sebagai **stak parser stub** di `crates/zenus-formats`:
+
+- `ZNS_MAGIC = 0x58534E5A` ("ZNSX", little-endian)
+- `ZnsExecHeader`: entry point, arsitektur (AEX32/AEX64), ukuran image, jumlah segment/section, flags
+- `ZnsProgramHeader`: offset, vaddr, paddr, filesz, memsz, flags (R/W/X)
+- `ZnsFile::parse(data)`: parser murni (`no_std`, host-tesable) yang memvalidasi magic, versi, dan tabel segment, serta menolak file yang rusak/truncated
+- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 6 tes, semua lulus (`cargo test -p zenus-formats`)
+- Bare-metal build: lolos `cargo build -p zenus-formats --target x86_64-unknown-none`
+
+Belum diimplementasi (jadwal berikutnya): pemetaan segment ke memori, relokasi ASLR, verifikasi tanda tangan digital, dan pemuatan section `.text`/`.rodata`/`.data`/`.bss` ke address space tugas.
+
 
 Kalau `.znl` menjadi library resmi Zenus OS, maka perannya setara dengan **DLL** di Windows atau **shared object (.so)** di Linux. Bedanya, format ini bisa dirancang sejak awal agar lebih aman, lebih cepat dimuat, dan lebih mudah dikelola. Karena jika setiap aplikasi membawa salinan fungsi yang sama, RAM akan bekerja lembur hanya untuk mengulang pekerjaan yang identik. Komputer memang sabar, tetapi bukan berarti harus diperlakukan begitu.
 
