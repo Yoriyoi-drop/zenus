@@ -1871,7 +1871,7 @@ pub extern "C" fn schedule_tick(current_rsp: u64) -> u64 {
     // Charge one CPU tick to the current task's cgroup for cpu.max enforcement.
     // charge_cpu_for_task() returns false when the group is over its limit;
     // the stub ignores the result (enforcement action is a future step).
-    let _ = zenus_fs::cgroup::charge_cpu_for_task(current, 1);
+    let _ = zenus_fs::cgroup::charge_cpu_for_task(current as u64, 1);
 
     let next = find_next_ready(&tasks, current, cpu);
     if next == current {

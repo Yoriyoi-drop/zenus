@@ -4098,3 +4098,51 @@ enforced", section "KPTI is active for syscall isolation"), `AGENTS.md`
 (paragraf State dan "Known shallow spots"), dan komentar `apps/src/lib.rs:401`
 direvisi agar menyatakan KPTI aktif untuk isolasi syscall, konsisten dengan
 `ROADMAP.md` dan kode. Tidak ada perubahan fungsional; `make build` hijau.
+
+## BUG-083 — nilai kembalian syscall ditimpa KPTI CR3 → null-spew ribuan byte
+
+**Status:** RESOLVED + diverifikasi end-to-end. **Keparahan:** kritis — ABI
+syscall rusak untuk *semua* syscall yang nilai kembaliannya dipakai user.
+
+**Gejala:** menjalankan `run /initrd/bin/fault` setelah `cat` memancarkan
+12289 byte `\x00` ke serial (marker debugcon `N` = 12289 =
+`3×4096 + 1`); `cat` tanpa argumen + fault → 4095 = `4096 − 1`. `echo`/`hello`
+sendiri aman. Program `fault` tampak jalan garbage (tanpa page-fault di VA 0).
+
+**Diagnosis (instrumentasi debugcon, lalu dibersihkan):** `sys_read` benar
+mengembalikan `n=20` byte (marker `V`), tapi `sys_write` menerima `count=401408`
+(marker `Y`) = `0x62000` = **alamat user CR3**. `cat` melakukan `mov rdx, rax`
+setelah `sys_read`, lalu `write(1, buf, 0x62000)` → membuang ~401 KB frame
+zeroed ke serial.
+
+**Akar:** di `syscall_entry` (`crates/zenus-arch/src/cpu.rs`), `rax` (retval
+dari `call syscall_dispatch6`) ditimpa dua kali saat jalur keluar KPTI:
+`mov rax, gs:[0]` (user RSP) dipakai untuk `push`, lalu
+`mov rax, [rip + kpti_user_cr3_slot]` sebelum `mov cr3, rax` / `swapgs` /
+`iretq`. Jadi user never menerima retval syscall; register `rax` berisi user
+CR3. `cat` adalah yang pertama bergantung pada retval `read`, makanya hanya
+ia yang memperlihatkan kerusakan.
+
+**Perubahan:**
+- `cpu.rs`: setelah `call syscall_dispatch6`, simpan retval ke `rbx`
+  (`mov rbx, rax`); tepat sebelum `iretq`, kembalikan (`mov rax, rbx`).
+  `rbx` sudah dipilih karena dipakai untuk kernel CR3 di jalur masuk dan
+  disimpan/dipulihkan di frame — aman lintas syscall.
+- Semua marker debug sementara (`out 0xe9`: `N`/`M`/`S`/`L`/`P`/`V`/`H`/
+  `Z`/`K`/`6`/`7`/`B`/`w`/`m`/`F`/`k`/`s`/`C`/`Y`, plus
+  `outbuf_integrity_marker` dan pemanggilnya) dihapus dari `serial.rs`,
+  `fd.rs`, `syscall.rs`, `shell.rs`, `idt.rs`, `scheduler.rs`, `paging.rs`,
+  `spinlock.rs`, `lockdep.rs`. Guard korupsi `OUTPUT_BUF` di `flush_output`/
+  `flush_output_blocking` dipertahankan tanpa marker.
+- `idt.rs`: perbaiki struktur `if verdict != Panic { … }` pasca-penghapusan
+  marker `H`/`V` — blok `else` kosong dan `}` ekstra di akhir file dibuang,
+  sehingga dump page-fault kembali jadi fall-through (bukan cabang `else`).
+- `scheduler.rs:1874`: cast `current as u64` untuk `charge_cpu_for_task`
+  (bug tipe `u32` vs `u64` yang selama ini tertutup oleh error compile lebih
+  awal).
+
+**Test:** `cargo build --target x86_64-unknown-none` hijau; `make test-host`
+semua 0 failure; `make test` 27/27 OK (termasuk `kpti/*` yang nyata);
+`make iso` + QEMU serial TCP: `hello`, `echo`, `fault` (mati bersih SIGSEGV)
+normal, dan skenario pemicu `cat → fault` menghasilkan 0 byte null
+(`bytes=608`, `nulls=0`, `dbgcon=0`; bug lama >1.000.000 byte null).

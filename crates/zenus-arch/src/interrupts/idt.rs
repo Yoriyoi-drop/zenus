@@ -541,7 +541,7 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
         if let Some(kill) = faults::user_fault_handler() {
             kill(addr, frame.instruction_pointer.as_u64()); // never returns
         }
-    } else {
+    }
 
     let s = SerialPort::new(0x3F8);
 
@@ -917,11 +917,4 @@ fn kpanic(name: &str, frame: InterruptStackFrame) -> ! {
     loop {
         x86_64::instructions::hlt();
     }
-}
-
-
-
-
-
-
 }
