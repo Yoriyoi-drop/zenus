@@ -1326,6 +1326,226 @@ impl ZniFile {
     }
 }
 
+/// Magic number for a Zenus Native Firmware: bytes `5A 4E 46 57` = "ZNFW".
+pub const ZNF_MAGIC: u32 = 0x57_46_4E_5A; // little-endian "ZNFW"
+
+/// Current `.znf` format version.
+pub const ZNF_VERSION: u16 = 1;
+
+/// Type of device the firmware targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ZnfDeviceType {
+    Ssd = 0,
+    Gpu = 1,
+    Wifi = 2,
+    Bluetooth = 3,
+    Keyboard = 4,
+    Touchpad = 5,
+    Ec = 6,
+    Bios = 7,
+    Microcontroller = 8,
+    Fpga = 9,
+}
+
+impl ZnfDeviceType {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ZnfDeviceType::Ssd),
+            1 => Some(ZnfDeviceType::Gpu),
+            2 => Some(ZnfDeviceType::Wifi),
+            3 => Some(ZnfDeviceType::Bluetooth),
+            4 => Some(ZnfDeviceType::Keyboard),
+            5 => Some(ZnfDeviceType::Touchpad),
+            6 => Some(ZnfDeviceType::Ec),
+            7 => Some(ZnfDeviceType::Bios),
+            8 => Some(ZnfDeviceType::Microcontroller),
+            9 => Some(ZnfDeviceType::Fpga),
+            _ => None,
+        }
+    }
+}
+
+/// One device the firmware is compatible with (vendor + device ID).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZnfDeviceCompat {
+    pub vendor_id: u16,
+    pub device_id: u16,
+}
+
+/// Fixed-size firmware header after magic/version.
+#[derive(Debug, Clone)]
+pub struct ZnfFirmwareHeader {
+    pub version: u16,
+    pub device_type: ZnfDeviceType,
+    pub architecture: u16, // ARM / RISC-V / AEX-M / x86, etc.
+    pub image_size: u64,
+    pub device_count: u16,
+}
+
+/// A parsed `.znf` firmware image.
+#[derive(Debug, Clone)]
+pub struct ZnfFile {
+    pub header: ZnfFirmwareHeader,
+    pub devices: Vec<ZnfDeviceCompat>,
+    pub bootloader: Vec<u8>,
+    pub firmware_code: Vec<u8>,
+    pub configuration: Vec<u8>,
+    pub calibration: Vec<u8>,
+    pub recovery: Vec<u8>,
+    pub update_script: Vec<u8>,
+    pub checksum: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub raw: Vec<u8>,
+}
+
+/// Errors while parsing or validating a `.znf` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZnfError {
+    TooSmall,
+    BadMagic { found: u32 },
+    BadVersion { found: u16 },
+    Truncated,
+    InvalidUtf8,
+    UnsupportedArch(u16),
+    InvalidDeviceType(u8),
+    BlobOutOfBounds,
+}
+
+impl fmt::Display for ZnfError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZnfError::TooSmall => write!(f, "znf: file too small to contain a header"),
+            ZnfError::BadMagic { found } => {
+                write!(f, "znf: invalid magic number 0x{:08X}, expected 0x{:08X} (\"ZNFW\")", found, ZNF_MAGIC)
+            }
+            ZnfError::BadVersion { found } => {
+                write!(f, "znf: unsupported format version {}, expected {}", found, ZNF_VERSION)
+            }
+            ZnfError::Truncated => write!(f, "znf: file truncated while reading tables"),
+            ZnfError::InvalidUtf8 => write!(f, "znf: metadata or script is not valid UTF-8"),
+            ZnfError::UnsupportedArch(a) => write!(f, "znf: unsupported architecture {}", a),
+            ZnfError::InvalidDeviceType(t) => write!(f, "znf: invalid device type {}", t),
+            ZnfError::BlobOutOfBounds => write!(f, "znf: blob extends past end of firmware image"),
+        }
+    }
+}
+
+impl ZnfFile {
+    /// Parse a `.znf` image from a byte buffer. Pure, host-testable parser:
+    /// validates magic/version, reads the fixed header, then the device
+    /// compatibility table (each: u16 vendor + u16 device), followed by the
+    /// bootloader, firmware code, configuration, calibration, recovery,
+    /// update script, checksum, and signature blobs.
+    pub fn parse(data: &[u8]) -> Result<Self, ZnfError> {
+        if data.len() < 8 {
+            return Err(ZnfError::TooSmall);
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != ZNF_MAGIC {
+            return Err(ZnfError::BadMagic { found: magic });
+        }
+
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != ZNF_VERSION {
+            return Err(ZnfError::BadVersion { found: version });
+        }
+
+        if data.len() < 22 {
+            return Err(ZnfError::TooSmall);
+        }
+
+        let hdr_version = u16::from_le_bytes(data[6..8].try_into().unwrap());
+        let device_type_raw = data[8];
+        let device_type = ZnfDeviceType::from_u8(device_type_raw)
+            .ok_or(ZnfError::InvalidDeviceType(device_type_raw))?;
+        let architecture = u16::from_le_bytes(data[9..11].try_into().unwrap());
+        let image_size = u64::from_le_bytes(data[11..19].try_into().unwrap());
+        let device_count = u16::from_le_bytes(data[19..21].try_into().unwrap());
+
+        let header = ZnfFirmwareHeader {
+            version: hdr_version,
+            device_type,
+            architecture,
+            image_size,
+            device_count,
+        };
+
+        let mut off = 21usize;
+        let mut devices = Vec::with_capacity(device_count as usize);
+        for _ in 0..device_count as usize {
+            if off + 4 > data.len() {
+                return Err(ZnfError::Truncated);
+            }
+            let vendor_id = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
+            let device_id = u16::from_le_bytes(data[off + 2..off + 4].try_into().unwrap());
+            off += 4;
+            devices.push(ZnfDeviceCompat { vendor_id, device_id });
+        }
+
+        let blob = |off: u64, size: u64| -> Result<Vec<u8>, ZnfError> {
+            let o = off as usize;
+            let s = size as usize;
+            if o + s > data.len() {
+                return Err(ZnfError::BlobOutOfBounds);
+            }
+            Ok(Vec::from(&data[o..o + s]))
+        };
+
+        // Each blob header: u64 offset + u64 size.
+        let read_blob_ptr = |off: &mut usize| -> Result<(u64, u64), ZnfError> {
+            if *off + 16 > data.len() {
+                return Err(ZnfError::Truncated);
+            }
+            let boff = u64::from_le_bytes(data[*off..*off + 8].try_into().unwrap());
+            let bsize = u64::from_le_bytes(data[*off + 8..*off + 16].try_into().unwrap());
+            *off += 16;
+            Ok((boff, bsize))
+        };
+
+        let (boot_off, boot_size) = read_blob_ptr(&mut off)?;
+        let (code_off, code_size) = read_blob_ptr(&mut off)?;
+        let (config_off, config_size) = read_blob_ptr(&mut off)?;
+        let (cal_off, cal_size) = read_blob_ptr(&mut off)?;
+        let (rec_off, rec_size) = read_blob_ptr(&mut off)?;
+        let (script_off, script_size) = read_blob_ptr(&mut off)?;
+        let (checksum_off, checksum_size) = read_blob_ptr(&mut off)?;
+        let (sig_off, sig_size) = read_blob_ptr(&mut off)?;
+
+        let bootloader = blob(boot_off, boot_size)?;
+        let firmware_code = blob(code_off, code_size)?;
+        let configuration = blob(config_off, config_size)?;
+        let calibration = blob(cal_off, cal_size)?;
+        let recovery = blob(rec_off, rec_size)?;
+        let update_script = blob(script_off, script_size)?;
+        let checksum = blob(checksum_off, checksum_size)?;
+        let signature = blob(sig_off, sig_size)?;
+
+        Ok(ZnfFile {
+            header,
+            devices,
+            bootloader,
+            firmware_code,
+            configuration,
+            calibration,
+            recovery,
+            update_script,
+            checksum,
+            signature,
+            raw: Vec::from(data),
+        })
+    }
+
+    /// Return true if the firmware claims compatibility with the given
+    /// vendor/device ID.
+    pub fn matches_device(&self, vendor_id: u16, device_id: u16) -> bool {
+        self.devices
+            .iter()
+            .any(|d| d.vendor_id == vendor_id && d.device_id == device_id)
+    }
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
@@ -1939,6 +2159,143 @@ mod host_tests {
         match ZniFile::parse(&img) {
             Err(ZniError::PartitionOutOfBounds) => {}
             other => panic!("expected PartitionOutOfBounds, got {:?}", other),
+        }
+    }
+
+    fn make_valid_znf() -> Vec<u8> {
+        // Layout: header(21) + device table + 8 blob pointers(16 each) + blobs.
+        let bootloader = b"FW_BOOTLOADER";
+        let firmware_code = b"FW_MAIN_CODE";
+        let configuration = b"CFG";
+        let calibration = b"CAL";
+        let recovery = b"RECOVERY";
+        let update_script = b"verify; flash; reboot";
+        let checksum = b"CHKSUM";
+        let signature = b"SIG";
+
+        let device_count = 2u16;
+        // device table: vendor_id(2) + device_id(2) = 4 per device
+        let device_table_size = 4 * device_count as usize;
+        let ptr_offset = 21 + device_table_size;
+        // 8 blob pointers * 16 bytes each = 128
+        let blob_ptr_size = 8 * 16;
+        let blobs_start = ptr_offset + blob_ptr_size;
+
+        // lay out blobs sequentially
+        let boot_off = blobs_start as u64;
+        let code_off = boot_off + bootloader.len() as u64;
+        let config_off = code_off + firmware_code.len() as u64;
+        let cal_off = config_off + configuration.len() as u64;
+        let rec_off = cal_off + calibration.len() as u64;
+        let script_off = rec_off + recovery.len() as u64;
+        let checksum_off = script_off + update_script.len() as u64;
+        let sig_off = checksum_off + checksum.len() as u64;
+        let total = sig_off + signature.len() as u64;
+
+        let mut buf = Vec::with_capacity(total as usize);
+        buf.extend_from_slice(&ZNF_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&ZNF_VERSION.to_le_bytes());
+        // header: hdr_version, device_type(Ssd), architecture(x86), image_size, device_count
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.push(ZnfDeviceType::Ssd as u8);
+        buf.extend_from_slice(&0u16.to_le_bytes()); // architecture x86 placeholder
+        buf.extend_from_slice(&(firmware_code.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&device_count.to_le_bytes());
+        // device table
+        buf.extend_from_slice(&0x8086u16.to_le_bytes());
+        buf.extend_from_slice(&0x1234u16.to_le_bytes());
+        buf.extend_from_slice(&0x10DEu16.to_le_bytes());
+        buf.extend_from_slice(&0x2684u16.to_le_bytes());
+        // 8 blob pointers: offset(8) + size(8) each
+        for (boff, bsize) in [
+            (boot_off, bootloader.len() as u64),
+            (code_off, firmware_code.len() as u64),
+            (config_off, configuration.len() as u64),
+            (cal_off, calibration.len() as u64),
+            (rec_off, recovery.len() as u64),
+            (script_off, update_script.len() as u64),
+            (checksum_off, checksum.len() as u64),
+            (sig_off, signature.len() as u64),
+        ] {
+            buf.extend_from_slice(&boff.to_le_bytes());
+            buf.extend_from_slice(&bsize.to_le_bytes());
+        }
+        // blobs
+        buf.extend_from_slice(bootloader);
+        buf.extend_from_slice(firmware_code);
+        buf.extend_from_slice(configuration);
+        buf.extend_from_slice(calibration);
+        buf.extend_from_slice(recovery);
+        buf.extend_from_slice(update_script);
+        buf.extend_from_slice(checksum);
+        buf.extend_from_slice(signature);
+        assert_eq!(buf.len(), total as usize);
+        buf
+    }
+
+    #[test]
+    fn znf_parses_valid_firmware() {
+        let img = make_valid_znf();
+        let f = ZnfFile::parse(&img).expect("valid znf should parse");
+        assert_eq!(f.header.version, 1);
+        assert_eq!(f.header.device_type, ZnfDeviceType::Ssd);
+        assert_eq!(f.devices.len(), 2);
+        assert_eq!(f.devices[0], ZnfDeviceCompat { vendor_id: 0x8086, device_id: 0x1234 });
+        assert_eq!(f.devices[1], ZnfDeviceCompat { vendor_id: 0x10DE, device_id: 0x2684 });
+        assert_eq!(f.bootloader, b"FW_BOOTLOADER");
+        assert_eq!(f.firmware_code, b"FW_MAIN_CODE");
+        assert_eq!(f.configuration, b"CFG");
+        assert_eq!(f.calibration, b"CAL");
+        assert_eq!(f.recovery, b"RECOVERY");
+        assert_eq!(f.update_script, b"verify; flash; reboot");
+        assert_eq!(f.checksum, b"CHKSUM");
+        assert_eq!(f.signature, b"SIG");
+        assert!(f.matches_device(0x8086, 0x1234));
+        assert!(!f.matches_device(0xFFFF, 0xFFFF));
+    }
+
+    #[test]
+    fn znf_rejects_bad_magic() {
+        let mut img = make_valid_znf();
+        img[0] = 0x00;
+        match ZnfFile::parse(&img) {
+            Err(ZnfError::BadMagic { found }) => assert_ne!(found, ZNF_MAGIC),
+            other => panic!("expected BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znf_rejects_bad_version() {
+        let mut img = make_valid_znf();
+        img[4] = 9;
+        match ZnfFile::parse(&img) {
+            Err(ZnfError::BadVersion { found }) => assert_eq!(found, 9),
+            other => panic!("expected BadVersion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znf_rejects_invalid_device_type() {
+        let mut img = make_valid_znf();
+        // device type byte at offset 8
+        img[8] = 99;
+        match ZnfFile::parse(&img) {
+            Err(ZnfError::InvalidDeviceType(t)) => assert_eq!(t, 99),
+            other => panic!("expected InvalidDeviceType, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znf_rejects_blob_out_of_bounds() {
+        let mut img = make_valid_znf();
+        // corrupt the first blob's size to run past EOF
+        // blob pointers start at ptr_offset = 21 + 8 = 29; first pointer: offset(8) at 29, size(8) at 37
+        let size_offset = 29 + 8;
+        let size_bytes = u64::to_le_bytes(img.len() as u64 + 1000);
+        img[size_offset..size_offset + 8].copy_from_slice(&size_bytes);
+        match ZnfFile::parse(&img) {
+            Err(ZnfError::BlobOutOfBounds) => {}
+            other => panic!("expected BlobOutOfBounds, got {:?}", other),
         }
     }
 }

@@ -412,6 +412,23 @@ Dalam ekosistem Zenus, hubungan antar format dapat dirancang seperti ini:
 
 Dengan pembagian tanggung jawab yang jelas, setiap lapisan sistem memiliki format file khusus. Hal ini memudahkan pemeliharaan, meningkatkan keamanan, dan membuat Zenus OS memiliki identitas teknis yang konsisten dari aplikasi tingkat pengguna hingga firmware perangkat keras.
 
+---
+
+## Status implementasi
+
+Format `.znf` sudah diimplementasi sebagai **stak parser stub** di `crates/zenus-formats` (bersama `.zns`, `.znl`, `.znd`, `.znm`, `.znpkg`, dan `.zni`):
+
+- `ZNF_MAGIC = 0x57464E5A` ("ZNFW", little-endian), `ZNF_VERSION = 1`
+- `ZnfFirmwareHeader`: versi, tipe device (SSD/GPU/Wi-Fi/Bluetooth/keyboard/touchpad/EC/BIOS/mikrokontroler/FPGA), arsitektur, ukuran image, jumlah device
+- `ZnfDeviceCompat`: vendor_id + device_id untuk kompatibilitas perangkat
+- `ZnfFile`: bootloader, firmware code, konfigurasi, kalibrasi, recovery firmware, skrip pembaruan, checksum, dan signature
+- `ZnfFile::parse(data)`: parser murni (`no_std`, host-testable) yang memvalidasi magic/versi, lalu membaca header, tabel kompatibilitas device, dan 8 blob pointer + isi blob
+- `ZnfFile::matches_device(vendor, device)`: cek kompatibilitas firmware terhadap perangkat
+- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 35 tes (6 `.zns` + 5 `.znl` + 5 `.znd` + 4 `.znm` + 5 `.znpkg` + 5 `.zni` + 5 `.znf`), semua lulus (`cargo test -p zenus-formats`)
+- Bare-metal build: lolos `cargo build -p zenus-formats --target x86_64-unknown-none`
+
+Belum diimplementasi (jadwal berikutnya): verifikasi tanda tangan digital, anti-downgrade, backup firmware lama, rollback otomatis, dan dukungan TPM untuk bukti integritas.
+
 
 `.zna` adalah **Zenus Native Archive**, yaitu format arsip resmi Zenus OS. Jika `.znpkg` adalah paket instalasi yang memiliki logika pemasangan, maka `.zna` adalah wadah umum untuk menyimpan dan menggabungkan berbagai berkas menjadi satu file. Bayangkan seperti ZIP, TAR, atau 7Z, tetapi dirancang sejak awal untuk kebutuhan Zenus. Dunia memang sudah punya banyak format arsip, tetapi memiliki format internal yang terintegrasi memberi keuntungan dalam keamanan, metadata, dan performa.
 
