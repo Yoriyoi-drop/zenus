@@ -3,8 +3,8 @@
 # Boot the kernel under QEMU and fail unless it reaches the interactive shell.
 #
 # This is ROADMAP item 6: a smoke test that boots to the shell prompt and fails
-# the build if it does not. Everything else in the tree is unit-tested — 235 host
-# tests, 25 in QEMU — but before this nothing asserted the *normal* kernel boots
+# the build if it does not. Everything else in the tree is unit-tested — 393 host
+# tests, 27 in QEMU — but before this nothing asserted the *normal* kernel boots
 # at all. `make test` builds the `testing` kernel and runs the in-kernel suite;
 # the ordinary kernel, the one that ships in the ISO, had no one checking it.
 #

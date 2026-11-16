@@ -48,7 +48,7 @@ user/kernel transition), seccomp filter mode (`PR_SET_SECCOMP` with
 **Observability** — structured error-code catalog, dmesg ring, syslog, lockdep,
 watchdog, `zbench`/`zdiag`/`zdoctor`/`ztrace`.
 
-**Testing** — 294 host unit tests (`make test-host`), 27 in-kernel tests
+**Testing** — 393 host unit tests (`make test-host`), 27 in-kernel tests
 (`make test`), in-kernel fuzzing campaigns (`make fuzz-*`), a headless boot
 smoke test that requires the *ordinary* kernel to reach the shell prompt
 (`make smoke`), CI running all of them.
@@ -76,7 +76,7 @@ smoke test that requires the *ordinary* kernel to reach the shell prompt
   `syscall_dispatch6` (blocked syscalls return -EPERM). There is one set, not
   Linux's permitted/effective/inheritable split, and no `capset`-style way to
   add a capability back.
-- **Shell** — ~90 builtins, pipelines (`|`) between builtins (in-memory stage buffering), output redirection (`>`/`>>`) and input redirection (`<`) on any command or pipeline stage. No job control.
+- **Shell** — ~90 builtins, pipelines (`|`) between builtins (in-memory stage buffering), output redirection (`>`/`>>`) and input redirection (`<`) on any command or pipeline stage. `run … &` starts background tasks; `jobs` lists them and `wait [pid]` reaps a finished child (polling, with timeout — the kernel has no blocking wait). No `fg`/`bg` yet.
 
 ## Known broken
 
@@ -138,9 +138,9 @@ and zenus-fs does not depend on zenus-sched). The hierarchy is flat. Next:
    userspace programs are already loaded and run from the VFS/initrd via the
    shell `run <path> [&]` builtin (`cmd_run` → `load_elf`/`load_elf_raw`,
    with `&` for background execution). What is still missing: a full libc port
-   (printf, string, memory functions) and shell job control (foreground/background
-   management of those external tasks — `run … &` starts them but there is no
-   `jobs`/`fg`/`wait`). Shell pipelines (`|`) and redirection (`>`/`>>`/`<`)
+   (printf, string, memory functions) and full shell job control: `run … &`,
+   `jobs` and `wait [pid]` already exist, but there is no `fg`/`bg` to move a
+   task between foreground and background. Shell pipelines (`|`) and redirection (`>`/`>>`/`<`)
    between builtins now work: stages are buffered in memory, the final stage (or
    any single command) can write to a file via `>`/`>>` and read from a file via
    `<`, and stages that read stdin (`cat`, `grep`) consume the previous stage's

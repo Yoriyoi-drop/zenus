@@ -4153,3 +4153,29 @@ baris itu tidak ter-echo atau serial dibanjiri null. `boot-smoke.sh` tidak
 menangkap bug ini karena ia hanya menunggu prompt tanpa mengirim input. Dengan
 fix aktif: `[ABI-SMOKE] OK: 587 bytes, 0 nulls`; ambang 2 KB/50 null akan
 menangkap flood 401 KB dari BUG-083.
+
+## DOC-001 — penyelarasan dokumentasi dengan kode (2026-11-16)
+
+Audit lintas `README.md`, `SUMMARY.md`, `ROADMAP.md`, `SECURITY.md`,
+`CHANGELOG.md`, `CONTRIBUTING.md`, `AGENTS.md` dan `boot-smoke.sh` menemukan
+klaim lama yang sudah tidak sesuai kode. Tidak ada perubahan fungsional.
+
+**Diperbarui:**
+- Jumlah host test: 291/294/235 → **393** (hasil `make test-host` aktual);
+  in-kernel tetap 27. Angka crate ("11 crates") dihapus karena 58 workspace
+  package tidak semuanya punya host test.
+- KPTI: "not yet active" / "no KPTI" → **active for syscall isolation**
+  (BUG-082). Tetap dicatat: tidak ada secure boot/crypto.
+- `PR_SET_SECCOMP`: "`-EINVAL` / seccomp does not exist" → **filter mode
+  implemented** (256-bit allow-list di `syscall_dispatch6`).
+- cgroup: `pids`/`memory` → **`pids`/`memory`/`cpu` enforced**, `io` masih
+  belum (BUG-041 + perbaikan tipe `charge_cpu_for_task` di sesi ini).
+- Storage: "PIO-only / No DMA" → **PIO ATA + AHCI (DMA)**; NVMe/USB belum.
+- Angka Performance lama: heap 16MB→8 MiB, TCP 16→256, block cache 64→512
+  sectors 4-way.
+- Job control: "No job control / no `jobs`/`fg`/`wait`" → **`jobs` dan
+  `wait [pid]` ada** (`shell.rs:681`, `:682`), `fg`/`bg` belum.
+- `SUMMARY.md` snapshot 2026-10-04 → 2026-11-16.
+
+**Verifikasi:** grep lintas dokumen untuk pola usang (`no KPTI`, `-EINVAL`,
+`PIO-only`, `291`, `235 host`, `not yet active`, dll.) menghasilkan 0 match.

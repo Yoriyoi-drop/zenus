@@ -16,14 +16,15 @@ Zenus OS is a pre-alpha kernel project designed to teach modern kernel developme
 ## Project Status
 
 Pre-alpha. The previous number here (18.5 %) came with a claim that Phases 2
-and 3 were complete — including a capability system, KPTI and encryption, none
-of which exist. See `ROADMAP.md` for what is actually built.
+and 3 were complete — including a capability system, KPTI and encryption; at
+the time none existed, and encryption is still absent today. See `ROADMAP.md`
+for what is actually built.
 
 **Critical remaining work**, in order:
 - SMAP/SMEP: implemented and enabled at boot (DEVLOG BUG-033)
-- KPTI: stages 1-2 built and tested, not yet active (needs IDT entry stubs + scheduler activation, DEVLOG BUG-060/061)
-- Privilege model: one capability set per task exists (BUG-056); `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH` enforced (BUG-058); no way to gain a capability back yet
-- Container runtime: namespaces exist; cgroup `pids`/`memory` enforced (BUG-041), `cpu`/`io` advertised but unenforced, flat hierarchy
+- KPTI: active for syscall isolation (per-task user view, CR3 switching on user/kernel transitions, DEVLOG BUG-082); no secure boot
+- Privilege model: one capability set per task exists (BUG-056); `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH` enforced (BUG-058), seccomp filter mode works; no way to gain a capability back yet
+- Container runtime: namespaces exist; cgroup `pids`/`memory`/`cpu` enforced (BUG-041), `io` advertised but unenforced, flat hierarchy
 
 ## How to Contribute
 
@@ -78,7 +79,7 @@ Two layers, and they are not interchangeable:
   `Result<(), &'static str>`, registered in `apps/src/test_runner.rs`. The only
   way to test MMIO, the IDT and the APIC. 27 tests today.
 
-**Current coverage**: 291 host tests across 11 crates, 27 in-kernel tests.
+**Current coverage**: 393 host tests, 27 in-kernel tests.
 
 #### Writing Tests
 - Global kernel state is shared by every test in the process (block cache,

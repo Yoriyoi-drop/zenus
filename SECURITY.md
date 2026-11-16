@@ -73,9 +73,10 @@ than by the hardware:
   `kill` checks `CAP_KILL` before signalling another uid. File permission
   checks bypass on `CAP_DAC_OVERRIDE` (and reads on `CAP_DAC_READ_SEARCH`),
   not on `euid == 0`, so dropping the capability restricts file access.
-- `prctl` classifies every option: `PR_SET_SECCOMP` answers `-EINVAL` (seccomp
-  does not exist), `PR_SET_PDEATHSIG`/`PR_GET_PDEATHSIG` answer `-EINVAL` (no
-  parent-death signal is delivered), and unknown options fail too.
+- `prctl` classifies every option: `PR_SET_SECCOMP` installs a 256-bit syscall
+  allow-list (filter mode) that `syscall_dispatch6` enforces on every call,
+  `PR_SET_PDEATHSIG`/`PR_GET_PDEATHSIG` answer `-EINVAL` (no parent-death signal
+  is delivered), and unknown options fail too.
   `PR_SET_NO_NEW_PRIVS`/`PR_GET_NO_NEW_PRIVS` are honoured for real (the flag
   is stored and inherited by children). `PR_SET_NAME`/`PR_GET_NAME` work;
   `PR_SET_KEEPCAPS`/`PR_GET_KEEPCAPS` are accepted as no-ops because there is

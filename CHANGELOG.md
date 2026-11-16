@@ -164,11 +164,10 @@ First public release of Zenus OS. Pre-Alpha quality with core foundation complet
 - Syslog with 4096-entry buffer
 
 ### Known Issues
-- KPTI not yet active (stages 1-2 built and tested; IDT entry stubs + scheduler activation remain)
+- KPTI is active for syscall isolation; no secure boot and no cryptography
 - No way to gain a capability back (one per-task set; `PR_CAPBSET_DROP` only shrinks)
-- `PR_SET_SECCOMP` returns `-EINVAL` (no seccomp)
-- cgroup `cpu`/`io` advertised but unenforced; hierarchy flat
-- Storage PIO-only (no AHCI/NVMe/USB driver model)
+- cgroup `io` advertised but unenforced (`pids`/`memory`/`cpu` are enforced); hierarchy flat
+- Storage: PIO ATA and AHCI; no NVMe/USB driver model
 - No dynamic memory management (swap, OOM)
 - Shell runs in kernel space (security risk)
 - No overlayfs, no OCI container runtime
@@ -374,22 +373,22 @@ make test
 - **Serial**: Kernel messages through serial port
 
 ### Memory Usage
-- **Kernel Heap**: 16MB fixed size
+- **Kernel Heap**: 8 MiB static arena
 - **Tasks**: Max 128 concurrent tasks
-- **TCP Connections**: Max 16 connections
-- **Block Cache**: 32KB (64 entries × 512 bytes)
+- **TCP Connections**: 256
+- **Block Cache**: 512 sectors, 4-way associative, write-back
 
 ### Scalability Limitations
 - **Single Core**: Basic scheduler
 - **Multi-core**: Per-CPU data, no load balancing
-- **I/O**: PIO-only drivers
-- **Storage**: No DMA, poor throughput
+- **I/O**: PIO ATA and AHCI (DMA); no NVMe/USB driver model
+- **Storage**: AHCI has DMA; PIO ATA remains for compatibility
 
 ## Known Issues and Limitations
 
 ### Security
-- No user/kernel memory access controls (SMAP/SMEP)
-- No KPTI (Kernel Page Table Isolation)
+- SMAP/SMEP enabled at boot; no driver isolation
+- KPTI active for syscall isolation; no secure boot or cryptography
 - Shell runs in kernel space
 - Limited process isolation
 
@@ -413,11 +412,11 @@ make test
 Phase claims in older releases (100% Phase 1/2/3) are not accurate; `ROADMAP.md` lists what is built, partial, and missing. Open work, in order:
 
 - Close remaining parser holes (fuzz campaigns now trustworthy: `crashes=0`)
-- KPTI stages 3-4: 256 IDT entry stubs + scheduler activation (not yet active)
-- Driver model: AHCI first, so storage is not PIO-only
-- Capabilities: a way to *gain* a capability back (no `capset`/file capabilities yet); seccomp
-- cgroup `cpu`/`io` enforcement; non-flat hierarchy
-- Boot smoke test in CI (already added via `make smoke`)
+- Userspace: full libc (printf/string/memory) and `fg`/`bg` job control (`jobs`/`wait` already exist)
+- Capabilities: a way to *gain* a capability back (no `PR_CAPBSET_ADD`/file capabilities yet)
+- cgroup `io` enforcement and a non-flat hierarchy (`pids`/`memory`/`cpu` enforced)
+- Driver model: NVMe and USB after PIO ATA + AHCI
+- Boot smoke test in CI (`make smoke`, plus the BUG-083 ABI regression via `make abi-smoke`)
 
 ## Legal
 
