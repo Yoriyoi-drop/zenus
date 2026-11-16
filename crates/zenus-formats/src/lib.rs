@@ -445,6 +445,223 @@ impl ZnlFile {
     }
 }
 
+/// Magic number for a Zenus Native Driver: bytes `5A 4E 44 52` = "ZNDR".
+pub const ZND_MAGIC: u32 = 0x52_44_4E_5A; // little-endian "ZNDR"
+
+/// Current `.znd` format version.
+pub const ZND_VERSION: u16 = 1;
+
+/// Class of hardware the driver targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ZndDriverType {
+    Storage = 0,
+    Gpu = 1,
+    Usb = 2,
+    Audio = 3,
+    Ethernet = 4,
+    Wifi = 5,
+    Bluetooth = 6,
+    Camera = 7,
+    Touchscreen = 8,
+}
+
+impl ZndDriverType {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ZndDriverType::Storage),
+            1 => Some(ZndDriverType::Gpu),
+            2 => Some(ZndDriverType::Usb),
+            3 => Some(ZndDriverType::Audio),
+            4 => Some(ZndDriverType::Ethernet),
+            5 => Some(ZndDriverType::Wifi),
+            6 => Some(ZndDriverType::Bluetooth),
+            7 => Some(ZndDriverType::Camera),
+            8 => Some(ZndDriverType::Touchscreen),
+            _ => None,
+        }
+    }
+}
+
+/// Driver flags (boot, system, hotplug, secure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZndFlags {
+    pub boot: bool,
+    pub system: bool,
+    pub hotplug: bool,
+    pub secure: bool,
+}
+
+impl ZndFlags {
+    pub const NONE: Self = Self { boot: false, system: false, hotplug: false, secure: false };
+
+    pub fn bits(self) -> u8 {
+        let mut b = 0u8;
+        if self.boot { b |= 1; }
+        if self.system { b |= 2; }
+        if self.hotplug { b |= 4; }
+        if self.secure { b |= 8; }
+        b
+    }
+}
+
+/// One hardware ID the driver matches against (vendor + device).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZndHardwareId {
+    pub vendor_id: u16,
+    pub device_id: u16,
+}
+
+/// Fixed-size driver header after magic/version.
+#[derive(Debug, Clone)]
+pub struct ZndDriverHeader {
+    pub version: u16,
+    pub arch: ZnsArch,
+    pub driver_type: ZndDriverType,
+    pub build: ZnlBuild,
+    pub flags: ZndFlags,
+    pub hardware_id_count: u16,
+    pub capability_count: u16,
+}
+
+/// A parsed `.znd` driver.
+#[derive(Debug, Clone)]
+pub struct ZndFile {
+    pub header: ZndDriverHeader,
+    pub hardware_ids: Vec<ZndHardwareId>,
+    pub capabilities: Vec<String>,
+    pub raw: Vec<u8>,
+}
+
+/// Errors while parsing or validating a `.znd` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZndError {
+    TooSmall,
+    BadMagic { found: u32 },
+    BadVersion { found: u16 },
+    Truncated,
+    InvalidUtf8,
+    UnsupportedArch(u16),
+    InvalidDriverType(u8),
+    InvalidBuild(u8),
+}
+
+impl fmt::Display for ZndError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ZndError::TooSmall => write!(f, "znd: file too small to contain a header"),
+            ZndError::BadMagic { found } => {
+                write!(f, "znd: invalid magic number 0x{:08X}, expected 0x{:08X} (\"ZNDR\")", found, ZND_MAGIC)
+            }
+            ZndError::BadVersion { found } => {
+                write!(f, "znd: unsupported format version {}, expected {}", found, ZND_VERSION)
+            }
+            ZndError::Truncated => write!(f, "znd: file truncated while reading tables"),
+            ZndError::InvalidUtf8 => write!(f, "znd: capability string is not valid UTF-8"),
+            ZndError::UnsupportedArch(a) => write!(f, "znd: unsupported architecture {}", a),
+            ZndError::InvalidDriverType(t) => write!(f, "znd: invalid driver type {}", t),
+            ZndError::InvalidBuild(b) => write!(f, "znd: invalid build type {}", b),
+        }
+    }
+}
+
+impl ZndFile {
+    /// Parse a `.znd` image from a byte buffer. Pure, host-testable parser:
+    /// validates magic/version, reads the fixed header, then the hardware ID
+    /// table (each: u16 vendor + u16 device) and the capability table (each:
+    /// u16 length + UTF-8 bytes).
+    pub fn parse(data: &[u8]) -> Result<Self, ZndError> {
+        if data.len() < 8 {
+            return Err(ZndError::TooSmall);
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != ZND_MAGIC {
+            return Err(ZndError::BadMagic { found: magic });
+        }
+
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != ZND_VERSION {
+            return Err(ZndError::BadVersion { found: version });
+        }
+
+        if data.len() < 18 {
+            return Err(ZndError::TooSmall);
+        }
+
+        let hdr_version = u16::from_le_bytes(data[6..8].try_into().unwrap());
+        let arch_raw = u16::from_le_bytes(data[8..10].try_into().unwrap());
+        let arch = ZnsArch::from_u16(arch_raw).ok_or(ZndError::UnsupportedArch(arch_raw))?;
+        let driver_type_raw = data[10];
+        let driver_type = ZndDriverType::from_u8(driver_type_raw)
+            .ok_or(ZndError::InvalidDriverType(driver_type_raw))?;
+        let build_raw = data[11];
+        let build = ZnlBuild::from_u8(build_raw).ok_or(ZndError::InvalidBuild(build_raw))?;
+        let flags_raw = data[12];
+        let flags = ZndFlags {
+            boot: flags_raw & 1 != 0,
+            system: flags_raw & 2 != 0,
+            hotplug: flags_raw & 4 != 0,
+            secure: flags_raw & 8 != 0,
+        };
+        let hardware_id_count = u16::from_le_bytes(data[13..15].try_into().unwrap());
+        let capability_count = u16::from_le_bytes(data[15..17].try_into().unwrap());
+
+        let header = ZndDriverHeader {
+            version: hdr_version,
+            arch,
+            driver_type,
+            build,
+            flags,
+            hardware_id_count,
+            capability_count,
+        };
+
+        let mut off = 17usize;
+        let mut hardware_ids = Vec::with_capacity(hardware_id_count as usize);
+        for _ in 0..hardware_id_count as usize {
+            if off + 4 > data.len() {
+                return Err(ZndError::Truncated);
+            }
+            let vendor_id = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
+            let device_id = u16::from_le_bytes(data[off + 2..off + 4].try_into().unwrap());
+            off += 4;
+            hardware_ids.push(ZndHardwareId { vendor_id, device_id });
+        }
+
+        let mut capabilities = Vec::with_capacity(capability_count as usize);
+        for _ in 0..capability_count as usize {
+            if off + 2 > data.len() {
+                return Err(ZndError::Truncated);
+            }
+            let clen = u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+            off += 2;
+            if off + clen > data.len() {
+                return Err(ZndError::Truncated);
+            }
+            let cap = core::str::from_utf8(&data[off..off + clen])
+                .map_err(|_| ZndError::InvalidUtf8)?
+                .to_string();
+            off += clen;
+            capabilities.push(cap);
+        }
+
+        Ok(ZndFile {
+            header,
+            hardware_ids,
+            capabilities,
+            raw: Vec::from(data),
+        })
+    }
+
+    /// Return true if the driver claims to handle the given vendor/device ID.
+    pub fn matches_hardware(&self, vendor_id: u16, device_id: u16) -> bool {
+        self.hardware_ids
+            .iter()
+            .any(|id| id.vendor_id == vendor_id && id.device_id == device_id)
+    }
+}
+
 #[cfg(test)]
 mod host_tests {
     use super::*;
@@ -641,5 +858,96 @@ mod host_tests {
         let f = ZnlFile::parse(&img).unwrap();
         assert_eq!(f.export_address("libgraphics_draw"), Some(0x1000));
         assert_eq!(f.export_address("missing"), None);
+    }
+
+    fn make_valid_znd() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&ZND_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&ZND_VERSION.to_le_bytes());
+        // version, arch(Aex64), driver_type(Storage), build(Release),
+        // flags(boot|system), hardware_id_count=2, capability_count=2
+        buf.extend_from_slice(&3u16.to_le_bytes());
+        buf.extend_from_slice(&64u16.to_le_bytes());
+        buf.push(ZndDriverType::Storage as u8);
+        buf.push(ZnlBuild::Release as u8);
+        buf.push(ZndFlags { boot: true, system: true, hotplug: false, secure: false }.bits());
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        // hardware id 0: vendor 0x8086, device 0x1234
+        buf.extend_from_slice(&0x8086u16.to_le_bytes());
+        buf.extend_from_slice(&0x1234u16.to_le_bytes());
+        // hardware id 1: vendor 0x10DE, device 0x2684
+        buf.extend_from_slice(&0x10DEu16.to_le_bytes());
+        buf.extend_from_slice(&0x2684u16.to_le_bytes());
+        // capability 0: "DMA"
+        let cap0 = b"DMA";
+        buf.extend_from_slice(&(cap0.len() as u16).to_le_bytes());
+        buf.extend_from_slice(cap0);
+        // capability 1: "MSI-X"
+        let cap1 = b"MSI-X";
+        buf.extend_from_slice(&(cap1.len() as u16).to_le_bytes());
+        buf.extend_from_slice(cap1);
+        buf
+    }
+
+    #[test]
+    fn znd_parses_valid_driver() {
+        let img = make_valid_znd();
+        let f = ZndFile::parse(&img).expect("valid znd should parse");
+        assert_eq!(f.header.version, 3);
+        assert_eq!(f.header.arch, ZnsArch::Aex64);
+        assert_eq!(f.header.driver_type, ZndDriverType::Storage);
+        assert_eq!(f.header.build, ZnlBuild::Release);
+        assert!(f.header.flags.boot);
+        assert!(f.header.flags.system);
+        assert_eq!(f.hardware_ids.len(), 2);
+        assert_eq!(f.hardware_ids[0], ZndHardwareId { vendor_id: 0x8086, device_id: 0x1234 });
+        assert_eq!(f.hardware_ids[1], ZndHardwareId { vendor_id: 0x10DE, device_id: 0x2684 });
+        assert_eq!(f.capabilities.len(), 2);
+        assert_eq!(f.capabilities[0], "DMA");
+        assert_eq!(f.capabilities[1], "MSI-X");
+        assert!(f.matches_hardware(0x8086, 0x1234));
+        assert!(!f.matches_hardware(0xFFFF, 0xFFFF));
+    }
+
+    #[test]
+    fn znd_rejects_bad_magic() {
+        let mut img = make_valid_znd();
+        img[0] = 0x00;
+        match ZndFile::parse(&img) {
+            Err(ZndError::BadMagic { found }) => assert_ne!(found, ZND_MAGIC),
+            other => panic!("expected BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znd_rejects_bad_version() {
+        let mut img = make_valid_znd();
+        img[4] = 9;
+        match ZndFile::parse(&img) {
+            Err(ZndError::BadVersion { found }) => assert_eq!(found, 9),
+            other => panic!("expected BadVersion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znd_rejects_invalid_driver_type() {
+        let mut img = make_valid_znd();
+        img[10] = 99;
+        match ZndFile::parse(&img) {
+            Err(ZndError::InvalidDriverType(t)) => assert_eq!(t, 99),
+            other => panic!("expected InvalidDriverType, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn znd_rejects_truncated_hardware_id() {
+        let mut img = make_valid_znd();
+        // cut after reading one hardware id (17 + 4 = 21 bytes)
+        img.truncate(21);
+        match ZndFile::parse(&img) {
+            Err(ZndError::Truncated) => {}
+            other => panic!("expected Truncated, got {:?}", other),
+        }
     }
 }

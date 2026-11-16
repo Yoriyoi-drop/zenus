@@ -492,6 +492,22 @@ Zenus dapat menerapkan beberapa lapisan keamanan untuk `.znd`:
 
 Dengan rancangan seperti ini, `.znd` tidak hanya menjadi "file driver", tetapi sebuah format modular yang memungkinkan Zenus OS mengelola perangkat keras secara aman, efisien, dan mudah diperbarui. Desain ini juga memberi ruang untuk fitur modern seperti isolasi driver, hot-plug, dan dukungan perangkat generasi baru tanpa harus mengubah format dasarnya.
 
+---
+
+## Status implementasi
+
+Format `.znd` sudah diimplementasi sebagai **stak parser stub** di `crates/zenus-formats` (bersama `.zns` dan `.znl`):
+
+- `ZND_MAGIC = 0x52444E5A` ("ZNDR", little-endian), `ZND_VERSION = 1`
+- `ZndDriverHeader`: versi, arsitektur (AEX32/AEX64), tipe driver (storage/gpu/usb/.../touchscreen), build type, flags (boot/system/hotplug/secure), jumlah hardware ID dan capability
+- `ZndHardwareId`: vendor_id + device_id yang dicocokkan saat boot
+- `ZndFile::parse(data)`: parser murni (`no_std`, host-testable) yang memvalidasi magic/versi, lalu membaca tabel hardware ID dan capability
+- `ZndFile::matches_hardware(vendor, device)`: cek apakah driver menangani perangkat tertentu
+- Host tests: `crates/zenus-formats/src/lib.rs` (`host_tests`) — 16 tes (6 `.zns` + 5 `.znl` + 5 `.znd`), semua lulus (`cargo test -p zenus-formats`)
+- Bare-metal build: lolos `cargo build -p zenus-formats --target x86_64-unknown-none`
+
+Belum diimplementasi (jadwal berikutnya): tabel inisialisasi/handler interrupt, manajemen daya, konfigurasi DMA, verifikasi tanda tangan digital, dan pemuatan driver ke kernel.
+
 
 `.znm` berada satu tingkat lebih dekat ke inti sistem dibanding `.znd`. Kalau **`.znd`** berbicara dengan perangkat keras, maka **`.znm` (Zenus Native Module)** memperluas kemampuan **kernel** itu sendiri. Anggap saja seperti memasang organ baru ke tubuh yang masih hidup. Karena manusia tampaknya menyukai tantangan semacam itu.
 
