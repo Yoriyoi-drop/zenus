@@ -5,6 +5,7 @@
 //! Provides thin wrappers around Zenus syscalls so userspace programs can be
 //! written in Rust without making raw syscall instructions directly.
 
+pub mod string;
 
 // ── Syscall numbers
 

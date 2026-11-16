@@ -23,7 +23,7 @@ It is **pre-alpha**. The core is real; the security model is not finished.
 | Block cache | 512 sectors, 4-way, write-back |
 | Kernel heap | 8 MiB static arena |
 | Namespaces | 16 each: PID, UTS, mount, net, user, IPC |
-| Host unit tests | 393 |
+| Host unit tests | 399 |
 | In-kernel tests | 27 |
 | `unsafe` blocks | 465 in the kernel, 472 tree-wide, plus 11 `unsafe impl` |
 
@@ -44,7 +44,7 @@ It is **pre-alpha**. The core is real; the security model is not finished.
 ## Testing
 
 ```bash
-make test-host   # 393 host unit tests, no VM
+make test-host   # 399 host unit tests, no VM
 make test        # 27 in-kernel tests in QEMU
 make fuzz-smoke  # in-kernel fuzzing campaign
 ```
@@ -58,7 +58,8 @@ The in-kernel suite is for hardware paths.
   over them); `cpu`/`io` are advertised but not, and the hierarchy is flat.
 - `ZENUS_SSH/1.0`: not SSH.
 - `userspace/`: hand-built ring-3 programs. `zenus-libc` has syscall
-  wrappers and errno constants, but no printf/string/memory libc yet.
+  wrappers, errno constants and string/memory primitives (`memcpy`/`memmove`/
+  `memset`/`memcmp`/`strlen`/`strcmp`/`strncmp`), but no printf yet.
 - Storage: PIO ATA and AHCI; no NVMe.
 
 See `SECURITY.md` for the full picture and `ROADMAP.md` for what is planned.

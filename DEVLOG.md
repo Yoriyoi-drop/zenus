@@ -4179,3 +4179,22 @@ klaim lama yang sudah tidak sesuai kode. Tidak ada perubahan fungsional.
 
 **Verifikasi:** grep lintas dokumen untuk pola usang (`no KPTI`, `-EINVAL`,
 `PIO-only`, `291`, `235 host`, `not yet active`, dll.) menghasilkan 0 match.
+
+## FEAT-001 — primitive string/memory di zenus-libc
+
+Langkah pertama ROADMAP item 2 ("full libc port"): userspace kini punya
+primitif dasar tanpa harus menulis inline assembly.
+
+**Perubahan:**
+- `crates/zenus-libc/src/string.rs` (baru): `memcpy`, `memmove` (overlap-safe
+  via `core::ptr::copy`), `memset`, `memcmp`, `strlen`, `strcmp`, `strncmp`.
+  Semua `unsafe fn` dengan kontrak C — caller menjamin pointer valid dan
+  terminator NUL; kernel tidak memvalidasi pointer user.
+- `crates/zenus-libc/src/lib.rs`: `pub mod string;`.
+- 6 host test: panjang NUL, urutan `strcmp`/`strncmp` (termasuk prefix dan
+  berhenti di NUL), `memcpy`+`memcmp`, `memmove` overlap dua arah, dan `memset`
+  hanya pada rentang diminta (low byte dari `c`).
+
+**Status:** host test 8/8 untuk `zenus-libc` (total workspace 399),
+`cargo build --target x86_64-unknown-none` hijau. `printf` masih belum ada —
+itu langkah berikutnya.
